@@ -1,0 +1,62 @@
+﻿Aquí tienes el informe técnico completo y unificado, estructurado para que puedas copiarlo y pegarlo directamente en tu documento de texto o documentación del proyecto:
+======================================================================
+DOCUMENTO DE DISEÑO DE INTERFAZ (UI/UX) - BRANDING Y SISTEMA
+ * IDENTIFICACIÓN DE FUENTES (TIPOGRAFÍA)
+• Texto Principal ("CrediMed", "Créditos Personales", "Coronel Oviedo-Py"):
+ * Estilo: Sans-serif geométrica con bordes suavemente redondeados e inclinación dinámica.
+ * Fuentes recomendadas (Google Fonts / Licencia Libre):
+   * Comfortaa (Para terminaciones redondas suaves)
+   * Ubuntu (Para curvas modernas y estilizadas)
+   * Varela Round (Para legibilidad limpia y amigable)
+ * Uso en UI: Títulos principales, encabezados de módulos, tarjetas de resumen y elementos destacados.
+• Texto Secundario ("UME", "UME GROUP"):
+ * Estilo: Sans-serif recta, limpia, de corte corporativo y estructurada en mayúsculas (All-Caps).
+ * Fuentes recomendadas (Google Fonts / Licencia Libre):
+   * Inter (Altamente optimizada para pantallas y legibilidad de datos)
+   * Montserrat (Para un aspecto moderno y firme)
+   * Roboto (Opción estándar de alta legibilidad)
+ * Uso en UI: Cuerpos de texto, formularios, botones, encabezados de tablas y etiquetas.
+ * PALETA DE COLORES EXTRAÍDA
+• Azul Marino Corporativo
+ * HEX: #2B407B
+ * RGB: rgb(43, 64, 123)
+ * Rol UI: Color Primario (Navbar/Barra superior, botones principales, títulos de sección).
+• Verde Lima / Acento
+ * HEX: #8CC63F
+ * RGB: rgb(140, 198, 63)
+ * Rol UI: Color de Acento (Destacados, estados activos, elementos interactivos clave).
+• Verde Esmeralda / Medio
+ * HEX: #2E9344
+ * RGB: rgb(46, 147, 68)
+ * Rol UI: Color Semántico de Éxito (Mensajes de confirmación, badges de "Aprobado", saldos positivos).
+• Gris Medio / Neutro
+ * HEX: #808285
+ * RGB: rgb(128, 130, 133)
+ * Rol UI: Color Secundario (Bordes de contenedores, líneas divisorias, íconos inactivos).
+• Fondo Base (Off-White)
+ * HEX: #F8F9FA
+ * RGB: rgb(248, 249, 250)
+ * Rol UI: Fondo general del sistema (Disminuye el cansancio visual en comparación con el blanco puro).
+ * RECOMENDACIONES DE CONTRASTE Y ACCESIBILIDAD (WCAG)
+Para garantizar que la interfaz cumpla con las normas internacionales de accesibilidad (WCAG AA/AAA):
+• COMBINACIONES RECOMENDADAS (Alto Contraste):
+ * Texto Blanco (#FFFFFF) sobre Fondo Azul Marino (#2B407B)
+   * Contraste: ~8.5:1 (Cumple WCAG AAA)
+   * Aplicación: Botones primarios, encabezado del sistema, banners.
+ * Texto Azul Marino (#2B407B) sobre Fondo Gris Claro (#F8F9FA)
+   * Contraste: ~12.5:1 (Cumple WCAG AAA)
+   * Aplicación: Lectura principal de datos, tarjetas informativas, tablas.
+ * Texto Azul Marino (#2B407B) sobre Botón Verde Lima (#8CC63F)
+   * Contraste: ~5.2:1 (Cumple WCAG AA)
+   * Aplicación: Botones de Llamada a la Acción (CTA) destacados.
+ * Texto Verde Esmeralda (#2E9344) sobre Fondo Blanco (#FFFFFF)
+   * Contraste: ~4.6:1 (Cumple WCAG AA)
+   * Aplicación: Indicadores de estado exitoso, números de saldo a favor.
+• COMBINACIONES A EVITAR (Bajo Contraste):
+❌ NO usar Texto Verde Lima (#8CC63F) sobre Fondo Blanco (#FFFFFF). El ratio es menor a 2:1 y resulta ilegible. Reservar el verde lima únicamente como color de fondo para botones con texto oscuro, o para detalles gráficos decorativos.
+ * ELEMENTOS GRÁFICOS Y COMPONENTES
+• Isotipo de Gráfico de Barras Ascendente:
+Utilizar como referencia estilística para la sección de reportes, estadísticas o gráficos dentro del dashboard del sistema.
+• Líneas Divisorias Finas (Gris #808285):
+Implementar para separar secciones en formularios o tarjetas (cards) sin saturar la vista.
+======================================================================

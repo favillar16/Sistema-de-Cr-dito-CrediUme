@@ -1,0 +1,262 @@
+syntax = "proto3";
+
+package loans;
+
+import "google/protobuf/timestamp.proto";
+
+service LoanService {
+    // Solicitud de un nuevo préstamo
+    rpc CreateLoan (CreateLoanRequest) returns (CreateLoanResponse);
+
+    // Edición de la propuesta (monto, cuotas, primer vencimiento) mientras el
+    // préstamo esté PENDING -- BR-LOAN-004
+    rpc UpdateLoanProposal (UpdateLoanProposalRequest) returns (UpdateLoanProposalResponse);
+
+    // Edición de la garantía de respaldo mientras el préstamo esté PENDING -- BR-LOAN-005
+    rpc UpdateLoanGuarantee (UpdateLoanGuaranteeRequest) returns (UpdateLoanGuaranteeResponse);
+
+    // Edición de cargos/seguros mientras el préstamo esté PENDING -- BR-LOAN-006
+    rpc UpdateLoanCharges (UpdateLoanChargesRequest) returns (UpdateLoanChargesResponse);
+
+    // Obtener el detalle de un préstamo
+    rpc GetLoanById (GetLoanByIdRequest) returns (GetLoanByIdResponse);
+
+    // Listar los préstamos de un cliente
+    rpc ListClientLoans (ListClientLoansRequest) returns (ListClientLoansResponse);
+
+    // Listar todos los préstamos ACTIVE de todos los clientes (vista
+    // consolidada de cartera activa, no filtrada por cliente)
+    rpc ListActiveLoans (ListActiveLoansRequest) returns (ListActiveLoansResponse);
+
+    // Aprobación de un préstamo pendiente (Analista de Crédito o superior)
+    rpc ApproveLoan (ApproveLoanRequest) returns (ApproveLoanResponse);
+
+    // Desembolso de un préstamo aprobado -- Aprobado -> Activo (Gerente o superior)
+    rpc DisburseLoan (DisburseLoanRequest) returns (DisburseLoanResponse);
+
+    // Registro de un pago de cuota
+    rpc RecordPayment (RecordPaymentRequest) returns (RecordPaymentResponse);
+
+    // Marca un préstamo activo como incumplido (Analista de Crédito o superior)
+    rpc MarkDefaulted (MarkDefaultedRequest) returns (MarkDefaultedResponse);
+
+    // Plan de amortización calculado bajo demanda (no persistido)
+    rpc GetAmortizationSchedule (GetAmortizationScheduleRequest) returns (GetAmortizationScheduleResponse);
+
+    // Ajuste manual del monto de una cuota puntual de un préstamo ACTIVE
+    // (Agente de Créditos o Administrador) -- no afecta la última cuota, que
+    // siempre salda el remanente exacto.
+    rpc UpdateInstallmentAmount (UpdateInstallmentAmountRequest) returns (UpdateInstallmentAmountResponse);
+}
+
+message CreateLoanRequest {
+    string client_id = 1;
+    string principal_amount = 2; // Decimal como string, ej. "15000.00"
+    string interest_rate = 3;    // Tasa nominal anual como string, ej. "0.24" = 24%/año
+    int32 term_months = 4;
+}
+
+message CreateLoanResponse {
+    string loan_id = 1;
+    string status = 2; // "PENDING"
+    google.protobuf.Timestamp created_at = 3;
+}
+
+message UpdateLoanProposalRequest {
+    string loan_id = 1;
+    string principal_amount = 2; // Decimal como string, ej. "15000.00"
+    int32 term_months = 3;
+    string first_due_date = 4; // Formato YYYY-MM-DD
+}
+
+message UpdateLoanProposalResponse {
+    bool success = 1;
+    string status = 2; // "PENDING" (sin cambios)
+}
+
+message UpdateLoanGuaranteeRequest {
+    string loan_id = 1;
+    string guarantee_type = 2; // Ej. "SOLA FIRMA". Vacío junto con el monto = sin garantía.
+    string guarantee_amount = 3; // Decimal como string. Obligatorio si guarantee_type no está vacío.
+}
+
+message UpdateLoanGuaranteeResponse {
+    bool success = 1;
+    string status = 2; // "PENDING" (sin cambios)
+}
+
+message UpdateLoanChargesRequest {
+    string loan_id = 1;
+    string charge_interest_tax = 2; // Vacío = no aplica
+    string charge_admin_fee = 3;
+    string charge_cancellation_insurance = 4;
+    string charge_contracted_insurance = 5;
+}
+
+message UpdateLoanChargesResponse {
+    bool success = 1;
+    string status = 2; // "PENDING" (sin cambios)
+    string total_charges = 3;
+}
+
+message GetLoanByIdRequest {
+    string loan_id = 1;
+}
+
+message GetLoanByIdResponse {
+    string id = 1;
+    string client_id = 2;
+    string principal_amount = 3;
+    string interest_rate = 4;
+    int32 term_months = 5;
+    string status = 6; // PENDING, APPROVED, ACTIVE, PAID, DEFAULTED, EXPIRED
+    google.protobuf.Timestamp created_at = 7;
+    google.protobuf.Timestamp approved_at = 8; // No fijado si nunca fue aprobado
+    string total_paid = 9;
+    string remaining_balance = 10;
+    string first_due_date = 11; // Formato YYYY-MM-DD
+    string guarantee_type = 12; // "" si no hay garantía (BR-LOAN-005)
+    string guarantee_amount = 13; // "" si no hay garantía
+    string charge_interest_tax = 14; // "" si no aplica (BR-LOAN-006)
+    string charge_admin_fee = 15;
+    string charge_cancellation_insurance = 16;
+    string charge_contracted_insurance = 17;
+    string total_charges = 18; // Suma de los 4 cargos, informativo
+    string total_credit_with_charges = 19; // total_paid + remaining_balance + total_charges
+    // Estado de cuotas -- BR-LOAN-009. Solo tiene sentido para préstamos
+    // ACTIVE (compara lo que debería estar pagado a hoy según los
+    // vencimientos del cronograma contra lo realmente pagado); "" para el
+    // resto de los estados, que no tienen cuotas corriendo. Valores:
+    // "AL_DIA" | "CUOTA_VENCIDA".
+    string payment_status = 20;
+    string overdue_amount = 21; // "0.00" si no hay cuotas vencidas
+    int32 overdue_installments_count = 22;
+    // Nombre de usuario de quien registró la solicitud (CreateLoan) --
+    // puramente informativo, se muestra como "asesor" en el cronograma de
+    // pago entregado al cliente. "" si no se conoce (préstamos anteriores a
+    // este campo, o creados sin un actor autenticado).
+    string created_by_username = 23;
+}
+
+message ListClientLoansRequest {
+    string client_id = 1;
+}
+
+message ListClientLoansResponse {
+    repeated GetLoanByIdResponse loans = 1;
+}
+
+message ListActiveLoansRequest {
+}
+
+// Versión resumida de un préstamo para la vista consolidada de cartera
+// activa -- incluye el nombre del cliente (GetLoanByIdResponse no lo trae,
+// solo client_id) para no forzar N+1 llamadas a ClientService por fila.
+message ActiveLoanSummary {
+    string id = 1;
+    string client_id = 2;
+    string client_name = 3;
+    string principal_amount = 4;
+    string interest_rate = 5;
+    int32 term_months = 6;
+    string remaining_balance = 7;
+    string payment_status = 8; // "AL_DIA" | "CUOTA_VENCIDA" -- ver BR-LOAN-009
+    string overdue_amount = 9;
+    int32 overdue_installments_count = 10;
+    string first_due_date = 11;
+}
+
+message ListActiveLoansResponse {
+    repeated ActiveLoanSummary loans = 1;
+}
+
+message ApproveLoanRequest {
+    string loan_id = 1;
+}
+
+message ApproveLoanResponse {
+    bool success = 1;
+    string status = 2;
+    google.protobuf.Timestamp approved_at = 3;
+}
+
+message DisburseLoanRequest {
+    string loan_id = 1;
+}
+
+message DisburseLoanResponse {
+    bool success = 1;
+    string status = 2;
+}
+
+message RecordPaymentRequest {
+    string loan_id = 1;
+    // Decimal como string -- ignorado si installment_number > 0 (ver abajo).
+    string amount = 2;
+    // Código o número de transferencia bancaria / descuento directo -- el cobro
+    // ya no se realiza en efectivo (rol CASHIER fuera de uso), así que esta
+    // referencia es obligatoria para trazabilidad.
+    string transfer_reference = 3;
+    // Cuota puntual que se está saldando -- BR-LOAN-010. Si se informa
+    // (>=1), el servidor recalcula el monto pendiente exacto de esa cuota
+    // por su cuenta (vía el mismo cronograma+FIFO de pagos que ya usa para
+    // BR-LOAN-009) e ignora `amount` -- así el monto registrado siempre es
+    // el fijo que corresponde a esa cuota, no un valor arbitrario que
+    // decida el cliente. 0 = modo libre (usa `amount` tal cual, para
+    // compatibilidad con pagos que no corresponden a una cuota puntual).
+    int32 installment_number = 4;
+}
+
+message RecordPaymentResponse {
+    bool success = 1;
+    string status = 2; // ACTIVE o PAID después de este pago
+    string total_paid = 3;
+    string remaining_balance = 4;
+}
+
+message MarkDefaultedRequest {
+    string loan_id = 1;
+}
+
+message MarkDefaultedResponse {
+    bool success = 1;
+    string status = 2;
+}
+
+message GetAmortizationScheduleRequest {
+    string loan_id = 1;
+}
+
+message AmortizationInstallment {
+    int32 installment_number = 1; // 1-based
+    int32 month_offset = 2;       // Meses desde la creación/aprobación (1..term_months)
+    string payment_amount = 3;
+    string principal_portion = 4;
+    string interest_portion = 5;
+    string remaining_balance = 6; // Saldo restante después de esta cuota (schedule puro)
+    string due_date = 7; // Formato YYYY-MM-DD (BR-LOAN-004)
+    bool is_adjusted = 8; // true si payment_amount fue fijado manualmente (UpdateInstallmentAmount)
+    // BR-LOAN-010: cuánto de esta cuota puntual sigue sin cubrirse, según el
+    // FIFO de pagos reales contra el cronograma completo (no solo las
+    // vencidas, a diferencia de payment_status/overdue_amount arriba).
+    // "0.00" si ya está totalmente cubierta.
+    string amount_due = 9;
+    bool is_paid = 10;
+}
+
+message GetAmortizationScheduleResponse {
+    repeated AmortizationInstallment installments = 1;
+    string total_paid = 2;
+    string remaining_balance = 3;
+}
+
+message UpdateInstallmentAmountRequest {
+    string loan_id = 1;
+    int32 installment_number = 2; // 1-based; la última cuota (== term_months) no es ajustable
+    string adjusted_amount = 3;   // Decimal como string, monto fijo para esa cuota
+}
+
+message UpdateInstallmentAmountResponse {
+    bool success = 1;
+    string status = 2; // Estado del préstamo (sin cambios, siempre ACTIVE)
+}

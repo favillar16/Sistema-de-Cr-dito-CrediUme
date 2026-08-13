@@ -1,0 +1,166 @@
+syntax = "proto3";
+
+package clients;
+
+import "google/protobuf/timestamp.proto";
+
+service ClientService {
+    // Registro de un nuevo cliente
+    rpc CreateClient (CreateClientRequest) returns (CreateClientResponse);
+
+    // Obtener perfil detallado
+    rpc GetClientById (GetClientByIdRequest) returns (GetClientByIdResponse);
+
+    // Búsqueda de clientes (Paginada)
+    rpc SearchClients (SearchClientsRequest) returns (SearchClientsResponse);
+
+    // Actualización de datos de contacto (y de ingresos declarados)
+    rpc UpdateClient (UpdateClientRequest) returns (UpdateClientResponse);
+
+    // Inhabilitación (soft delete) de un cliente -- BR-CLI-004 (Manager o superior)
+    rpc DeactivateClient (DeactivateClientRequest) returns (DeactivateClientResponse);
+
+    // Cambio del documento de identidad -- BR-CLI-003 (Solo Admin, auditado)
+    rpc UpdateNationalId (UpdateNationalIdRequest) returns (UpdateNationalIdResponse);
+}
+
+// Mensajes Principales
+message CreateClientRequest {
+    string first_name = 1;
+    string last_name = 2;
+    string national_id = 3;
+    string email = 4;
+    string phone_number = 5;
+    string date_of_birth = 6; // Formato YYYY-MM-DD
+    string address = 7;
+    // Ingreso mensual declarado, como string decimal (ej. "2500.00"). Opcional al
+    // registrar; requerido antes de poder crear un préstamo (BR-LOAN-002).
+    optional string declared_monthly_income = 8;
+    // Referencias personales y laboral -- obligatorias (BR-CLI-005).
+    string personal_reference_1_name = 9;
+    string personal_reference_1_relationship = 10;
+    string personal_reference_1_phone = 11;
+    string personal_reference_2_name = 12;
+    string personal_reference_2_relationship = 13;
+    string personal_reference_2_phone = 14;
+    string employment_reference_employer = 15;
+    string employment_reference_position = 16;
+    string employment_reference_phone = 17;
+    string employment_reference_seniority = 18; // Texto libre, ej. "3 años"
+    // Origen de fondos -- obligatorio (BR-CLI-006), ej. "Salario", "Negocio propio".
+    string source_of_funds = 19;
+    // Perfil extendido -- opcional (BR-CLI-007). "" = no informado.
+    string national_id_expiry_date = 20; // Formato YYYY-MM-DD
+    string marital_status = 21;
+    string education_level = 22;
+    string occupation = 23;
+    string neighborhood = 24;
+    string risk_rating = 25;
+    string economic_sector = 26;
+}
+
+message CreateClientResponse {
+    string client_id = 1; // UUID
+    google.protobuf.Timestamp created_at = 2;
+}
+
+message GetClientByIdRequest {
+    string client_id = 1;
+}
+
+message GetClientByIdResponse {
+    string id = 1;
+    string first_name = 2;
+    string last_name = 3;
+    string national_id = 4;
+    string email = 5;
+    string phone_number = 6;
+    bool is_active = 7;
+    google.protobuf.Timestamp created_at = 8;
+    string date_of_birth = 9; // Formato YYYY-MM-DD
+    string address = 10;
+    google.protobuf.Timestamp updated_at = 11;
+    string declared_monthly_income = 12; // Vacío si no fue declarado
+    string personal_reference_1_name = 13;
+    string personal_reference_1_relationship = 14;
+    string personal_reference_1_phone = 15;
+    string personal_reference_2_name = 16;
+    string personal_reference_2_relationship = 17;
+    string personal_reference_2_phone = 18;
+    string employment_reference_employer = 19;
+    string employment_reference_position = 20;
+    string employment_reference_phone = 21;
+    string employment_reference_seniority = 22;
+    string source_of_funds = 23;
+    string national_id_expiry_date = 24; // "" = no informado (BR-CLI-007)
+    string marital_status = 25;
+    string education_level = 26;
+    string occupation = 27;
+    string neighborhood = 28;
+    string risk_rating = 29;
+    string economic_sector = 30;
+}
+
+message SearchClientsRequest {
+    string search_term = 1; // Puede ser nombre, documento o teléfono
+    int32 page_size = 2;
+    int32 page_token = 3;
+}
+
+message SearchClientsResponse {
+    repeated GetClientByIdResponse clients = 1;
+    int32 next_page_token = 2;
+}
+
+message UpdateClientRequest {
+    string client_id = 1;
+    string email = 2;
+    string phone_number = 3;
+    string address = 4;
+    optional string declared_monthly_income = 5;
+    // Referencias personales y laboral -- obligatorias (BR-CLI-005).
+    string personal_reference_1_name = 6;
+    string personal_reference_1_relationship = 7;
+    string personal_reference_1_phone = 8;
+    string personal_reference_2_name = 9;
+    string personal_reference_2_relationship = 10;
+    string personal_reference_2_phone = 11;
+    string employment_reference_employer = 12;
+    string employment_reference_position = 13;
+    string employment_reference_phone = 14;
+    string employment_reference_seniority = 15;
+    // Origen de fondos -- obligatorio (BR-CLI-006), ej. "Salario", "Negocio propio".
+    string source_of_funds = 16;
+    // Perfil extendido -- opcional (BR-CLI-007). "" = no informado.
+    string national_id_expiry_date = 17; // Formato YYYY-MM-DD
+    string marital_status = 18;
+    string education_level = 19;
+    string occupation = 20;
+    string neighborhood = 21;
+    string risk_rating = 22;
+    string economic_sector = 23;
+}
+
+message UpdateClientResponse {
+    bool success = 1;
+    google.protobuf.Timestamp updated_at = 2;
+}
+
+message DeactivateClientRequest {
+    string client_id = 1;
+}
+
+message DeactivateClientResponse {
+    bool success = 1;
+    google.protobuf.Timestamp updated_at = 2;
+}
+
+message UpdateNationalIdRequest {
+    string client_id = 1;
+    string new_national_id = 2;
+}
+
+message UpdateNationalIdResponse {
+    bool success = 1;
+    google.protobuf.Timestamp updated_at = 2;
+}

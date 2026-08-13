@@ -1,0 +1,41 @@
+# Módulo: Gestión de Clientes (Clients & KYC)
+
+## 1. Resumen
+Este módulo es responsable de la gestión de la identidad de los solicitantes de crédito. Implementa los lineamientos de "Conoce a tu Cliente" (KYC), asegurando que los datos personales estén validados, sean únicos y estén actualizados para la correcta evaluación crediticia.
+
+## 2. Reglas de Negocio
+*   **BR-CLI-001 (Unicidad):** El documento de identidad (`national_id`) y el correo electrónico (`email`) deben ser estrictamente únicos en todo el sistema.
+*   **BR-CLI-002 (Mayoría de Edad):** El cliente debe ser mayor de 18 años al momento del registro.
+*   **BR-CLI-003 (Inmutabilidad de Identidad):** Una vez registrado, el documento de identidad (`national_id`) no puede ser modificado por un usuario normal; requiere un rol de Administrador y genera un registro de auditoría.
+*   **BR-CLI-004 (Historial):** No se pueden eliminar clientes (Soft Delete o inhabilitación temporal únicamente) si tienen préstamos vinculados en cualquier estado que no sea "PAID" (Pagado).
+*   **BR-CLI-005 (Referencias obligatorias):** Todo cliente debe registrar dos referencias personales (nombre, parentesco/relación, teléfono) y una referencia laboral (empleador, cargo, teléfono, antigüedad) al momento del alta; son editables luego vía `UpdateClient`, pero nunca pueden quedar vacías.
+*   **BR-CLI-006 (Origen de fondos obligatorio):** Todo cliente debe registrar el origen de sus fondos (texto libre, ej. "Salario", "Negocio propio") al momento del alta; es editable luego vía `UpdateClient`, pero nunca puede quedar vacío.
+*   **BR-CLI-007 (Perfil extendido, opcional):** Un cliente puede registrar datos adicionales de perfil -- vencimiento de cédula, estado civil, nivel de estudios, ocupación, barrio, calificación de riesgo y sector económico -- al momento del alta o luego vía `UpdateClient`. A diferencia de BR-CLI-005/006, ninguno de estos campos es obligatorio.
+
+## 3. Modelo de Datos (PostgreSQL)
+**Tabla: `clients`**
+*   `id` (UUID, PK)
+*   `first_name` (VARCHAR)
+*   `last_name` (VARCHAR)
+*   `national_id` (VARCHAR, UNIQUE) - Documento Nacional de Identidad
+*   `date_of_birth` (DATE)
+*   `email` (VARCHAR, UNIQUE)
+*   `phone_number` (VARCHAR)
+*   `address` (TEXT)
+*   `is_active` (BOOLEAN) - Para soft deletes
+*   `personal_reference_1_name`, `personal_reference_1_relationship`, `personal_reference_1_phone` (VARCHAR) - Referencia personal 1 (BR-CLI-005)
+*   `personal_reference_2_name`, `personal_reference_2_relationship`, `personal_reference_2_phone` (VARCHAR) - Referencia personal 2 (BR-CLI-005)
+*   `employment_reference_employer`, `employment_reference_position`, `employment_reference_phone`, `employment_reference_seniority` (VARCHAR) - Referencia laboral (BR-CLI-005)
+*   `source_of_funds` (VARCHAR) - Origen de fondos (BR-CLI-006)
+*   `national_id_expiry_date` (DATE) - Vencimiento de cédula, opcional (BR-CLI-007)
+*   `marital_status`, `education_level`, `occupation` (VARCHAR) - Perfil extendido, opcional (BR-CLI-007)
+*   `neighborhood` (VARCHAR) - Barrio, opcional (BR-CLI-007)
+*   `risk_rating`, `economic_sector` (VARCHAR) - Perfil extendido, opcional (BR-CLI-007)
+*   `created_at` (Timestamp)
+*   `updated_at` (Timestamp)
+
+## 4. Contratos gRPC Relacionados (`protos/client_service.proto`)
+*   `CreateClientRequest` / `CreateClientResponse`: Registro de un nuevo cliente.
+*   `GetClientByIdRequest` / `GetClientByIdResponse`: Obtiene el perfil completo y estado del cliente.
+*   `SearchClientsRequest` / `SearchClientsResponse`: Búsqueda paginada por nombre, documento o teléfono.
+*   `UpdateClientRequest` / `UpdateClientResponse`: Actualización de datos de contacto.

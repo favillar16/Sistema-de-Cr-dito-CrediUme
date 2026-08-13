@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package dashboard;
+
+service DashboardService {
+    // Estadísticas agregadas de solo lectura para la pantalla de inicio.
+    rpc GetDashboardStats (GetDashboardStatsRequest) returns (GetDashboardStatsResponse);
+}
+
+message GetDashboardStatsRequest {
+}
+
+message GetDashboardStatsResponse {
+    int32 total_clients_count = 1;
+    int32 active_clients_count = 2;
+    int32 pending_loans_count = 3;    // PENDING -- esperando aprobación
+    int32 approved_loans_count = 4;   // APPROVED -- esperando desembolso
+    int32 active_loans_count = 5;     // ACTIVE
+    int32 paid_loans_count = 6;       // PAID
+    int32 defaulted_loans_count = 7;  // DEFAULTED
+    int32 expired_loans_count = 8;    // EXPIRED (BR-LOAN-003)
+    string total_disbursed = 9;            // Suma de capital de préstamos ACTIVE/PAID/DEFAULTED
+    string total_outstanding_balance = 10; // Suma del saldo restante de préstamos ACTIVE
+}

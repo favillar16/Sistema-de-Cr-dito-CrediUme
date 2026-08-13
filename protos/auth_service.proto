@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package auth;
+
+import "google/protobuf/timestamp.proto";
+
+service AuthService {
+    // Autenticación de operadores del sistema
+    rpc Login (LoginRequest) returns (LoginResponse);
+
+    // Cierre de sesión
+    rpc Logout (LogoutRequest) returns (LogoutResponse);
+
+    // Restablecimiento de contraseña (Solo Admin)
+    rpc ResetPassword (ResetPasswordRequest) returns (ResetPasswordResponse);
+
+    // Alta de un nuevo usuario operador (Solo Admin)
+    rpc CreateUser (CreateUserRequest) returns (CreateUserResponse);
+
+    // Listado de usuarios existentes, para la pantalla de administración (Solo Admin)
+    rpc ListUsers (ListUsersRequest) returns (ListUsersResponse);
+}
+
+message LoginRequest {
+    string username = 1; // Correo corporativo o ID
+    string password = 2; // Contraseña en texto plano (el canal gRPC debe estar cifrado con TLS)
+}
+
+message LoginResponse {
+    string access_token = 1; // JWT Token
+    string role = 2; // CASHIER, CREDIT_ANALYST, MANAGER, ADMIN
+    int32 expires_in_seconds = 3;
+}
+
+message LogoutRequest {
+    string access_token = 1;
+}
+
+message LogoutResponse {
+    bool success = 1;
+}
+
+message ResetPasswordRequest {
+    string target_user_id = 1;
+    string new_password = 2;
+}
+
+message ResetPasswordResponse {
+    bool success = 1;
+}
+
+message CreateUserRequest {
+    string username = 1;
+    string password = 2;
+    string role = 3; // CASHIER, CREDIT_ANALYST, MANAGER, ADMIN
+}
+
+message CreateUserResponse {
+    string user_id = 1;
+    string username = 2;
+    string role = 3;
+}
+
+message ListUsersRequest {
+}
+
+message UserSummary {
+    string id = 1;
+    string username = 2;
+    string role = 3;
+    bool is_locked = 4;
+    google.protobuf.Timestamp last_login = 5; // Sin fijar si nunca inició sesión
+}
+
+message ListUsersResponse {
+    repeated UserSummary users = 1;
+}

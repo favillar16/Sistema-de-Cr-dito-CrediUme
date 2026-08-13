@@ -1,0 +1,32 @@
+# Secrets -- real values live in *.env, examples stay tracked
+*.env
+!*.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Generated loan documents (walkthrough/demo output, not source)
+contrato_*.pdf
+liquidacion_*.pdf
+pagare_*.pdf
+cronograma_*.pdf
+contrato_*.docx
+liquidacion_*.docx
+pagare_*.docx
+cronograma_*.docx
+
+# Editor/OS cruft
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Third-party reference documents with a real person's PII (name/national
+# ID/address/signature) and another institution's data -- kept locally only
+# as a structural reference for cas_client/documents.py, never published.
+docs/contrato.pdf
+docs/pagare credi ume.docx

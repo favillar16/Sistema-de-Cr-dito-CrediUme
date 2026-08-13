@@ -1,0 +1,40 @@
+# Módulo: Autenticación y Autorización (Auth & RBAC)
+
+## 1. Resumen
+Maneja el acceso seguro al sistema por parte de los operadores (cajeros, analistas, administradores). Implementa un sistema de Control de Acceso Basado en Roles (RBAC) y gestiona el ciclo de vida de las sesiones utilizando tokens (ej. JWT) transmitidos a través de los metadatos de gRPC.
+
+## 2. Reglas de Negocio
+*   **BR-AUTH-001 (Seguridad de Contraseñas):** Las contraseñas nunca deben almacenarse en texto plano; deben utilizar un algoritmo de hashing fuerte (ej. Argon2 o bcrypt) con salting.
+*   **BR-AUTH-002 (Bloqueo por Fuerza Bruta):** La cuenta de usuario se bloqueará temporalmente (15 minutos) después de 5 intentos fallidos de inicio de sesión consecutivos.
+*   **BR-AUTH-003 (Expiración de Sesión):** Los tokens de acceso tienen una vida útil máxima de 8 horas. No hay tokens de actualización (refresh tokens) activos prolongados por razones de seguridad interna; el usuario debe volver a iniciar sesión al día siguiente.
+*   **BR-AUTH-004 (Autorización):** Cada RPC en el servidor debe interceptar la petición y validar si el rol del usuario contenido en el token tiene los permisos necesarios para ejecutar la acción.
+*   **BR-AUTH-005 (Gestión de usuarios):** Solo el rol ADMIN puede crear operadores (`CreateUser`) o listarlos (`ListUsers`). No existe autorregistro: todo usuario del sistema es dado de alta por un Administrador.
+
+## 3. Modelo de Datos (PostgreSQL)
+**Tabla: `users` (Operadores del sistema)**
+*   `id` (UUID, PK)
+*   `username` (VARCHAR, UNIQUE) - Generalmente el correo corporativo o ID de empleado.
+*   `password_hash` (VARCHAR)
+*   `role` (Enum: CASHIER, CREDIT_ANALYST, MANAGER, ADMIN)
+*   `failed_login_attempts` (INTEGER)
+*   `is_locked` (BOOLEAN)
+*   `locked_until` (Timestamp, nullable) - Fin del bloqueo temporal de BR-AUTH-002; se limpia solo (lazy) al pasar la fecha, mismo patrón que BR-LOAN-003 en `specs/loans/README`.
+*   `last_login` (Timestamp)
+
+**Tabla: `audit_logs` (Trazabilidad)**
+*   `id` (UUID, PK)
+*   `user_id` (UUID, FK -> users.id)
+*   `action` (VARCHAR) - Ej. "LOGIN_SUCCESS", "LOAN_APPROVED".
+*   `ip_address` (VARCHAR)
+*   `timestamp` (Timestamp)
+
+**Tabla: `revoked_tokens` (Lista negra de tokens deslogueados)**
+*   `jti` (VARCHAR, PK) - Identificador único del JWT invalidado por `Logout`.
+*   `expires_at` (Timestamp) - Igual a la expiración original del token; permite purgar filas vencidas sin necesidad de mantenerlas indefinidamente.
+
+## 4. Contratos gRPC Relacionados (`protos/auth_service.proto`)
+*   `LoginRequest` (username, password) / `LoginResponse` (token, role, expires_in)
+*   `LogoutRequest` / `LogoutResponse` (Invalida el token en el servidor agregándolo a `revoked_tokens`)
+*   `ResetPasswordRequest` / `ResetPasswordResponse` (Exclusivo para ADMIN)
+*   `CreateUserRequest` / `CreateUserResponse` (Alta de un operador -- username, password, role; exclusivo ADMIN, BR-AUTH-005)
+*   `ListUsersRequest` / `ListUsersResponse` (Listado de operadores del sistema; exclusivo ADMIN, BR-AUTH-005)

@@ -1,0 +1,46 @@
+# Módulo: Gestión de Préstamos (Loans)
+
+## 1. Resumen
+Maneja el ciclo de vida completo de un préstamo: Solicitud, Aprobación, Desembolso, Amortización y Liquidación.
+
+## 2. Reglas de Negocio
+*   **BR-LOAN-001:** Un cliente no puede tener más de 3 préstamos activos simultáneamente.
+*   **BR-LOAN-002:** El monto de la cuota mensual no debe exceder el 40% de los ingresos declarados del cliente.
+*   **BR-LOAN-003:** Los préstamos en estado "Aprobado" que no sean desembolsados en 30 días pasan a "Caducado".
+*   **BR-LOAN-004 (Propuesta editable):** Mientras un préstamo esté en estado "Pendiente", su monto (`principal_amount`), número de cuotas (`term_months`) y fecha de primer vencimiento (`first_due_date`) pueden editarse vía `UpdateLoanProposal`, revalidando el tope del 40% de BR-LOAN-002 contra los nuevos términos. Una vez aprobado, los términos quedan fijos. `first_due_date` se calcula automáticamente al crear el préstamo (`created_at` + 30 días por defecto) y es editable junto con el resto de la propuesta.
+*   **BR-LOAN-005 (Garantía):** Un préstamo puede tener una garantía de respaldo opcional (`guarantee_type` + `guarantee_amount`, ej. "SOLA FIRMA"), editable vía `UpdateLoanGuarantee` mientras esté "Pendiente". Ambos campos se completan juntos o se dejan ambos vacíos (sin garantía).
+*   **BR-LOAN-006 (Cargos y seguros):** Un préstamo puede registrar hasta 4 cargos/seguros opcionales (impuesto al interés, gastos administrativos, seguro de cancelación de deuda, seguros contratados), editables vía `UpdateLoanCharges` mientras esté "Pendiente". Son puramente informativos: no afectan la cuota mensual, el tope de BR-LOAN-002, ni la lógica de cobro/pago -- solo se reflejan en un total de cargos y un total de crédito incluyendo cargos.
+*   **BR-LOAN-007 (Tasa fija estándar):** La tasa de interés estándar es 24% anual (`LOAN_FIXED_INTEREST_RATE`). Al crear un préstamo (`CreateLoan`), únicamente los roles Agente de Créditos (MANAGER) o Administrador (ADMIN) pueden fijar una tasa distinta a la estándar; los demás roles permitidos deben usar la tasa fija, o la solicitud es rechazada.
+*   **BR-LOAN-008 (Ajuste manual de cuota):** Mientras un préstamo esté ACTIVE, el monto de una cuota puntual (no la última, que siempre salda el remanente exacto) puede fijarse manualmente vía `UpdateInstallmentAmount` (Agente de Créditos o Administrador). El ajuste se guarda como una excepción (`loan_installment_adjustments`, una fila por cuota ajustada) que se aplica como override al recalcular el cronograma, no reemplaza el cronograma completo. Se valida que el monto ajustado siga cubriendo el interés de esa cuota y que ninguna cuota posterior quede con saldo negativo.
+*   **BR-LOAN-009 (Estado de mora):** Para préstamos ACTIVE, `payment_status` distingue "AL_DIA" de "CUOTA_VENCIDA" comparando, cuota por cuota, lo que ya venció (fecha de vencimiento <= hoy) contra lo efectivamente pagado (FIFO contra el cronograma completo) -- a diferencia de `remaining_balance`, que es el saldo total del préstamo sin importar si está vencido o no. Expone también el monto vencido y la cantidad de cuotas vencidas impagas.
+*   **BR-LOAN-010 (Pago dirigido a una cuota):** `RecordPayment` acepta un `installment_number` opcional; si se especifica, el servidor recalcula por su cuenta el monto pendiente exacto de esa cuota (vía el mismo FIFO de BR-LOAN-009) e ignora cualquier `amount` enviado por el cliente, de forma que el monto registrado siempre es el que corresponde a esa cuota puntual. `installment_number = 0` mantiene el modo libre anterior (usa `amount` tal cual).
+
+## 3. Modelo de Datos (PostgreSQL)
+**Tabla: `loans`**
+*   `id` (UUID, PK)
+*   `client_id` (UUID, FK -> clients.id)
+*   `created_by_user_id` (UUID, FK -> users.id, nullable) - Asesor que registró la solicitud (`CreateLoan`); puramente informativo, se imprime en el Cronograma de Pago entregado al cliente. Nulo para préstamos creados sin un actor autenticado conocido.
+*   `principal_amount` (Decimal)
+*   `interest_rate` (Decimal)
+*   `term_months` (Integer)
+*   `first_due_date` (Date) - Fecha de primer vencimiento (BR-LOAN-004)
+*   `guarantee_type`, `guarantee_amount` (VARCHAR, Decimal) - Garantía de respaldo opcional (BR-LOAN-005)
+*   `charge_interest_tax`, `charge_admin_fee`, `charge_cancellation_insurance`, `charge_contracted_insurance` (Decimal) - Cargos y seguros opcionales, informativos (BR-LOAN-006)
+*   `status` (Enum: PENDING, APPROVED, ACTIVE, PAID, DEFAULTED, EXPIRED) - `EXPIRED` es el estado terminal de una aprobación no desembolsada dentro de los 30 días (BR-LOAN-003); se distingue de `DEFAULTED`, que es para préstamos que sí llegaron a desembolsarse.
+*   `created_at` (Timestamp)
+
+**Tabla: `loan_installment_adjustments`** (BR-LOAN-008)
+*   `id` (UUID, PK)
+*   `loan_id` (UUID, FK -> loans.id)
+*   `installment_number` (Integer) - Única por préstamo (`UNIQUE(loan_id, installment_number)`)
+*   `adjusted_amount` (Decimal)
+*   `created_at` (Timestamp)
+
+## 4. Contratos gRPC Relacionados
+*   `CreateLoanRequest` / `CreateLoanResponse` (definido en `protos/loan_service.proto`)
+*   `UpdateLoanProposalRequest` / `UpdateLoanProposalResponse` - Edición de propuesta mientras esté Pendiente (BR-LOAN-004)
+*   `UpdateLoanGuaranteeRequest` / `UpdateLoanGuaranteeResponse` - Edición de la garantía mientras esté Pendiente (BR-LOAN-005)
+*   `UpdateLoanChargesRequest` / `UpdateLoanChargesResponse` - Edición de cargos/seguros mientras esté Pendiente (BR-LOAN-006)
+*   `UpdateInstallmentAmountRequest` / `UpdateInstallmentAmountResponse` - Ajuste manual de una cuota de un préstamo ACTIVE (BR-LOAN-008)
+*   `GetAmortizationScheduleRequest` / `GetAmortizationScheduleResponse`
+*   `ListActiveLoansRequest` / `ListActiveLoansResponse` - Vista consolidada de todos los préstamos ACTIVE (no filtrada por cliente), con nombre del cliente incluido para evitar N+1 llamadas a ClientService
