@@ -1,3 +1,4 @@
+from functools import lru_cache
 from pathlib import Path
 
 import grpc
@@ -34,6 +35,29 @@ def _bearer(access_token: str) -> tuple:
     return (("authorization", f"Bearer {access_token}"),)
 
 
+@lru_cache(maxsize=1)
+def _ssl_channel_credentials() -> grpc.ChannelCredentials:
+    """Builds the TLS ChannelCredentials once and reuses it for every
+    *ServiceClient -- main_window.py constructs four of these (Auth, Client,
+    Loan, Dashboard) at startup, and grpc.ChannelCredentials is immutable /
+    safe to share, so re-reading the same cert/key files from disk for each
+    one is pure waste. Cached at module scope rather than per-client since
+    the underlying files (config.GRPC_TLS_*) don't change during the
+    process's lifetime."""
+    root_certificates = Path(config.GRPC_TLS_CA_FILE).read_bytes()
+    client_certificate_chain = None
+    client_private_key = None
+    if config.GRPC_TLS_CLIENT_CERT_FILE and config.GRPC_TLS_CLIENT_KEY_FILE:
+        client_certificate_chain = Path(config.GRPC_TLS_CLIENT_CERT_FILE).read_bytes()
+        client_private_key = Path(config.GRPC_TLS_CLIENT_KEY_FILE).read_bytes()
+
+    return grpc.ssl_channel_credentials(
+        root_certificates=root_certificates,
+        private_key=client_private_key,
+        certificate_chain=client_certificate_chain,
+    )
+
+
 def _create_channel(target: str) -> grpc.Channel:
     """Secure channel when GRPC_TLS_CA_FILE is configured (trusting that CA
     -- or the server's own cert, if self-signed -- to verify the server's
@@ -44,19 +68,7 @@ def _create_channel(target: str) -> grpc.Channel:
     if not config.GRPC_TLS_CA_FILE:
         return grpc.insecure_channel(target)
 
-    root_certificates = Path(config.GRPC_TLS_CA_FILE).read_bytes()
-    client_certificate_chain = None
-    client_private_key = None
-    if config.GRPC_TLS_CLIENT_CERT_FILE and config.GRPC_TLS_CLIENT_KEY_FILE:
-        client_certificate_chain = Path(config.GRPC_TLS_CLIENT_CERT_FILE).read_bytes()
-        client_private_key = Path(config.GRPC_TLS_CLIENT_KEY_FILE).read_bytes()
-
-    credentials = grpc.ssl_channel_credentials(
-        root_certificates=root_certificates,
-        private_key=client_private_key,
-        certificate_chain=client_certificate_chain,
-    )
-    return grpc.secure_channel(target, credentials)
+    return grpc.secure_channel(target, _ssl_channel_credentials())
 
 
 class AuthClient:

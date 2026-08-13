@@ -8,6 +8,13 @@ import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
 from sqlalchemy.exc import IntegrityError
 
+# Código de error de Postgres para "unique_violation" (ver
+# https://www.postgresql.org/docs/current/errcodes-appendix.html). Sirve
+# para distinguir, dentro de un IntegrityError, una violación de restricción
+# única real de cualquier otra causa (NOT NULL, FK, CHECK) para la que
+# ALREADY_EXISTS sería un código de estado engañoso.
+UNIQUE_VIOLATION_PGCODE = "23505"
+
 
 def ip_remota(contexto: grpc.ServicerContext) -> str:
     """Extrae la IP del llamador de un peer string con formato "ipv4:127.0.0.1:54321"."""
@@ -84,12 +91,20 @@ def confirmar_o_duplicado(
     explícito antes de `commit()` (p. ej. para obtener un id autogenerado
     con el que armar un `AuditLog`) -- un INSERT con conflicto de unicidad
     falla en ese `flush()`, no en el `commit()` posterior, así que envolver
-    solo el commit final no alcanza en ese caso. Ver ES-006 §3.1."""
+    solo el commit final no alcanza en ese caso. Ver ES-006 §3.1.
+
+    Solo un `IntegrityError` cuya causa real sea una violación de
+    restricción única (pgcode 23505) se traduce a `ALREADY_EXISTS` -- otras
+    causas (NOT NULL, FK, CHECK) se dejan propagar sin tocar, porque
+    ALREADY_EXISTS sería un código de estado incorrecto para ellas."""
     accion = accion or sesion.commit
     try:
         accion()
-    except IntegrityError:
+    except IntegrityError as error:
         sesion.rollback()
+        codigo_pg = getattr(getattr(error, "orig", None), "pgcode", None)
+        if codigo_pg != UNIQUE_VIOLATION_PGCODE:
+            raise
         contexto.abort(grpc.StatusCode.ALREADY_EXISTS, mensaje_duplicado)
 
 

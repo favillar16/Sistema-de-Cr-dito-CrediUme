@@ -625,7 +625,12 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
         ahora = datetime.now(timezone.utc)
 
         with SessionLocal() as sesion:
-            prestamo = sesion.get(Loan, loan_id)
+            # Se bloquea la fila del préstamo (FOR UPDATE) para serializar
+            # ApproveLoan concurrentes sobre el mismo loan_id: sin esto, dos
+            # llamadas simultáneas pueden leer ambas status==PENDING antes de
+            # que cualquiera confirme, y las dos terminan aprobando el mismo
+            # préstamo. Ver ES-006 §3.1.
+            prestamo = sesion.get(Loan, loan_id, with_for_update=True)
             if prestamo is None:
                 context.abort(grpc.StatusCode.NOT_FOUND, "Préstamo no encontrado")
 
@@ -903,7 +908,14 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
         )
 
         with SessionLocal() as sesion:
-            prestamo = sesion.get(Loan, loan_id)
+            # Se bloquea la fila del préstamo (FOR UPDATE) para serializar
+            # ajustes concurrentes a distintas cuotas del mismo préstamo: sin
+            # esto, dos llamadas simultáneas validan cada una su cronograma
+            # tentativo contra los ajustes ya confirmados, sin ver el ajuste
+            # del otro, y el efecto combinado de ambos nunca se valida. Mismo
+            # patrón que RecordPayment ya resuelve con with_for_update. Ver
+            # ES-006 §3.1.
+            prestamo = sesion.get(Loan, loan_id, with_for_update=True)
             if prestamo is None:
                 context.abort(grpc.StatusCode.NOT_FOUND, "Préstamo no encontrado")
 
