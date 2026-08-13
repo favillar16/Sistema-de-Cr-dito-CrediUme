@@ -1,3 +1,4 @@
+import threading
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -8,7 +9,7 @@ import loan_service_pb2
 
 from cas_server import config
 from cas_server.db.base import SessionLocal
-from cas_server.db.models import Client, Loan
+from cas_server.db.models import Client, Loan, LoanStatusEnum
 from cas_server.services.amortization import calcular_cronograma
 from cas_server.services.loan_service import LoanServicer
 
@@ -479,6 +480,57 @@ def test_approve_loan_blocked_when_client_already_at_cap(servicer):
     assert exc_info.value.code == grpc.StatusCode.FAILED_PRECONDITION
 
 
+def test_approve_loan_concurrent_requests_respect_active_loan_cap(servicer):
+    """ES-006 §3.1 / BR-LOAN-001: a client at 2 active loans (cap is 3) has
+    two more PENDING loans approved concurrently. Without locking the
+    Client row (with_for_update), both ApproveLoan calls can independently
+    count 2 active loans and both pass, pushing the client to 4 -- over the
+    cap. Runs two real threads against the real DB, unlike the sequential
+    test above (which only proves the cap works when requests are
+    sequential)."""
+    client_id = _create_client(declared_monthly_income=Decimal("100000.00"))
+    _activate_loan(servicer, client_id)
+    _activate_loan(servicer, client_id)
+    pending = [_create_loan(servicer, client_id) for _ in range(2)]
+
+    results = []
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def worker(loan_id: str) -> None:
+        barrier.wait()
+        try:
+            response = servicer.ApproveLoan(
+                loan_service_pb2.ApproveLoanRequest(loan_id=loan_id), FakeContext()
+            )
+            results.append(response)
+        except AbortCalled as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(loan.loan_id,)) for loan in pending
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert errors[0].code == grpc.StatusCode.FAILED_PRECONDITION
+
+    with SessionLocal() as session:
+        active_count = (
+            session.query(Loan)
+            .filter(
+                Loan.client_id == client_id,
+                Loan.status.in_([LoanStatusEnum.APPROVED, LoanStatusEnum.ACTIVE]),
+            )
+            .count()
+        )
+    assert active_count == config.LOAN_MAX_ACTIVE_PER_CLIENT
+
+
 def test_disburse_loan_success_transitions_to_active(servicer):
     client_id = _create_client()
     loan = _create_loan(servicer, client_id)
@@ -565,6 +617,55 @@ def test_record_payment_full_transitions_to_paid(servicer):
     assert response.success
     assert response.status == "PAID"
     assert response.remaining_balance == "0.00"
+
+
+def test_record_payment_concurrent_full_payoff_transitions_to_paid(servicer):
+    """ES-006 §3.1: two concurrent partial payments that together cover the
+    loan must still flip status to PAID. Without locking the Loan row
+    (with_for_update), each payment can independently read a total_paid
+    that, combined with just its own amount, doesn't reach total_programado
+    -- leaving the loan stuck ACTIVE despite being fully paid. Runs two
+    real threads against the real DB, unlike the sequential test above."""
+    client_id = _create_client()
+    loan_id = _activate_loan(
+        servicer, client_id, principal="1200.00", rate="0.00", term=12
+    )
+
+    results = []
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def worker(amount: str, reference: str) -> None:
+        barrier.wait()
+        try:
+            response = servicer.RecordPayment(
+                loan_service_pb2.RecordPaymentRequest(
+                    loan_id=loan_id, amount=amount, transfer_reference=reference
+                ),
+                FakeContext(),
+            )
+            results.append(response)
+        except AbortCalled as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=("600.00", "TRX-A")),
+        threading.Thread(target=worker, args=("600.00", "TRX-B")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(errors) == 0
+    assert len(results) == 2
+
+    fetched = servicer.GetLoanById(
+        loan_service_pb2.GetLoanByIdRequest(loan_id=loan_id), FakeContext()
+    )
+    assert fetched.status == "PAID"
+    assert fetched.total_paid == "1200.00"
+    assert fetched.remaining_balance == "0.00"
 
 
 def test_record_payment_rejects_non_active_loan(servicer):

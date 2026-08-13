@@ -287,7 +287,12 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
         )
 
         with SessionLocal() as sesion:
-            cliente = sesion.get(Client, client_id)
+            # BR-LOAN-001: bloquea la fila del cliente (FOR UPDATE) desde acá
+            # hasta el commit, así dos CreateLoan concurrentes para el mismo
+            # cliente quedan serializados en vez de ambos leer el mismo
+            # conteo de préstamos activos antes de que cualquiera confirme.
+            # Ver ES-006 §3.1.
+            cliente = sesion.get(Client, client_id, with_for_update=True)
             if cliente is None:
                 context.abort(grpc.StatusCode.NOT_FOUND, "Cliente no encontrado")
             if not cliente.is_active:
@@ -632,7 +637,11 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
 
             # BR-LOAN-001: un cliente puede acumular préstamos PENDING sin
             # límite (no cuentan para el tope), así que la aprobación debe
-            # volver a verificarlo aquí también.
+            # volver a verificarlo aquí también. Se bloquea la fila del
+            # cliente (FOR UPDATE) para serializar con CreateLoan/ApproveLoan
+            # concurrentes del mismo cliente -- mismo mecanismo que CreateLoan
+            # usa para BR-LOAN-001. Ver ES-006 §3.1.
+            sesion.get(Client, prestamo.client_id, with_for_update=True)
             otros_prestamos = (
                 sesion.query(Loan)
                 .filter(Loan.client_id == prestamo.client_id, Loan.id != prestamo.id)
@@ -733,7 +742,12 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
         ahora = datetime.now(timezone.utc)
 
         with SessionLocal() as sesion:
-            prestamo = sesion.get(Loan, loan_id)
+            # Bloquea la fila del préstamo (FOR UPDATE) para serializar pagos
+            # concurrentes sobre el mismo préstamo -- sin esto, dos pagos que
+            # en conjunto saldan el préstamo pero que individualmente no ven
+            # el total combinado podrían dejarlo sin pasar a PAID. Ver
+            # ES-006 §3.1.
+            prestamo = sesion.get(Loan, loan_id, with_for_update=True)
             if prestamo is None:
                 context.abort(grpc.StatusCode.NOT_FOUND, "Préstamo no encontrado")
 

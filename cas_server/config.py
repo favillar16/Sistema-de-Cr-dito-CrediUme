@@ -28,6 +28,17 @@ DATABASE_URL = (
 GRPC_HOST = os.environ.get("GRPC_HOST", "0.0.0.0")
 GRPC_PORT = int(os.environ.get("GRPC_PORT", "50051"))
 
+# TLS is opt-in (ES-004 defers it to an explicit deployment decision, not a
+# hard requirement of this codebase) -- unset, the server keeps binding an
+# insecure port exactly like before. Set both to enable server-side TLS;
+# see cas_server/server.py's _build_server_credentials().
+GRPC_TLS_CERT_FILE = os.environ.get("GRPC_TLS_CERT_FILE")
+GRPC_TLS_KEY_FILE = os.environ.get("GRPC_TLS_KEY_FILE")
+# Optional, only meaningful together with the two above: if set, the server
+# requires and verifies client certificates signed by this CA (mutual TLS)
+# instead of plain server-side TLS.
+GRPC_TLS_CLIENT_CA_FILE = os.environ.get("GRPC_TLS_CLIENT_CA_FILE")
+
 JWT_SECRET_KEY = _require("JWT_SECRET_KEY")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRES_SECONDS = 8 * 60 * 60  # BR-AUTH-003: 8 hour session, no refresh tokens

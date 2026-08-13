@@ -12,6 +12,7 @@ from cas_server.services.common import (
     analizar_decimal,
     analizar_fecha,
     analizar_uuid,
+    confirmar_o_duplicado,
     id_actor_actual,
     ip_remota,
     a_marca_tiempo,
@@ -206,7 +207,16 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                 **perfil_extendido,
             )
             sesion.add(cliente)
-            sesion.flush()
+            # El INSERT (y su posible violación de unicidad concurrente) se
+            # dispara acá, no en el commit final -- por eso el flush() es lo
+            # que hay que envolver, no solo sesion.commit(). Ver el
+            # docstring de confirmar_o_duplicado.
+            confirmar_o_duplicado(
+                sesion,
+                context,
+                "national_id o email ya está registrado",
+                accion=sesion.flush,
+            )
 
             sesion.add(
                 AuditLog(
@@ -364,7 +374,7 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                     timestamp=cliente.updated_at,
                 )
             )
-            sesion.commit()
+            confirmar_o_duplicado(sesion, context, "el email ya está registrado")
 
             return client_service_pb2.UpdateClientResponse(
                 success=True, updated_at=a_marca_tiempo(cliente.updated_at)
@@ -455,7 +465,7 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                     timestamp=cliente.updated_at,
                 )
             )
-            sesion.commit()
+            confirmar_o_duplicado(sesion, context, "el national_id ya está registrado")
 
             return client_service_pb2.UpdateNationalIdResponse(
                 success=True, updated_at=a_marca_tiempo(cliente.updated_at)

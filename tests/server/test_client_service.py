@@ -1,3 +1,4 @@
+import threading
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -279,6 +280,51 @@ def test_create_client_duplicate_national_id_is_already_exists(servicer):
             FakeContext(),
         )
     assert exc_info.value.code == grpc.StatusCode.ALREADY_EXISTS
+
+
+def test_create_client_concurrent_duplicate_national_id_never_both_succeed(servicer):
+    """ES-006 §3.1: two concurrent CreateClient calls for the same
+    national_id must never both succeed, and the one that loses the race
+    gets ALREADY_EXISTS -- not an uncaught IntegrityError leaking as a
+    generic INTERNAL/UNKNOWN. Runs two real threads against the real DB to
+    actually exercise the race (both starting their own pre-check SELECT
+    before either commits), unlike the sequential test above."""
+    results = []
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def worker(email: str) -> None:
+        barrier.wait()
+        try:
+            response = servicer.CreateClient(
+                client_service_pb2.CreateClientRequest(
+                    first_name="Race",
+                    last_name="Condition",
+                    national_id="6666666",
+                    email=email,
+                    phone_number="0981000009",
+                    date_of_birth="1990-01-01",
+                    address="Calle Concurrencia 1",
+                    **_VALID_REFERENCES,
+                ),
+                FakeContext(),
+            )
+            results.append(response)
+        except AbortCalled as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(f"race{i}@example.com",))
+        for i in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert errors[0].code == grpc.StatusCode.ALREADY_EXISTS
 
 
 def test_create_client_duplicate_email_is_already_exists(servicer):

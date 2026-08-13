@@ -1,3 +1,4 @@
+import threading
 import uuid
 
 import auth_service_pb2
@@ -214,6 +215,40 @@ def test_create_user_duplicate_username_is_already_exists(servicer):
             FakeContext(),
         )
     assert exc_info.value.code == grpc.StatusCode.ALREADY_EXISTS
+
+
+def test_create_user_concurrent_duplicate_username_never_both_succeed(servicer):
+    """ES-006 §3.1: two concurrent CreateUser calls for the same username
+    must never both succeed, and the one that loses the race gets
+    ALREADY_EXISTS -- not an uncaught IntegrityError leaking as a generic
+    INTERNAL/UNKNOWN. Runs two real threads against the real DB, unlike the
+    sequential test above."""
+    results = []
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            response = servicer.CreateUser(
+                auth_service_pb2.CreateUserRequest(
+                    username="race_user", password="Passw0rd!", role="CASHIER"
+                ),
+                FakeContext(),
+            )
+            results.append(response)
+        except AbortCalled as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert errors[0].code == grpc.StatusCode.ALREADY_EXISTS
 
 
 def test_create_user_invalid_role_is_invalid_argument(servicer):

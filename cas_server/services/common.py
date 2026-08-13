@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
+from sqlalchemy.exc import IntegrityError
 
 
 def ip_remota(contexto: grpc.ServicerContext) -> str:
@@ -61,6 +62,35 @@ def analizar_decimal(
             f"{nombre_campo} debe ser un número positivo",
         )
     return valor_analizado
+
+
+def confirmar_o_duplicado(
+    sesion,
+    contexto: grpc.ServicerContext,
+    mensaje_duplicado: str,
+    *,
+    accion=None,
+) -> None:
+    """Ejecuta `accion` (por defecto `sesion.commit`), traduciendo un
+    `IntegrityError` de violación de restricción única (una fila duplicada
+    que pasó la validación previa por una condición de carrera: dos
+    requests concurrentes que hacen su propio SELECT-de-verificación antes
+    de que cualquiera haga commit) a `ALREADY_EXISTS` en vez de dejar que se
+    propague como un error genérico (`INTERNAL`/`UNKNOWN`). La restricción
+    única de la base de datos ya garantiza que el dato no queda duplicado --
+    esto solo corrige el código de estado que recibe el request perdedor.
+
+    Pasar `accion=sesion.flush` cuando el caller necesita un `flush()`
+    explícito antes de `commit()` (p. ej. para obtener un id autogenerado
+    con el que armar un `AuditLog`) -- un INSERT con conflicto de unicidad
+    falla en ese `flush()`, no en el `commit()` posterior, así que envolver
+    solo el commit final no alcanza en ese caso. Ver ES-006 §3.1."""
+    accion = accion or sesion.commit
+    try:
+        accion()
+    except IntegrityError:
+        sesion.rollback()
+        contexto.abort(grpc.StatusCode.ALREADY_EXISTS, mensaje_duplicado)
 
 
 def analizar_fecha(

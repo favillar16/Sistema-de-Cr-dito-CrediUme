@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import grpc
 
 import auth_service_pb2
@@ -32,6 +34,31 @@ def _bearer(access_token: str) -> tuple:
     return (("authorization", f"Bearer {access_token}"),)
 
 
+def _create_channel(target: str) -> grpc.Channel:
+    """Secure channel when GRPC_TLS_CA_FILE is configured (trusting that CA
+    -- or the server's own cert, if self-signed -- to verify the server's
+    identity), insecure otherwise. Mirrors cas_server/server.py's own opt-in
+    TLS; every *ServiceClient below goes through this instead of calling
+    grpc.insecure_channel directly, so all four stay in sync automatically.
+    See cas_client/.env.example for the GRPC_TLS_* variables."""
+    if not config.GRPC_TLS_CA_FILE:
+        return grpc.insecure_channel(target)
+
+    root_certificates = Path(config.GRPC_TLS_CA_FILE).read_bytes()
+    client_certificate_chain = None
+    client_private_key = None
+    if config.GRPC_TLS_CLIENT_CERT_FILE and config.GRPC_TLS_CLIENT_KEY_FILE:
+        client_certificate_chain = Path(config.GRPC_TLS_CLIENT_CERT_FILE).read_bytes()
+        client_private_key = Path(config.GRPC_TLS_CLIENT_KEY_FILE).read_bytes()
+
+    credentials = grpc.ssl_channel_credentials(
+        root_certificates=root_certificates,
+        private_key=client_private_key,
+        certificate_chain=client_certificate_chain,
+    )
+    return grpc.secure_channel(target, credentials)
+
+
 class AuthClient:
     """Thin wrapper around the AuthService gRPC stub.
 
@@ -41,7 +68,7 @@ class AuthClient:
 
     def __init__(self, host: str | None = None, port: int | None = None):
         target = f"{host or config.GRPC_SERVER_HOST}:{port or config.GRPC_PORT}"
-        self._channel = grpc.insecure_channel(target)
+        self._channel = _create_channel(target)
         self._stub = auth_service_pb2_grpc.AuthServiceStub(self._channel)
 
     def login(self, username: str, password: str) -> auth_service_pb2.LoginResponse:
@@ -99,7 +126,7 @@ class ClientServiceClient:
 
     def __init__(self, host: str | None = None, port: int | None = None):
         target = f"{host or config.GRPC_SERVER_HOST}:{port or config.GRPC_PORT}"
-        self._channel = grpc.insecure_channel(target)
+        self._channel = _create_channel(target)
         self._stub = client_service_pb2_grpc.ClientServiceStub(self._channel)
 
     def create_client(
@@ -183,7 +210,7 @@ class LoanServiceClient:
 
     def __init__(self, host: str | None = None, port: int | None = None):
         target = f"{host or config.GRPC_SERVER_HOST}:{port or config.GRPC_PORT}"
-        self._channel = grpc.insecure_channel(target)
+        self._channel = _create_channel(target)
         self._stub = loan_service_pb2_grpc.LoanServiceStub(self._channel)
 
     def create_loan(
@@ -353,7 +380,7 @@ class DashboardServiceClient:
 
     def __init__(self, host: str | None = None, port: int | None = None):
         target = f"{host or config.GRPC_SERVER_HOST}:{port or config.GRPC_PORT}"
-        self._channel = grpc.insecure_channel(target)
+        self._channel = _create_channel(target)
         self._stub = dashboard_service_pb2_grpc.DashboardServiceStub(self._channel)
 
     def get_dashboard_stats(
