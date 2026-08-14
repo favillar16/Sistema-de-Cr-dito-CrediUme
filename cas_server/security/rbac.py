@@ -52,6 +52,11 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     "/loans.LoanService/MarkDefaulted": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/DisburseLoan": MANAGER_AND_ABOVE,
     "/dashboard.DashboardService/GetDashboardStats": CASHIER_AND_ABOVE,
+    # BR-DASH-002: el reporte de cierre de período es material de gestión
+    # (resultados del mes/trimestre), no una consulta operativa -- se limita a
+    # MANAGER+ en vez de seguir a GetDashboardStats, que sí es CASHIER_AND_ABOVE
+    # por ser solo conteos de la pantalla de inicio.
+    "/dashboard.DashboardService/GetPeriodReport": MANAGER_AND_ABOVE,
 }
 
 

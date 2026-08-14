@@ -1,7 +1,30 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QTableWidget
+from PySide6.QtWidgets import QHeaderView, QTableWidget
 
 from cas_client import theme
+
+
+def size_columns(table: QTableWidget, stretch_column: int) -> None:
+    """Every column sizes to its own content, except `stretch_column`, which
+    absorbs the leftover width.
+
+    Call sites used to set Stretch on one column and leave the rest at Qt's
+    default 100px section width, which silently clipped any header longer than
+    that -- "Saldo restante (Gs)" rendered as "Saldo restante (" in the
+    amortization schedule, and "Vencimiento"/"Cuota vencida (N)" were tight for
+    the same reason. ResizeToContents measures the header text too, not just
+    the cells, so a column is never narrower than its own title.
+    """
+    header = table.horizontalHeader()
+    for column in range(table.columnCount()):
+        header.setSectionResizeMode(
+            column,
+            (
+                QHeaderView.ResizeMode.Stretch
+                if column == stretch_column
+                else QHeaderView.ResizeMode.ResizeToContents
+            ),
+        )
 
 
 def style_table(table: QTableWidget) -> None:

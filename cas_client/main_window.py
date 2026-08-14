@@ -56,20 +56,21 @@ class _Sidebar(QWidget):
             )
         )
         brand_row.addWidget(brand_icon)
-        brand_text = QLabel("CrediUME")
+        brand_text = QLabel(theme.BRAND_NAME)
         # Fixed 220px sidebar (ES-003 §1) leaves ~180px of content width
-        # after margins; icon + spacing + "CrediUME" at 17px didn't fit in
-        # that (was getting silently clipped by the layout) -- 15px is the
-        # largest size that comfortably does.
+        # after margins; icon + spacing + the wordmark at 17px didn't fit in
+        # that (was getting silently clipped by the layout). 15px used to be
+        # the largest size that fit "CrediUME"; "CREDIMED UME" is 4 chars
+        # longer *and* all-caps, so it needs 13px to clear the same budget.
         brand_text.setStyleSheet(
             f"font-family: {theme.HEADING_FONT_FAMILY}; "
-            "font-size: 15px; font-weight: 700; color: white;"
+            "font-size: 13px; font-weight: 700; color: white;"
         )
         # Without this, the QHBoxLayout compresses the label below its own
         # text width whenever the row is tight on space (same surprising
         # QLabel default behavior worked around in login_view.py's wordmark
         # -- see that file's comment for the full explanation), silently
-        # clipping "CrediUME" instead of leaving the icon+text at their
+        # clipping the wordmark instead of leaving the icon+text at their
         # natural size and letting the trailing stretch absorb any slack.
         brand_text.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred
@@ -192,7 +193,7 @@ class _AppShellView(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CrediUME - CAS")
+        self.setWindowTitle(f"{theme.BRAND_NAME} - CAS")
         self.resize(1100, 680)
         # The sidebar stays a fixed 220px (ES-003 §1); below this the content
         # area has too little room left for the reflowed grids to be usable.

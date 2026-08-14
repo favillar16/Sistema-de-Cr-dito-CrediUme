@@ -921,3 +921,145 @@ def test_record_payment_respects_adjusted_total_programado(servicer):
     assert response.success
     assert response.status == "PAID"
     assert response.remaining_balance == "0.00"
+
+
+# ---- BR-LOAN-011: comprobante de pago -------------------------------------
+
+
+def _activar_prestamo(servicer, client_id, principal="1200.00", rate="0.00", term=12):
+    """Préstamo ACTIVE listo para recibir pagos. rate="0.00" por defecto para
+    que cada cuota sea un número redondo (1200/12 = 100.00) y los asserts de
+    cuotas cubiertas no dependan de la aritmética del sistema francés."""
+    loan = _create_loan(servicer, client_id, principal=principal, rate=rate, term=term)
+    servicer.ApproveLoan(
+        loan_service_pb2.ApproveLoanRequest(loan_id=loan.loan_id), FakeContext()
+    )
+    servicer.DisburseLoan(
+        loan_service_pb2.DisburseLoanRequest(loan_id=loan.loan_id), FakeContext()
+    )
+    return loan
+
+
+def test_record_payment_reports_the_single_installment_it_covered(servicer):
+    """El caso "Cuota(s) 1 de 18" del comprobante."""
+    client_id = _create_client()
+    loan = _activar_prestamo(servicer, client_id)
+
+    response = servicer.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=loan.loan_id, transfer_reference="TRF-1", installment_number=1
+        ),
+        FakeContext(),
+    )
+    assert list(response.covered_installments) == [1]
+    assert response.total_installments == 12
+    assert Decimal(response.amount_paid) == Decimal("100.00")
+    assert response.transfer_reference == "TRF-1"
+
+
+def test_record_payment_reports_every_installment_a_large_payment_spans(servicer):
+    """El caso "Cuota(s) 1,2 de 18": un solo pago que cubre más de una cuota."""
+    client_id = _create_client()
+    loan = _activar_prestamo(servicer, client_id)
+
+    response = servicer.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=loan.loan_id, amount="200.00", transfer_reference="TRF-2"
+        ),
+        FakeContext(),
+    )
+    assert list(response.covered_installments) == [1, 2]
+
+
+def test_record_payment_covered_installments_advance_with_previous_payments(servicer):
+    """El segundo pago informa la cuota 2, no vuelve a informar la 1 -- la
+    imputación arranca donde quedó el acumulado anterior."""
+    client_id = _create_client()
+    loan = _activar_prestamo(servicer, client_id)
+
+    servicer.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=loan.loan_id, transfer_reference="TRF-1", installment_number=1
+        ),
+        FakeContext(),
+    )
+    segundo = servicer.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=loan.loan_id, transfer_reference="TRF-2", installment_number=2
+        ),
+        FakeContext(),
+    )
+    assert list(segundo.covered_installments) == [2]
+
+
+def test_record_payment_reports_the_partially_covered_installment(servicer):
+    """Un pago que no alcanza a saldar una cuota igual informa a qué cuota se
+    imputó -- el comprobante dice dónde se aplicó el dinero, no qué quedó
+    saldado."""
+    client_id = _create_client()
+    loan = _activar_prestamo(servicer, client_id)
+
+    response = servicer.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=loan.loan_id, amount="40.00", transfer_reference="TRF-3"
+        ),
+        FakeContext(),
+    )
+    assert list(response.covered_installments) == [1]
+    assert response.status == "ACTIVE"
+
+
+def test_record_payment_covered_installments_match_the_schedule_fifo(servicer):
+    """Guarda de coherencia: lo que informa el comprobante tiene que ser lo
+    mismo que el cronograma marca como pagado justo después. Si esto se
+    desincroniza, el papel que recibe el cliente contradice la pantalla."""
+    client_id = _create_client()
+    loan = _activar_prestamo(servicer, client_id)
+
+    response = servicer.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=loan.loan_id, amount="250.00", transfer_reference="TRF-4"
+        ),
+        FakeContext(),
+    )
+    schedule = servicer.GetAmortizationSchedule(
+        loan_service_pb2.GetAmortizationScheduleRequest(loan_id=loan.loan_id),
+        FakeContext(),
+    )
+    pagadas = [i.installment_number for i in schedule.installments if i.is_paid]
+    # 250 cubre las cuotas 1 y 2 enteras y parte de la 3.
+    assert pagadas == [1, 2]
+    assert list(response.covered_installments) == [1, 2, 3]
+
+
+def test_record_payment_final_payment_reports_paid_status(servicer):
+    client_id = _create_client()
+    loan = _activar_prestamo(servicer, client_id, principal="100.00", term=1)
+
+    response = servicer.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=loan.loan_id, transfer_reference="TRF-5", installment_number=1
+        ),
+        FakeContext(),
+    )
+    assert response.status == "PAID"
+    assert list(response.covered_installments) == [1]
+    assert Decimal(response.remaining_balance) == Decimal("0.00")
+
+
+def test_record_payment_without_credentials_leaves_operator_fields_empty(servicer):
+    """Los tests que llaman al servicer directo no pasan por AuthInterceptor,
+    así que no hay claims -- mismo patrón tolerante a None que id_actor_actual.
+    La cobertura real del "Registrado por" está en
+    test_loan_interceptor_integration.py."""
+    client_id = _create_client()
+    loan = _activar_prestamo(servicer, client_id)
+
+    response = servicer.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=loan.loan_id, transfer_reference="TRF-6", installment_number=1
+        ),
+        FakeContext(),
+    )
+    assert response.recorded_by_name == ""
+    assert response.recorded_by_national_id == ""

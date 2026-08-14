@@ -1,26 +1,34 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import grpc
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextDocument
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from cas_client import theme
-from cas_client.formatting import gs
+from cas_client import documents, documents_docx, theme
+from cas_client.formatting import DISPLAY_DATE_PLACEHOLDER, fecha, fecha_a_iso, gs
 from cas_client.grpc_client import ApiError, DashboardServiceClient
-from cas_client.rbac_ui import tier_label
+from cas_client.rbac_ui import can_view_period_report, tier_label
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
 from cas_client.widgets.base_view import BaseView
-from cas_client.widgets.card import section_label, stat_tile
+from cas_client.widgets.card import card, labeled_field, section_label, stat_tile
 from cas_client.widgets.responsive_grid import ResponsiveGrid
+from cas_client.widgets.table import size_columns, style_table
+from cas_client.widgets.toast import Toast
 
 _LOAN_STATUS_TILES = (
     ("pending_loans_count", "Pendientes de aprobación", "PENDING", "PE"),
@@ -28,8 +36,15 @@ _LOAN_STATUS_TILES = (
     ("active_loans_count", "Activos", "ACTIVE", "AC"),
     ("paid_loans_count", "Pagados", "PAID", "PG"),
     ("defaulted_loans_count", "Incumplidos", "DEFAULTED", "IN"),
-    ("expired_loans_count", "Caducados", "EXPIRED", "CA"),
+    # LoanStatusEnum.EXPIRED. La etiqueta pasó de "Caducados" a "Rechazados"
+    # por decisión de producto -- el estado del servidor y el nombre del campo
+    # (expired_loans_count) no cambiaron. Ver la misma nota en loans_view.py.
+    ("expired_loans_count", "Rechazados", "EXPIRED", "RE"),
 )
+
+_UN_DIA = timedelta(days=1)
+
+_REPORT_TABLE_HEADERS = ("Sección", "Concepto", "Valor")
 
 
 def _greeting() -> str:
@@ -57,6 +72,56 @@ def _friendly_message(exc: Exception) -> str:
     return f"No se pudo conectar con el servidor: {exc}"
 
 
+def _friendly_report_message(exc: Exception) -> str:
+    if isinstance(exc, ApiError):
+        if exc.code == grpc.StatusCode.PERMISSION_DENIED:
+            return "No tiene permisos para generar reportes de período."
+        if exc.code == grpc.StatusCode.INVALID_ARGUMENT:
+            return (
+                "Revise las fechas del período: use el formato "
+                f"{DISPLAY_DATE_PLACEHOLDER} y que la fecha final no sea "
+                "anterior a la inicial."
+            )
+        if exc.code == grpc.StatusCode.UNAVAILABLE:
+            return "No se pudo conectar con el servidor."
+        return "No se pudo generar el reporte. Intente nuevamente."
+    return f"No se pudo conectar con el servidor: {exc}"
+
+
+def _rango_mes(anchor: date) -> tuple[date, date]:
+    """Primer y último día del mes en que cae `anchor`."""
+    inicio = anchor.replace(day=1)
+    if inicio.month == 12:
+        fin = inicio.replace(year=inicio.year + 1, month=1) - _UN_DIA
+    else:
+        fin = inicio.replace(month=inicio.month + 1) - _UN_DIA
+    return inicio, fin
+
+
+def _preset_mes_actual() -> tuple[date, date]:
+    return _rango_mes(date.today())
+
+
+def _preset_mes_anterior() -> tuple[date, date]:
+    primero_de_este_mes = date.today().replace(day=1)
+    return _rango_mes(primero_de_este_mes - _UN_DIA)
+
+
+def _preset_anio_actual() -> tuple[date, date]:
+    hoy = date.today()
+    return date(hoy.year, 1, 1), date(hoy.year, 12, 31)
+
+
+# Atajos para los cierres más habituales. Deliberadamente no incluye "últimos
+# 30 días": un cierre de período es por definición un rango calendario
+# (mes/año), no una ventana móvil.
+_PRESETS_PERIODO = (
+    ("Mes actual", _preset_mes_actual),
+    ("Mes anterior", _preset_mes_anterior),
+    ("Año actual", _preset_anio_actual),
+)
+
+
 class DashboardView(BaseView):
     """Pantalla de inicio: saludo + estadísticas agregadas de clientes/préstamos.
 
@@ -74,6 +139,8 @@ class DashboardView(BaseView):
         self._client = client
         self._session = session
         self._worker: AsyncWorker | None = None
+        self._report_worker: AsyncWorker | None = None
+        self._report = None  # último GetPeriodReportResponse recibido
         # Bumped on every _refresh_stats() call so a stale worker's callbacks
         # (a previous refresh still in flight when the user tabs back in,
         # see showEvent()) can tell they've been superseded and no-op instead
@@ -153,14 +220,269 @@ class DashboardView(BaseView):
         self._portfolio_grid = ResponsiveGrid(min_cell_width=260)
         self.content_layout.addWidget(self._portfolio_grid)
 
+        self._reports_section_label = section_label("Reportes de cierre de período")
+        self.content_layout.addWidget(self._reports_section_label)
+        self._reports_card = self._build_reports_card()
+        self.content_layout.addWidget(self._reports_card)
+        # Oculto hasta que set_user() sepa el rol -- GetPeriodReport es
+        # MANAGER+ server-side (rbac.py), así que ofrecerlo a un rol Estándar
+        # solo produciría un PERMISSION_DENIED. Misma convención de
+        # ocultar-en-vez-de-deshabilitar que el ítem "Usuarios" del sidebar.
+        self._set_reports_visible(False)
+
         self.content_layout.addStretch()
 
+        self._toast = Toast(self)
         self._rebuild_tiles(stats=None)
+
+    # ---- Reportes de cierre de período (BR-DASH-002) --------------------
+
+    def _build_reports_card(self) -> QWidget:
+        frame, layout = card()
+
+        intro = QLabel(
+            "Genere el resumen de un período cerrado (mes, trimestre o año) "
+            "para imprimirlo o archivarlo."
+        )
+        intro.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        presets_row = QHBoxLayout()
+        presets_row.setSpacing(8)
+        for label, resolver in _PRESETS_PERIODO:
+            button = QPushButton(label)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(theme.secondary_button_style(padding="6px 12px"))
+            # `resolver` se liga como default para que cada botón capture el
+            # suyo y no el último del loop (closure de Qt, ver CLAUDE.md).
+            button.clicked.connect(
+                lambda _checked=False, r=resolver: self._apply_preset(r)
+            )
+            presets_row.addWidget(button)
+        presets_row.addStretch()
+        layout.addLayout(presets_row)
+
+        range_grid = ResponsiveGrid(min_cell_width=200)
+        desde_field, self._report_start = labeled_field(
+            "Desde", DISPLAY_DATE_PLACEHOLDER
+        )
+        range_grid.add_widget(desde_field)
+        hasta_field, self._report_end = labeled_field("Hasta", DISPLAY_DATE_PLACEHOLDER)
+        range_grid.add_widget(hasta_field)
+        layout.addWidget(range_grid)
+
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(8)
+        generate_button = QPushButton("Generar reporte")
+        generate_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        generate_button.setStyleSheet(theme.accent_button_style())
+        generate_button.clicked.connect(self._on_generate_report)
+        actions_row.addWidget(generate_button)
+
+        self._report_export_buttons: list[QPushButton] = []
+        for label, handler in (
+            ("Descargar PDF", self._on_report_download_pdf),
+            ("Descargar DOCX", self._on_report_download_docx),
+            ("Imprimir", self._on_report_print),
+        ):
+            button = QPushButton(label)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(theme.secondary_button_style())
+            button.clicked.connect(handler)
+            button.setEnabled(False)  # hasta que haya un reporte cargado
+            actions_row.addWidget(button)
+            self._report_export_buttons.append(button)
+        actions_row.addStretch()
+        layout.addLayout(actions_row)
+
+        self._report_progress = QProgressBar()
+        self._report_progress.setRange(0, 0)
+        self._report_progress.setTextVisible(False)
+        self._report_progress.setFixedHeight(4)
+        self._report_progress.hide()
+        layout.addWidget(self._report_progress)
+
+        self._report_caption = QLabel("")
+        self._report_caption.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 12px;"
+        )
+        self._report_caption.setWordWrap(True)
+        layout.addWidget(self._report_caption)
+
+        self._report_table = QTableWidget(0, len(_REPORT_TABLE_HEADERS))
+        self._report_table.setHorizontalHeaderLabels(_REPORT_TABLE_HEADERS)
+        # "Concepto" absorbe el ancho sobrante; "Sección"/"Valor" se miden
+        # contra su propio contenido -- si no, "Movimiento del período" se
+        # elide a "Movimient..." y el reporte queda ilegible en su tabla.
+        size_columns(self._report_table, stretch_column=1)
+        self._report_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._report_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        # La tabla vive dentro del scroll de la página (wrap_scrollable en
+        # main_window.py). Sin una altura propia, un QTableWidget dentro de un
+        # QScrollArea se queda en su altura mínima y scrollea aparte -- el
+        # "scroll dentro de scroll" que confunde al usuario. La altura real se
+        # fija en _fit_report_table_height() una vez que hay filas, medida
+        # sobre el layout ya calculado en vez de estimada con un alto de fila
+        # supuesto (theme.py's fonts aren't bundled, so row metrics vary por
+        # máquina -- misma advertencia que card.py's _ElidingLabel).
+        self._report_table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._report_table.setVisible(False)
+        style_table(self._report_table)
+        layout.addWidget(self._report_table)
+
+        return frame
+
+    def _set_reports_visible(self, visible: bool) -> None:
+        self._reports_section_label.setVisible(visible)
+        self._reports_card.setVisible(visible)
+
+    def _apply_preset(self, resolver) -> None:
+        inicio, fin = resolver()
+        self._report_start.setText(inicio.strftime("%d/%m/%Y"))
+        self._report_end.setText(fin.strftime("%d/%m/%Y"))
+
+    def _on_generate_report(self) -> None:
+        if not self._session.access_token:
+            return
+        inicio = self._report_start.text().strip()
+        fin = self._report_end.text().strip()
+        self._report_start.set_error(not inicio)
+        self._report_end.set_error(not fin)
+        if not (inicio and fin):
+            self._toast.show_message(
+                "Indique el rango del período (desde y hasta), o use un atajo."
+            )
+            return
+
+        self._report_progress.setRange(0, 0)
+        self._report_progress.show()
+        self._report_worker = AsyncWorker(
+            self._client.get_period_report,
+            self._session.access_token,
+            fecha_a_iso(inicio),
+            fecha_a_iso(fin),
+            error_translator=_friendly_report_message,
+        )
+        self._report_worker.succeeded.connect(self._on_report_loaded)
+        self._report_worker.failed.connect(self._on_report_failed)
+        self._report_worker.finished.connect(self._hide_report_progress)
+        self._report_worker.start()
+
+    def _hide_report_progress(self) -> None:
+        # Mismo motivo que _hide_progress(): parkear el rango detiene el
+        # timer de la animación indeterminada mientras está oculta.
+        self._report_progress.hide()
+        self._report_progress.setRange(0, 1)
+        self._report_progress.setValue(0)
+
+    def _on_report_loaded(self, report) -> None:
+        self._report = report
+        # El servidor devuelve el rango que realmente aplicó -- se muestra ese,
+        # no lo que quedó tipeado en los campos.
+        self._report_start.setText(fecha(report.start_date))
+        self._report_end.setText(fecha(report.end_date))
+        self._report_caption.setText(
+            f"Período del {fecha(report.start_date)} al {fecha(report.end_date)}."
+        )
+
+        filas = documents._filas_reporte(report)
+        self._report_table.setRowCount(0)
+        for seccion, concepto, valor in filas:
+            row = self._report_table.rowCount()
+            self._report_table.insertRow(row)
+            for col, texto in enumerate((seccion, concepto, valor)):
+                item = QTableWidgetItem(texto)
+                if col == 2:
+                    item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+                self._report_table.setItem(row, col, item)
+        self._report_table.setVisible(True)
+        self._fit_report_table_height()
+        for button in self._report_export_buttons:
+            button.setEnabled(True)
+
+    def _fit_report_table_height(self) -> None:
+        """Fija la altura de la tabla a la suma real de sus filas para que
+        muestre el reporte completo de una, sin barra de scroll propia."""
+        alto = self._report_table.horizontalHeader().height()
+        for row in range(self._report_table.rowCount()):
+            alto += self._report_table.rowHeight(row)
+        alto += 2 * self._report_table.frameWidth()
+        self._report_table.setFixedHeight(alto)
+
+    def _on_report_failed(self, message: str) -> None:
+        self._toast.show_message(message)
+
+    def _report_default_name(self, extension: str) -> str:
+        return (
+            f"reporte_{self._report.start_date}_a_{self._report.end_date}.{extension}"
+        )
+
+    def _on_report_download_pdf(self) -> None:
+        if self._report is None:
+            return
+        document = QTextDocument()
+        document.setHtml(
+            documents.reporte_periodo_html(self._report, self._session.username or "")
+        )
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Guardar reporte", self._report_default_name("pdf"), "PDF (*.pdf)"
+        )
+        if not path:
+            return
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+        try:
+            document.print_(printer)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Reporte guardado.")
+
+    def _on_report_download_docx(self) -> None:
+        if self._report is None:
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Guardar reporte", self._report_default_name("docx"), "Word (*.docx)"
+        )
+        if not path:
+            return
+        try:
+            documents_docx.reporte_periodo_docx(
+                self._report, self._session.username or ""
+            ).save(path)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Reporte guardado.")
+
+    def _on_report_print(self) -> None:
+        if self._report is None:
+            return
+        document = QTextDocument()
+        document.setHtml(
+            documents.reporte_periodo_html(self._report, self._session.username or "")
+        )
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        dialog = QPrintDialog(printer, self)
+        if dialog.exec() == QPrintDialog.DialogCode.Accepted:
+            try:
+                document.print_(printer)
+            except OSError as exc:
+                self._toast.show_message(documents.friendly_file_error(exc))
+
+    # ---- Estado de sesión ----------------------------------------------
 
     def set_user(self, username: str, role: str) -> None:
         self._welcome_label.setText(
             f"Sesión iniciada como {username} · Nivel: {tier_label(role)}"
         )
+        self._set_reports_visible(can_view_period_report(role))
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -266,6 +588,24 @@ class DashboardView(BaseView):
             value_text=gs(stats.total_outstanding_balance) if stats else "—",
         )
         self._portfolio_grid.add_widget(outstanding_frame)
+        # BR-DASH-001. Subconjunto del saldo pendiente de arriba: solo lo ya
+        # vencido e impago -- lo que la empresa debería recibir cuando los
+        # deudores se pongan al día con sus cuotas atrasadas. Rojo, porque a
+        # diferencia del saldo pendiente esto sí es un problema a la vista.
+        overdue_frame, _ = stat_tile(
+            "Monto total de mora (Gs)",
+            accent_color=theme.ERROR,
+            icon_text="₲",
+            value_text=gs(stats.total_overdue_amount) if stats else "—",
+        )
+        self._portfolio_grid.add_widget(overdue_frame)
+        overdue_count_frame, _ = stat_tile(
+            "Préstamos en mora",
+            accent_color=theme.ERROR,
+            icon_text="MO",
+            value_text=str(stats.overdue_loans_count) if stats else "—",
+        )
+        self._portfolio_grid.add_widget(overdue_count_frame)
 
     def _on_stats_loaded(self, stats, generation: int) -> None:
         if generation != self._refresh_generation:

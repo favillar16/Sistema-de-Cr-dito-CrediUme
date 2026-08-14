@@ -69,8 +69,8 @@ class _BrandPanel(QWidget):
     the brand's own chart-and-arrow mark bleeding off the bottom-right
     corner as a signature texture, and a crisp logo lockup + tagline drawn
     on top via ordinary child widgets. Everything here derives from the
-    already-established CrediUME brand tokens (theme.py) -- no new palette
-    was introduced, only a composition built from them."""
+    already-established brand tokens (theme.py, incl. theme.BRAND_NAME) --
+    no new palette was introduced, only a composition built from them."""
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -97,7 +97,7 @@ class _BrandPanel(QWidget):
                 )
             )
         lockup_row.addWidget(icon_label)
-        wordmark = QLabel("CrediUME")
+        wordmark = QLabel(theme.BRAND_NAME)
         wordmark.setStyleSheet(
             f"color: white; font-size: 24px; font-weight: 700; "
             f"font-family: {theme.HEADING_FONT_FAMILY};"

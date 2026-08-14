@@ -405,3 +405,19 @@ class DashboardServiceClient:
             )
         except grpc.RpcError as exc:
             raise ApiError(exc.code(), exc.details()) from exc
+
+    def get_period_report(
+        self, access_token: str, start_date: str, end_date: str
+    ) -> dashboard_service_pb2.GetPeriodReportResponse:
+        """BR-DASH-002. `start_date`/`end_date` van en formato de cable
+        (YYYY-MM-DD) -- la vista muestra DD/MM/AAAA y traduce con
+        formatting.fecha_a_iso() antes de llamar acá."""
+        try:
+            return self._stub.GetPeriodReport(
+                dashboard_service_pb2.GetPeriodReportRequest(
+                    start_date=start_date, end_date=end_date
+                ),
+                metadata=_bearer(access_token),
+            )
+        except grpc.RpcError as exc:
+            raise ApiError(exc.code(), exc.details()) from exc

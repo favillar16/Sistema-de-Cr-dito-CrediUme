@@ -3,9 +3,20 @@ from cas_client.rbac_ui import (
     can_edit_installment_amount,
     can_edit_interest_rate,
     can_manage_users,
+    can_view_period_report,
     role_at_least,
     tier_label,
 )
+
+
+def test_can_view_period_report_matches_the_server_side_gate():
+    """rbac.py gatea GetPeriodReport con MANAGER_AND_ABOVE -- si esto se
+    desincroniza, un rol Estándar vería el botón y recibiría PERMISSION_DENIED."""
+    assert can_view_period_report("ADMIN")
+    assert can_view_period_report("MANAGER")
+    assert not can_view_period_report("CREDIT_ANALYST")
+    assert not can_view_period_report("CASHIER")
+    assert not can_view_period_report(None)
 
 
 def test_role_at_least_orders_roles_correctly():
@@ -61,3 +72,15 @@ def test_fixed_interest_rate_matches_server_side_constant():
     # role_at_least/rbac.py). This test exists so a drift is caught here
     # instead of silently rejecting loans in the UI's "Estándar" flow.
     assert FIXED_INTEREST_RATE == "0.24"
+
+
+def test_period_report_gate_matches_rbac_tables_exactly():
+    """Guarda de sincronización real, no una copia a mano de la expectativa:
+    compara can_view_period_report() contra la tabla METHOD_ROLES que el
+    servidor consulta de verdad, para el mismo método."""
+    from cas_server.security.rbac import allowed_roles
+
+    permitidos = allowed_roles("/dashboard.DashboardService/GetPeriodReport")
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+        esperado = any(permitido.value == role for permitido in permitidos)
+        assert can_view_period_report(role) == esperado, role

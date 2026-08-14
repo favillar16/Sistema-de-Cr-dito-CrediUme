@@ -53,6 +53,12 @@ message CreateUserRequest {
     string username = 1;
     string password = 2;
     string role = 3; // CASHIER, CREDIT_ANALYST, MANAGER, ADMIN
+    // Datos personales del operador -- BR-AUTH-006. Obligatorios al dar de
+    // alta: identifican al responsable en los documentos que se entregan al
+    // cliente (Cronograma de Pago, Comprobante de Pago).
+    string first_name = 4;
+    string last_name = 5;
+    string national_id = 6; // C.I.
 }
 
 message CreateUserResponse {
@@ -70,6 +76,11 @@ message UserSummary {
     string role = 3;
     bool is_locked = 4;
     google.protobuf.Timestamp last_login = 5; // Sin fijar si nunca inició sesión
+    // BR-AUTH-006. "" para usuarios creados antes de que existieran estos
+    // campos (p. ej. el ADMIN inicial de seed_admin sin datos cargados).
+    string first_name = 6;
+    string last_name = 7;
+    string national_id = 8;
 }
 
 message ListUsersResponse {

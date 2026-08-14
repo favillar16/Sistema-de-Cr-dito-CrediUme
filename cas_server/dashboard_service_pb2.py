@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17\x64\x61shboard_service.proto\x12\tdashboard\"\x1a\n\x18GetDashboardStatsRequest\"\xbf\x02\n\x19GetDashboardStatsResponse\x12\x1b\n\x13total_clients_count\x18\x01 \x01(\x05\x12\x1c\n\x14\x61\x63tive_clients_count\x18\x02 \x01(\x05\x12\x1b\n\x13pending_loans_count\x18\x03 \x01(\x05\x12\x1c\n\x14\x61pproved_loans_count\x18\x04 \x01(\x05\x12\x1a\n\x12\x61\x63tive_loans_count\x18\x05 \x01(\x05\x12\x18\n\x10paid_loans_count\x18\x06 \x01(\x05\x12\x1d\n\x15\x64\x65\x66\x61ulted_loans_count\x18\x07 \x01(\x05\x12\x1b\n\x13\x65xpired_loans_count\x18\x08 \x01(\x05\x12\x17\n\x0ftotal_disbursed\x18\t \x01(\t\x12!\n\x19total_outstanding_balance\x18\n \x01(\t2r\n\x10\x44\x61shboardService\x12^\n\x11GetDashboardStats\x12#.dashboard.GetDashboardStatsRequest\x1a$.dashboard.GetDashboardStatsResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17\x64\x61shboard_service.proto\x12\tdashboard\"\x1a\n\x18GetDashboardStatsRequest\"\xfa\x02\n\x19GetDashboardStatsResponse\x12\x1b\n\x13total_clients_count\x18\x01 \x01(\x05\x12\x1c\n\x14\x61\x63tive_clients_count\x18\x02 \x01(\x05\x12\x1b\n\x13pending_loans_count\x18\x03 \x01(\x05\x12\x1c\n\x14\x61pproved_loans_count\x18\x04 \x01(\x05\x12\x1a\n\x12\x61\x63tive_loans_count\x18\x05 \x01(\x05\x12\x18\n\x10paid_loans_count\x18\x06 \x01(\x05\x12\x1d\n\x15\x64\x65\x66\x61ulted_loans_count\x18\x07 \x01(\x05\x12\x1b\n\x13\x65xpired_loans_count\x18\x08 \x01(\x05\x12\x17\n\x0ftotal_disbursed\x18\t \x01(\t\x12!\n\x19total_outstanding_balance\x18\n \x01(\t\x12\x1c\n\x14total_overdue_amount\x18\x0b \x01(\t\x12\x1b\n\x13overdue_loans_count\x18\x0c \x01(\x05\">\n\x16GetPeriodReportRequest\x12\x12\n\nstart_date\x18\x01 \x01(\t\x12\x10\n\x08\x65nd_date\x18\x02 \x01(\t\"\xfc\x02\n\x17GetPeriodReportResponse\x12\x12\n\nstart_date\x18\x01 \x01(\t\x12\x10\n\x08\x65nd_date\x18\x02 \x01(\t\x12\x1a\n\x12\x63lients_registered\x18\x03 \x01(\x05\x12\x15\n\rloans_created\x18\x04 \x01(\x05\x12\x16\n\x0eloans_approved\x18\x05 \x01(\x05\x12\x19\n\x11principal_created\x18\x06 \x01(\t\x12\x1a\n\x12principal_approved\x18\x07 \x01(\t\x12\x16\n\x0epayments_count\x18\x08 \x01(\x05\x12\x16\n\x0epayments_total\x18\t \x01(\t\x12\x12\n\nloans_paid\x18\n \x01(\x05\x12\x1d\n\x15\x61\x63tive_loans_at_close\x18\x0b \x01(\x05\x12\x1c\n\x14outstanding_at_close\x18\x0c \x01(\t\x12\x18\n\x10overdue_at_close\x18\r \x01(\t\x12\x1e\n\x16overdue_loans_at_close\x18\x0e \x01(\x05\x32\xcc\x01\n\x10\x44\x61shboardService\x12^\n\x11GetDashboardStats\x12#.dashboard.GetDashboardStatsRequest\x1a$.dashboard.GetDashboardStatsResponse\x12X\n\x0fGetPeriodReport\x12!.dashboard.GetPeriodReportRequest\x1a\".dashboard.GetPeriodReportResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,7 +34,11 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_GETDASHBOARDSTATSREQUEST']._serialized_start=38
   _globals['_GETDASHBOARDSTATSREQUEST']._serialized_end=64
   _globals['_GETDASHBOARDSTATSRESPONSE']._serialized_start=67
-  _globals['_GETDASHBOARDSTATSRESPONSE']._serialized_end=386
-  _globals['_DASHBOARDSERVICE']._serialized_start=388
-  _globals['_DASHBOARDSERVICE']._serialized_end=502
+  _globals['_GETDASHBOARDSTATSRESPONSE']._serialized_end=445
+  _globals['_GETPERIODREPORTREQUEST']._serialized_start=447
+  _globals['_GETPERIODREPORTREQUEST']._serialized_end=509
+  _globals['_GETPERIODREPORTRESPONSE']._serialized_start=512
+  _globals['_GETPERIODREPORTRESPONSE']._serialized_end=892
+  _globals['_DASHBOARDSERVICE']._serialized_start=895
+  _globals['_DASHBOARDSERVICE']._serialized_end=1099
 # @@protoc_insertion_point(module_scope)

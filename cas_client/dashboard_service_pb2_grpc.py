@@ -39,6 +39,11 @@ class DashboardServiceStub(object):
                 request_serializer=dashboard__service__pb2.GetDashboardStatsRequest.SerializeToString,
                 response_deserializer=dashboard__service__pb2.GetDashboardStatsResponse.FromString,
                 _registered_method=True)
+        self.GetPeriodReport = channel.unary_unary(
+                '/dashboard.DashboardService/GetPeriodReport',
+                request_serializer=dashboard__service__pb2.GetPeriodReportRequest.SerializeToString,
+                response_deserializer=dashboard__service__pb2.GetPeriodReportResponse.FromString,
+                _registered_method=True)
 
 
 class DashboardServiceServicer(object):
@@ -51,6 +56,16 @@ class DashboardServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetPeriodReport(self, request, context):
+        """Reporte de cierre de período (BR-DASH-002): agregados acotados a un rango
+        de fechas [start_date, end_date], para presentar una vez cerrado el mes /
+        trimestre / año. A diferencia de GetDashboardStats (una foto del estado
+        actual), esto mide lo que *ocurrió* dentro del período.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_DashboardServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -58,6 +73,11 @@ def add_DashboardServiceServicer_to_server(servicer, server):
                     servicer.GetDashboardStats,
                     request_deserializer=dashboard__service__pb2.GetDashboardStatsRequest.FromString,
                     response_serializer=dashboard__service__pb2.GetDashboardStatsResponse.SerializeToString,
+            ),
+            'GetPeriodReport': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPeriodReport,
+                    request_deserializer=dashboard__service__pb2.GetPeriodReportRequest.FromString,
+                    response_serializer=dashboard__service__pb2.GetPeriodReportResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -87,6 +107,33 @@ class DashboardService(object):
             '/dashboard.DashboardService/GetDashboardStats',
             dashboard__service__pb2.GetDashboardStatsRequest.SerializeToString,
             dashboard__service__pb2.GetDashboardStatsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPeriodReport(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dashboard.DashboardService/GetPeriodReport',
+            dashboard__service__pb2.GetPeriodReportRequest.SerializeToString,
+            dashboard__service__pb2.GetPeriodReportResponse.FromString,
             options,
             channel_credentials,
             insecure,

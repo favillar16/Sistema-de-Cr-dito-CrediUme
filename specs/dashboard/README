@@ -1,0 +1,70 @@
+# Módulo: Panel y Reportes (Dashboard)
+
+## 1. Resumen
+Agregados de solo lectura sobre `clients` y `loans`. No tiene tablas propias ni
+escribe estado de negocio: todo se calcula al vuelo sobre los datos que ya
+registran los módulos de Clientes y Préstamos.
+
+Cubre dos cosas distintas, que deliberadamente no se mezclan:
+*   **Panel (`GetDashboardStats`):** una foto del estado *actual* de la cartera,
+    para la pantalla de inicio.
+*   **Reporte de cierre de período (`GetPeriodReport`):** qué *ocurrió* dentro de
+    un rango de fechas, para presentar una vez cerrado el mes / trimestre / año.
+
+## 2. Reglas de Negocio
+*   **BR-DASH-001 (Monto total de mora):** El panel expone la suma de todo lo
+    vencido e impago de los préstamos ACTIVE (`total_overdue_amount`) y cuántos
+    préstamos tienen al menos una cuota vencida impaga (`overdue_loans_count`).
+    Es el dinero que la empresa debería recibir cuando los deudores se pongan al
+    día con sus cuotas ya vencidas. Se calcula préstamo por préstamo con la
+    misma lógica de BR-LOAN-009 (FIFO de pagos contra el cronograma, mirando
+    solo las cuotas con vencimiento <= hoy), de modo que la suma del panel y el
+    `overdue_amount` de cada préstamo siempre coinciden.
+    **No confundir con `total_outstanding_balance`**, que es el saldo total de
+    los préstamos ACTIVE e incluye además todas las cuotas futuras todavía no
+    exigibles. La mora es siempre un subconjunto de ese saldo.
+*   **BR-DASH-002 (Reporte de cierre de período):** `GetPeriodReport` recibe un
+    rango `[start_date, end_date]` inclusivo en ambos extremos (formato de cable
+    YYYY-MM-DD) y devuelve tres bloques:
+    1.  **Movimiento del período** — clientes registrados, préstamos solicitados
+        y aprobados, y el capital de cada grupo. Se filtra por la fecha del
+        hecho (`Client.created_at`, `Loan.created_at`, `Loan.approved_at`).
+    2.  **Cobranza del período** — cantidad y total de pagos recibidos
+        (`LoanPayment.paid_at`), y préstamos que quedaron cancelados dentro del
+        rango. Un préstamo PAID no guarda su propia fecha de cancelación: se le
+        atribuye la fecha de su último pago, que es el hecho que lo cerró.
+    3.  **Situación al cierre** — préstamos activos, saldo pendiente y monto
+        total de mora (BR-DASH-001). Es una foto del estado actual al momento de
+        generar el reporte, **no** del último día del período; el reporte lo
+        aclara explícitamente para que no se lea como un corte histórico.
+    Un `end_date` anterior a `start_date` se rechaza con `INVALID_ARGUMENT`.
+
+## 3. Modelo de Datos (PostgreSQL)
+Ninguno propio. Lee `clients`, `loans`, `loan_payments` y
+`loan_installment_adjustments` (estos últimos vía el cálculo de cronograma
+compartido con el módulo de Préstamos).
+
+Como todo lectura de préstamos, ambas RPCs aplican de paso el vencimiento
+perezoso de BR-LOAN-003: una aprobación no desembolsada en 30 días pasa a
+EXPIRED al consultarse el panel, y queda auditada igual que en
+`ListClientLoans`.
+
+## 4. Contratos gRPC Relacionados
+*   `GetDashboardStatsRequest` / `GetDashboardStatsResponse`
+*   `GetPeriodReportRequest` / `GetPeriodReportResponse`
+
+Ambos definidos en `protos/dashboard_service.proto`.
+
+## 5. Autorización
+*   `GetDashboardStats` — todos los roles autenticados (`CASHIER_AND_ABOVE`). Son
+    conteos agregados, no datos sensibles por registro.
+*   `GetPeriodReport` — **Agente de Créditos (MANAGER) o Administrador (ADMIN)**
+    (`MANAGER_AND_ABOVE`). El cierre de período es material de gestión, no una
+    consulta operativa, así que se gatea más arriba que el panel.
+
+## 6. Terminología en la interfaz
+El estado `EXPIRED` de `LoanStatusEnum` se presenta al usuario como
+**"Rechazado"** (antes "Caducado") tanto en el panel como en la vista de
+préstamos y en los documentos generados. Es un cambio de etiqueta por decisión
+de producto: el valor del enum, el nombre del campo
+(`expired_loans_count`) y la regla BR-LOAN-003 que lo produce no cambiaron.
