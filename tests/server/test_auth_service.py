@@ -185,7 +185,12 @@ def test_reset_password_rejects_short_password(servicer):
 def test_create_user_success_sets_role(servicer):
     response = servicer.CreateUser(
         auth_service_pb2.CreateUserRequest(
-            username="new_manager", password="Passw0rd!", role="MANAGER"
+            username="new_manager",
+            password="Passw0rd!",
+            role="MANAGER",
+            first_name="Ana",
+            last_name="Benítez",
+            national_id="4123456",
         ),
         FakeContext(),
     )
@@ -210,7 +215,12 @@ def test_create_user_duplicate_username_is_already_exists(servicer):
     with pytest.raises(AbortCalled) as exc_info:
         servicer.CreateUser(
             auth_service_pb2.CreateUserRequest(
-                username="dup_user", password="Passw0rd!", role="CASHIER"
+                username="dup_user",
+                password="Passw0rd!",
+                role="CASHIER",
+                first_name="Ana",
+                last_name="Benítez",
+                national_id="4123456",
             ),
             FakeContext(),
         )
@@ -232,7 +242,12 @@ def test_create_user_concurrent_duplicate_username_never_both_succeed(servicer):
         try:
             response = servicer.CreateUser(
                 auth_service_pb2.CreateUserRequest(
-                    username="race_user", password="Passw0rd!", role="CASHIER"
+                    username="race_user",
+                    password="Passw0rd!",
+                    role="CASHIER",
+                    first_name="Ana",
+                    last_name="Benítez",
+                    national_id="4123456",
                 ),
                 FakeContext(),
             )

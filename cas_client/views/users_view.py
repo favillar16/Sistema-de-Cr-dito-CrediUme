@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from cas_client import theme
+from cas_client.formatting import fecha_hora
 from cas_client.grpc_client import AuthClient, AuthError
 from cas_client.rbac_ui import can_manage_users
 from cas_client.session import Session
@@ -23,11 +24,19 @@ from cas_client.widgets.base_view import BaseView
 from cas_client.widgets.card import card, labeled_field, section_label
 from cas_client.widgets.form_input import FormInput
 from cas_client.widgets.responsive_grid import ResponsiveGrid
-from cas_client.widgets.table import style_table
+from cas_client.widgets.table import size_columns, style_table
 from cas_client.widgets.toast import Toast
 
 _ROLES = ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN")
-_TABLE_HEADERS = ("Usuario", "Rol", "Estado", "Último acceso", "")
+_TABLE_HEADERS = (
+    "Nombre y apellido",
+    "C.I.",
+    "Usuario",
+    "Rol",
+    "Estado",
+    "Último acceso",
+    "",
+)
 _COL_ACTION = len(_TABLE_HEADERS) - 1
 
 
@@ -87,10 +96,21 @@ class UsersView(BaseView):
         create_layout.addWidget(section_label("Nuevo usuario"))
 
         grid = ResponsiveGrid(min_cell_width=220)
-        username_field, self._new_username = labeled_field("Usuario")
+        # Datos personales del operador (BR-AUTH-006) -- obligatorios: son los
+        # que identifican al responsable en el Cronograma de Pago y en el
+        # Comprobante de Pago que recibe el cliente.
+        first_name_field, self._new_first_name = labeled_field("Nombre", required=True)
+        grid.add_widget(first_name_field)
+        last_name_field, self._new_last_name = labeled_field("Apellido", required=True)
+        grid.add_widget(last_name_field)
+        national_id_field, self._new_national_id = labeled_field(
+            "C.I. (documento de identidad)", required=True
+        )
+        grid.add_widget(national_id_field)
+        username_field, self._new_username = labeled_field("Usuario", required=True)
         grid.add_widget(username_field)
         password_field, self._new_password = labeled_field(
-            "Contraseña", "Mínimo 8 caracteres"
+            "Contraseña", "Mínimo 8 caracteres", required=True
         )
         self._new_password.setEchoMode(FormInput.EchoMode.Password)
         grid.add_widget(password_field)
@@ -135,12 +155,18 @@ class UsersView(BaseView):
 
         self._table = QTableWidget(0, len(_TABLE_HEADERS))
         self._table.setHorizontalHeaderLabels(_TABLE_HEADERS)
+        size_columns(self._table, stretch_column=0)
+        # La última columna lleva el botón "Restablecer contraseña" vía
+        # setCellWidget, y ResizeToContents mide el delegate del ítem, no el
+        # widget de la celda -- sin esto el botón sale recortado. Mismo caso y
+        # misma solución que la columna "Ajustar" del cronograma en
+        # loans_view.py: el ancho sale del sizeHint del propio botón.
+        probe = QPushButton("Restablecer contraseña")
+        probe.setStyleSheet(theme.flat_button_style())
         self._table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
+            _COL_ACTION, QHeaderView.ResizeMode.Fixed
         )
-        self._table.horizontalHeader().setSectionResizeMode(
-            _COL_ACTION, QHeaderView.ResizeMode.ResizeToContents
-        )
+        self._table.setColumnWidth(_COL_ACTION, probe.sizeHint().width() + 32)
         style_table(self._table)
         self.content_layout.addWidget(self._table)
 
@@ -182,11 +208,17 @@ class UsersView(BaseView):
             row = self._table.rowCount()
             self._table.insertRow(row)
             last_login = (
-                user.last_login.ToDatetime().strftime("%Y-%m-%d %H:%M")
+                fecha_hora(user.last_login.ToDatetime())
                 if user.HasField("last_login")
                 else "Nunca"
             )
+            # "-" y no "" para los usuarios anteriores a BR-AUTH-006, que no
+            # tienen datos personales cargados: una celda vacía se lee como un
+            # error de carga, un guion se lee como "no aplica".
+            full_name = f"{user.first_name} {user.last_name}".strip() or "-"
             values = (
+                full_name,
+                user.national_id or "-",
                 user.username,
                 user.role,
                 "Bloqueado" if user.is_locked else "Activo",
@@ -215,8 +247,21 @@ class UsersView(BaseView):
         username = self._new_username.text().strip()
         password = self._new_password.text()
         role = self._new_role.currentText()
-        if not username or not password:
-            self._toast.show_message("Ingrese usuario y contraseña.")
+        first_name = self._new_first_name.text().strip()
+        last_name = self._new_last_name.text().strip()
+        national_id = self._new_national_id.text().strip()
+
+        required = (
+            (self._new_first_name, first_name),
+            (self._new_last_name, last_name),
+            (self._new_national_id, national_id),
+            (self._new_username, username),
+            (self._new_password, password),
+        )
+        for widget, value in required:
+            widget.set_error(not value)
+        if not all(value for _widget, value in required):
+            self._toast.show_message("Complete los campos marcados en rojo.")
             return
         if len(password) < 8:
             self._toast.show_message("La contraseña debe tener al menos 8 caracteres.")
@@ -230,6 +275,9 @@ class UsersView(BaseView):
             username=username,
             password=password,
             role=role,
+            first_name=first_name,
+            last_name=last_name,
+            national_id=national_id,
         )
         self._worker.succeeded.connect(self._on_create_success)
         self._worker.failed.connect(self._on_error)
@@ -237,8 +285,15 @@ class UsersView(BaseView):
         self._worker.start()
 
     def _on_create_success(self, _response) -> None:
-        self._new_username.clear()
-        self._new_password.clear()
+        for field in (
+            self._new_first_name,
+            self._new_last_name,
+            self._new_national_id,
+            self._new_username,
+            self._new_password,
+        ):
+            field.clear()
+            field.set_error(False)
         self._new_role.setCurrentIndex(0)
         self._toast.show_message("Usuario creado.")
         self._refresh_users()

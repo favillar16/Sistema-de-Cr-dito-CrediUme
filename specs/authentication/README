@@ -9,6 +9,9 @@ Maneja el acceso seguro al sistema por parte de los operadores (cajeros, analist
 *   **BR-AUTH-003 (Expiración de Sesión):** Los tokens de acceso tienen una vida útil máxima de 8 horas. No hay tokens de actualización (refresh tokens) activos prolongados por razones de seguridad interna; el usuario debe volver a iniciar sesión al día siguiente.
 *   **BR-AUTH-004 (Autorización):** Cada RPC en el servidor debe interceptar la petición y validar si el rol del usuario contenido en el token tiene los permisos necesarios para ejecutar la acción.
 *   **BR-AUTH-005 (Gestión de usuarios):** Solo el rol ADMIN puede crear operadores (`CreateUser`) o listarlos (`ListUsers`). No existe autorregistro: todo usuario del sistema es dado de alta por un Administrador.
+*   **BR-AUTH-006 (Datos personales del operador):** Todo operador se registra con `first_name`, `last_name` y `national_id` (C.I.), obligatorios en `CreateUser`. Sirven para identificar al responsable en los documentos que recibe el cliente: el "Asesor responsable" del Cronograma de Pago y el "Registrado por" del Comprobante de Pago (BR-LOAN-011).
+    Las tres columnas son nullable a nivel de esquema y el requisito se valida en el servicer, mismo criterio que las referencias de `specs/clients/README` (BR-CLI-005): los usuarios creados antes de esta regla -- típicamente el ADMIN inicial de `seed_admin`, que sigue aceptándolos como opcionales para poder arrancar un sistema vacío -- siguen funcionando y se identifican por su `username` en esos documentos.
+    `national_id` **no** lleva restricción UNIQUE, a diferencia de `clients.national_id`: los operadores son pocos y los da de alta un ADMIN que ve la lista completa, y una restricción única obligaría a distinguir cuál de las dos (username o C.I.) falló para devolver un mensaje correcto.
 
 ## 3. Modelo de Datos (PostgreSQL)
 **Tabla: `users` (Operadores del sistema)**
@@ -20,6 +23,7 @@ Maneja el acceso seguro al sistema por parte de los operadores (cajeros, analist
 *   `is_locked` (BOOLEAN)
 *   `locked_until` (Timestamp, nullable) - Fin del bloqueo temporal de BR-AUTH-002; se limpia solo (lazy) al pasar la fecha, mismo patrón que BR-LOAN-003 en `specs/loans/README`.
 *   `last_login` (Timestamp)
+*   `first_name`, `last_name`, `national_id` (VARCHAR, nullable) - Datos personales del operador (BR-AUTH-006). Nullable solo por compatibilidad con los usuarios previos a la regla; `CreateUser` los exige.
 
 **Tabla: `audit_logs` (Trazabilidad)**
 *   `id` (UUID, PK)
@@ -36,5 +40,5 @@ Maneja el acceso seguro al sistema por parte de los operadores (cajeros, analist
 *   `LoginRequest` (username, password) / `LoginResponse` (token, role, expires_in)
 *   `LogoutRequest` / `LogoutResponse` (Invalida el token en el servidor agregándolo a `revoked_tokens`)
 *   `ResetPasswordRequest` / `ResetPasswordResponse` (Exclusivo para ADMIN)
-*   `CreateUserRequest` / `CreateUserResponse` (Alta de un operador -- username, password, role; exclusivo ADMIN, BR-AUTH-005)
+*   `CreateUserRequest` / `CreateUserResponse` (Alta de un operador -- username, password, role, y sus datos personales first_name/last_name/national_id por BR-AUTH-006; exclusivo ADMIN, BR-AUTH-005)
 *   `ListUsersRequest` / `ListUsersResponse` (Listado de operadores del sistema; exclusivo ADMIN, BR-AUTH-005)

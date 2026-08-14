@@ -1,3 +1,4 @@
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -188,6 +189,89 @@ def _nombre_usuario_creador(sesion, prestamo: Loan) -> str:
     return creador.username if creador is not None else ""
 
 
+def _datos_personales_creador(sesion, prestamo: Loan) -> tuple[str, str]:
+    """(nombre completo, C.I.) del asesor que registró el préstamo
+    (BR-AUTH-006), o ("", "") si no se conoce o el usuario no tiene datos
+    personales cargados. El documento decide qué mostrar cuando viene vacío
+    -- acá no se sustituye por el username, para no hacer pasar un nombre de
+    usuario por un nombre real."""
+    if prestamo.created_by_user_id is None:
+        return "", ""
+    creador = sesion.get(User, prestamo.created_by_user_id)
+    if creador is None:
+        return "", ""
+    return _nombre_completo(creador), creador.national_id or ""
+
+
+def _nombre_completo(usuario: User) -> str:
+    """ "Nombre Apellido" del operador, o "" si no tiene ambos cargados."""
+    if not usuario.first_name or not usuario.last_name:
+        return ""
+    return f"{usuario.first_name} {usuario.last_name}"
+
+
+def _operador_actual(sesion) -> tuple[str, str]:
+    """(nombre para mostrar, C.I.) del operador autenticado que está haciendo
+    la llamada -- para el "Registrado por" del Comprobante de Pago.
+
+    Cae de vuelta al `username` cuando el usuario no tiene nombre/apellido
+    cargados (usuarios anteriores a BR-AUTH-006), de modo que el comprobante
+    nunca sale con el campo en blanco. Devuelve ("", "") cuando no hay
+    credenciales -- los tests que llaman al servicer directamente, sin
+    AuthInterceptor, caen acá; mismo patrón tolerante a None que
+    id_actor_actual.
+    """
+    credenciales = get_current_claims()
+    if credenciales is None:
+        return "", ""
+    usuario = sesion.get(User, uuid.UUID(credenciales.user_id))
+    if usuario is None:
+        return credenciales.username, ""
+    return _nombre_completo(usuario) or usuario.username, usuario.national_id or ""
+
+
+def _cuotas_cubiertas_por_pago(
+    prestamo: Loan, pagado_antes: Decimal, monto: Decimal
+) -> list[int]:
+    """BR-LOAN-011: números de cuota que cubre un pago de `monto` cuando ya
+    había `pagado_antes` acumulado.
+
+    Los pagos no están atados a una cuota puntual en el modelo (LoanPayment es
+    un total corrido que se imputa FIFO contra el cronograma, ver
+    _cronograma_con_pendientes), así que "qué cuota pagó" se deduce de qué
+    tramo del cronograma cae dentro del intervalo acumulado
+    [pagado_antes, pagado_antes + monto).
+
+    Esto es a propósito la MISMA imputación que usan BR-LOAN-009 y el
+    cronograma para marcar cuotas como pagadas: si el comprobante dijera otra
+    cosa (p. ej. la cuota que el operador eligió en el desplegable, cuando
+    quedaban cuotas anteriores impagas), contradiría lo que muestra la propia
+    pantalla del préstamo justo después.
+
+    Un pago que no llega a cubrir ninguna cuota entera igual devuelve la cuota
+    que abonó parcialmente -- el comprobante dice a qué cuota se imputó, no
+    cuáles quedaron saldadas.
+    """
+    cronograma = calcular_cronograma(
+        prestamo.principal_amount,
+        prestamo.interest_rate,
+        prestamo.term_months,
+        fecha_primer_vencimiento=prestamo.first_due_date,
+        ajustes=_ajustes_prestamo(prestamo),
+    )
+    hasta = pagado_antes + monto
+    cubiertas: list[int] = []
+    inicio_cuota = CERO
+    for fila in cronograma:
+        fin_cuota = inicio_cuota + fila.monto_cuota
+        # Intersección no vacía entre [inicio_cuota, fin_cuota) y
+        # [pagado_antes, hasta).
+        if inicio_cuota < hasta and fin_cuota > pagado_antes:
+            cubiertas.append(fila.numero)
+        inicio_cuota = fin_cuota
+    return cubiertas
+
+
 def _prestamo_a_respuesta(
     prestamo: Loan, sesion
 ) -> loan_service_pb2.GetLoanByIdResponse:
@@ -237,6 +321,9 @@ def _prestamo_a_respuesta(
         overdue_installments_count=cuotas_vencidas,
         created_by_username=_nombre_usuario_creador(sesion, prestamo),
     )
+    nombre_asesor, ci_asesor = _datos_personales_creador(sesion, prestamo)
+    argumentos["created_by_full_name"] = nombre_asesor
+    argumentos["created_by_national_id"] = ci_asesor
     if prestamo.approved_at is not None:
         argumentos["approved_at"] = a_marca_tiempo(prestamo.approved_at)
     return loan_service_pb2.GetLoanByIdResponse(**argumentos)
@@ -821,14 +908,27 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     )
                 )
 
+            # BR-LOAN-011: se resuelve ANTES del commit porque necesita el
+            # acumulado previo a este pago (total_pagado), no el nuevo.
+            cuotas_cubiertas = _cuotas_cubiertas_por_pago(prestamo, total_pagado, monto)
+            operador = _operador_actual(sesion)
+
             sesion.commit()
 
             saldo_restante = max(total_programado - nuevo_total_pagado, CERO)
+            nombre_operador, ci_operador = operador
             return loan_service_pb2.RecordPaymentResponse(
                 success=True,
                 status=prestamo.status.value,
                 total_paid=str(nuevo_total_pagado),
                 remaining_balance=str(saldo_restante),
+                covered_installments=cuotas_cubiertas,
+                total_installments=prestamo.term_months,
+                amount_paid=str(monto),
+                paid_at=a_marca_tiempo(ahora),
+                transfer_reference=referencia_transferencia,
+                recorded_by_name=nombre_operador,
+                recorded_by_national_id=ci_operador,
             )
 
     def MarkDefaulted(self, request, context):

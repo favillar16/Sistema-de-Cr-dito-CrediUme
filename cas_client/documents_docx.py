@@ -14,7 +14,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 from cas_client import assets, documents, theme
-from cas_client.formatting import gs, rate_percent
+from cas_client.formatting import fecha, gs, rate_percent
 
 
 def _rgb(hex_color: str) -> RGBColor:
@@ -93,6 +93,11 @@ def _add_header(document: Document, title: str, draft_banner: bool = True) -> No
     addr_run = addr_paragraph.add_run(documents._COMPANY_ADDRESS)
     addr_run.font.size = Pt(9)
     addr_run.font.color.rgb = _TEXT_MUTED
+
+    phone_paragraph = text_cell.add_paragraph()
+    phone_run = phone_paragraph.add_run(f"Cel: {documents._COMPANY_PHONE}")
+    phone_run.font.size = Pt(9)
+    phone_run.font.color.rgb = _TEXT_MUTED
 
     _add_divider(document)
     _add_title(document, title)
@@ -185,6 +190,107 @@ def _add_cargos_y_garantia(document: Document, loan) -> None:
         )
 
 
+def comprobante_pago_docx(loan, client, payment) -> Document:
+    """DOCX de documents.py's comprobante_pago_html() -- BR-LOAN-011. Sin
+    banner de borrador, mismo criterio que el Cronograma: no tiene texto legal
+    a revisar, solo el detalle de un pago ya registrado."""
+    document = Document()
+    _add_header(document, "Comprobante de Pago", draft_banner=False)
+    _add_client_block(document, client)
+    _add_labeled_lines(document, [("Préstamo", loan.id)])
+
+    filas = [
+        ("Monto abonado", gs(payment.amount_paid)),
+        (
+            "Cuota(s) abonada(s)",
+            documents.cuotas_cubiertas_texto(
+                payment.covered_installments, payment.total_installments
+            ),
+        ),
+        (
+            "Fecha y hora del pago",
+            payment.paid_at.ToDatetime().strftime("%d/%m/%Y %H:%M"),
+        ),
+        ("Referencia de transferencia", payment.transfer_reference),
+        ("Total pagado del préstamo", gs(payment.total_paid)),
+        ("Saldo restante", gs(payment.remaining_balance)),
+    ]
+    table = document.add_table(rows=1 + len(filas), cols=2)
+    table.style = "Table Grid"
+    table.rows[0].cells[0].text = "Concepto"
+    table.rows[0].cells[1].text = "Detalle"
+    for row_index, (concepto, detalle) in enumerate(filas, start=1):
+        cells = table.rows[row_index].cells
+        cells[0].text = concepto
+        cells[1].text = detalle
+
+    if payment.status == "PAID":
+        paragraph = document.add_paragraph()
+        run = paragraph.add_run("Con este pago el préstamo queda totalmente cancelado.")
+        run.bold = True
+        run.font.color.rgb = _rgb(theme.SUCCESS)
+
+    _add_labeled_lines(
+        document,
+        [
+            (
+                "Registrado por",
+                documents.responsable(
+                    payment.recorded_by_name, payment.recorded_by_national_id
+                ),
+            )
+        ],
+    )
+    _add_footer_note(
+        document,
+        "Comprobante emitido por el sistema de CREDIMED UME. El saldo restante "
+        "puede variar por cargos o ajustes posteriores a la fecha de emisión de "
+        "este comprobante.",
+    )
+    return document
+
+
+def reporte_periodo_docx(report, generated_by: str = "") -> Document:
+    """BR-DASH-002, contraparte .docx de documents.reporte_periodo_html().
+    Sin banner de borrador (no tiene texto legal, solo cifras calculadas),
+    igual criterio que cronograma_docx.
+
+    report: dashboard_service_pb2.GetPeriodReportResponse"""
+    document = Document()
+    _add_header(document, "Reporte de Cierre de Período", draft_banner=False)
+
+    lineas = [
+        ("Período", f"del {fecha(report.start_date)} al {fecha(report.end_date)}")
+    ]
+    if generated_by:
+        lineas.append(("Generado por", generated_by))
+    _add_labeled_lines(document, lineas)
+
+    # Misma definición de contenido que el PDF -- ver documents._filas_reporte.
+    filas = documents._filas_reporte(report)
+    table = document.add_table(rows=1 + len(filas), cols=3)
+    table.style = "Table Grid"
+    for col, text in enumerate(["Sección", "Concepto", "Valor"]):
+        table.rows[0].cells[col].text = text
+    for row_index, (seccion, concepto, valor) in enumerate(filas, start=1):
+        cells = table.rows[row_index].cells
+        cells[0].text = seccion
+        cells[1].text = concepto
+        cells[2].text = valor
+
+    _add_footer_note(
+        document,
+        '"Movimiento" y "Cobranza" miden lo ocurrido dentro del período '
+        'seleccionado. "Situación al cierre" es una foto del estado actual de '
+        "la cartera al momento de generar este reporte, no del último día del "
+        "período.",
+    )
+    _add_footer_note(
+        document, "Documento generado por el sistema de CREDIMED UME. Uso interno."
+    )
+    return document
+
+
 def liquidacion_docx(loan, client, schedule) -> Document:
     """loan: loan_service_pb2.GetLoanByIdResponse
     client: client_service_pb2.GetClientByIdResponse
@@ -226,7 +332,7 @@ def liquidacion_docx(loan, client, schedule) -> Document:
 
     _add_footer_note(
         document,
-        "Documento generado por el sistema CrediUME. Válido únicamente junto "
+        "Documento generado por el sistema de CREDIMED UME. Válido únicamente junto "
         "con la firma y sello de la entidad.",
     )
     return document
@@ -257,7 +363,7 @@ def pagare_docx(loan, client) -> Document:
         ", que PAGARÉ(MOS) solidariamente, a su orden, libre de gastos y sin "
         f"protesto, en {loan.term_months} cuotas iguales, mensuales y "
         f"consecutivas, con vencimiento la primera de ellas el día "
-        f"{loan.first_due_date}, y las siguientes cuotas en esas mismas "
+        f"{fecha(loan.first_due_date)}, y las siguientes cuotas en esas mismas "
         f"fechas de los meses subsiguientes hasta su total cancelación, en "
         f"el domicilio de {documents._COMPANY_NAME}, sito en "
         f"{documents._COMPANY_ADDRESS}."
@@ -304,7 +410,11 @@ def cronograma_docx(loan, client, schedule) -> Document:
     _add_header(document, "Cronograma de Pago", draft_banner=False)
     _add_client_block(document, client)
 
-    asesor = loan.created_by_username or "No registrado"
+    asesor = documents.responsable(
+        loan.created_by_full_name,
+        loan.created_by_national_id,
+        respaldo=loan.created_by_username,
+    )
     _add_labeled_lines(
         document,
         [
@@ -313,7 +423,7 @@ def cronograma_docx(loan, client, schedule) -> Document:
             ("Capital", gs(loan.principal_amount)),
             ("Tasa de interés", rate_percent(loan.interest_rate)),
             ("Plazo", f"{loan.term_months} meses"),
-            ("Primer vencimiento", loan.first_due_date),
+            ("Primer vencimiento", fecha(loan.first_due_date)),
         ],
     )
 
@@ -333,7 +443,7 @@ def cronograma_docx(loan, client, schedule) -> Document:
     for row_index, installment in enumerate(schedule.installments, start=1):
         cells = table.rows[row_index].cells
         cells[0].text = str(installment.installment_number)
-        cells[1].text = installment.due_date
+        cells[1].text = fecha(installment.due_date)
         cells[2].text = gs(installment.payment_amount)
         cells[3].text = gs(installment.principal_portion)
         cells[4].text = gs(installment.interest_portion)
@@ -383,7 +493,7 @@ def contrato_docx(loan, client) -> Document:
             f"préstamo otorgado en {loan.term_months} cuotas iguales, "
             "mensuales y consecutivas, bajo el sistema de amortización "
             f"francés (cuota fija), venciendo la primera de ellas el día "
-            f"{loan.first_due_date}, mediante transferencia bancaria, "
+            f"{fecha(loan.first_due_date)}, mediante transferencia bancaria, "
             "débito directo o descuento en cuenta, según lo acordado.",
         ),
         (

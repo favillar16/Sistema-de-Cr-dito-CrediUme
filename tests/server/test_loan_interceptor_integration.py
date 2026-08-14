@@ -41,10 +41,22 @@ def stubs():
         server.stop(grace=None)
 
 
-def _create_user(username, password, role):
+def _create_user(
+    username, password, role, first_name=None, last_name=None, national_id=None
+):
+    """Los datos personales (BR-AUTH-006) son opcionales acá a propósito: la
+    mayoría de los tests no los necesitan, y dejarlos en None cubre de paso el
+    caso de los usuarios que ya existían antes de esos campos."""
     with SessionLocal() as session:
         session.add(
-            User(username=username, password_hash=hash_password(password), role=role)
+            User(
+                username=username,
+                password_hash=hash_password(password),
+                role=role,
+                first_name=first_name,
+                last_name=last_name,
+                national_id=national_id,
+            )
         )
         session.commit()
 
@@ -349,3 +361,116 @@ def test_record_payment_without_token_is_unauthenticated(stubs):
             )
         )
     assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+
+# ---- BR-AUTH-006 / BR-LOAN-011: identificación del operador ---------------
+
+
+def test_get_loan_by_id_reports_advisor_personal_data(stubs):
+    """BR-AUTH-006: el Cronograma de Pago identifica al asesor por nombre y
+    C.I., no solo por su usuario del sistema."""
+    auth_stub, loan_stub = stubs
+    _create_user(
+        "cashier_named",
+        "Passw0rd!",
+        RoleEnum.CASHIER,
+        first_name="Ana",
+        last_name="Benítez",
+        national_id="4123456",
+    )
+    client_id = _create_client_row(national_id="7000020", email="named@example.com")
+    metadata = _login(auth_stub, "cashier_named", "Passw0rd!")
+
+    created = loan_stub.CreateLoan(
+        loan_service_pb2.CreateLoanRequest(
+            client_id=str(client_id),
+            principal_amount="1000.00",
+            interest_rate="0.24",
+            term_months=6,
+        ),
+        metadata=metadata,
+    )
+    detail = loan_stub.GetLoanById(
+        loan_service_pb2.GetLoanByIdRequest(loan_id=created.loan_id), metadata=metadata
+    )
+    assert detail.created_by_full_name == "Ana Benítez"
+    assert detail.created_by_national_id == "4123456"
+    assert detail.created_by_username == "cashier_named"
+
+
+def test_get_loan_by_id_advisor_personal_data_empty_for_legacy_user(stubs):
+    """Un operador sin datos personales cargados devuelve "" en los campos
+    nuevos -- el documento cae de vuelta a created_by_username."""
+    auth_stub, loan_stub = stubs
+    _create_user("cashier_unnamed", "Passw0rd!", RoleEnum.CASHIER)
+    client_id = _create_client_row(national_id="7000021", email="unnamed@example.com")
+    metadata = _login(auth_stub, "cashier_unnamed", "Passw0rd!")
+
+    created = loan_stub.CreateLoan(
+        loan_service_pb2.CreateLoanRequest(
+            client_id=str(client_id),
+            principal_amount="1000.00",
+            interest_rate="0.24",
+            term_months=6,
+        ),
+        metadata=metadata,
+    )
+    detail = loan_stub.GetLoanById(
+        loan_service_pb2.GetLoanByIdRequest(loan_id=created.loan_id), metadata=metadata
+    )
+    assert detail.created_by_full_name == ""
+    assert detail.created_by_national_id == ""
+    assert detail.created_by_username == "cashier_unnamed"
+
+
+def test_record_payment_reports_the_operator_who_registered_it(stubs):
+    """BR-LOAN-011: el "Registrado por" del Comprobante de Pago sale del
+    usuario autenticado, no de lo que mande el cliente."""
+    auth_stub, loan_stub = stubs
+    _create_user(
+        "manager_pay",
+        "Passw0rd!",
+        RoleEnum.MANAGER,
+        first_name="Carlos",
+        last_name="Duarte",
+        national_id="3987654",
+    )
+    client_id = _create_client_row(national_id="7000022", email="paidby@example.com")
+    loan_id = _create_loan_row(
+        client_id, LoanStatusEnum.ACTIVE, approved_at=datetime.now(timezone.utc)
+    )
+    metadata = _login(auth_stub, "manager_pay", "Passw0rd!")
+
+    response = loan_stub.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=str(loan_id),
+            transfer_reference="TRF-COMPROBANTE",
+            installment_number=1,
+        ),
+        metadata=metadata,
+    )
+    assert response.recorded_by_name == "Carlos Duarte"
+    assert response.recorded_by_national_id == "3987654"
+    assert list(response.covered_installments) == [1]
+    assert response.transfer_reference == "TRF-COMPROBANTE"
+    assert response.paid_at.seconds > 0
+
+
+def test_record_payment_falls_back_to_username_when_operator_has_no_name(stubs):
+    """El comprobante nunca sale con el campo "Registrado por" vacío."""
+    auth_stub, loan_stub = stubs
+    _create_user("manager_anon", "Passw0rd!", RoleEnum.MANAGER)
+    client_id = _create_client_row(national_id="7000023", email="anonpay@example.com")
+    loan_id = _create_loan_row(
+        client_id, LoanStatusEnum.ACTIVE, approved_at=datetime.now(timezone.utc)
+    )
+    metadata = _login(auth_stub, "manager_anon", "Passw0rd!")
+
+    response = loan_stub.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=str(loan_id), transfer_reference="TRF-ANON", installment_number=1
+        ),
+        metadata=metadata,
+    )
+    assert response.recorded_by_name == "manager_anon"
+    assert response.recorded_by_national_id == ""

@@ -18,6 +18,10 @@ contrato_*.docx
 liquidacion_*.docx
 pagare_*.docx
 cronograma_*.docx
+comprobante_*.pdf
+comprobante_*.docx
+reporte_*.pdf
+reporte_*.docx
 
 # Editor/OS cruft
 .vscode/

@@ -175,6 +175,20 @@ class AuthServicer(auth_service_pb2_grpc.AuthServiceServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "username, password and role are required",
             )
+        # BR-AUTH-006: los datos personales del operador son obligatorios al
+        # darlo de alta -- se imprimen como responsable en los documentos que
+        # recibe el cliente. Se validan acá y no con una restricción de
+        # esquema, mismo criterio que las referencias de BR-CLI-005: los
+        # usuarios que ya existían siguen teniéndolos vacíos y no hizo falta
+        # backfill (ver models.py).
+        first_name = request.first_name.strip()
+        last_name = request.last_name.strip()
+        national_id = request.national_id.strip()
+        if not first_name or not last_name or not national_id:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "first_name, last_name and national_id are required",
+            )
         if len(request.password) < config.PASSWORD_MIN_LENGTH:
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
@@ -202,6 +216,9 @@ class AuthServicer(auth_service_pb2_grpc.AuthServiceServicer):
                 username=request.username,
                 password_hash=hash_password(request.password),
                 role=role,
+                first_name=first_name,
+                last_name=last_name,
+                national_id=national_id,
             )
             session.add(user)
             # The INSERT (and any concurrent unique-constraint conflict)
@@ -241,6 +258,9 @@ class AuthServicer(auth_service_pb2_grpc.AuthServiceServicer):
                     username=user.username,
                     role=user.role.value,
                     is_locked=user.is_locked,
+                    first_name=user.first_name or "",
+                    last_name=user.last_name or "",
+                    national_id=user.national_id or "",
                 )
                 if user.last_login is not None:
                     fields["last_login"] = _to_timestamp(user.last_login)

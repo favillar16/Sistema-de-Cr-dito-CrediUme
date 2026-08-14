@@ -5,6 +5,12 @@ package dashboard;
 service DashboardService {
     // Estadísticas agregadas de solo lectura para la pantalla de inicio.
     rpc GetDashboardStats (GetDashboardStatsRequest) returns (GetDashboardStatsResponse);
+
+    // Reporte de cierre de período (BR-DASH-002): agregados acotados a un rango
+    // de fechas [start_date, end_date], para presentar una vez cerrado el mes /
+    // trimestre / año. A diferencia de GetDashboardStats (una foto del estado
+    // actual), esto mide lo que *ocurrió* dentro del período.
+    rpc GetPeriodReport (GetPeriodReportRequest) returns (GetPeriodReportResponse);
 }
 
 message GetDashboardStatsRequest {
@@ -18,7 +24,53 @@ message GetDashboardStatsResponse {
     int32 active_loans_count = 5;     // ACTIVE
     int32 paid_loans_count = 6;       // PAID
     int32 defaulted_loans_count = 7;  // DEFAULTED
-    int32 expired_loans_count = 8;    // EXPIRED (BR-LOAN-003)
+    // EXPIRED (BR-LOAN-003). El nombre del campo sigue el LoanStatusEnum del
+    // servidor; la etiqueta que ve el usuario es "Rechazados" (ver theme.py /
+    // dashboard_view.py) -- decisión de producto, no un estado nuevo.
+    int32 expired_loans_count = 8;
     string total_disbursed = 9;            // Suma de capital de préstamos ACTIVE/PAID/DEFAULTED
     string total_outstanding_balance = 10; // Suma del saldo restante de préstamos ACTIVE
+    // BR-DASH-001 -- "Monto total de mora": suma de lo vencido e impago de
+    // todos los préstamos ACTIVE (mismo cálculo por préstamo que
+    // GetLoanByIdResponse.overdue_amount, BR-LOAN-009). Es lo que la empresa
+    // debería recibir cuando los deudores se pongan al día con sus cuotas
+    // vencidas -- NO es total_outstanding_balance, que incluye además todas
+    // las cuotas futuras todavía no vencidas.
+    string total_overdue_amount = 11;
+    int32 overdue_loans_count = 12;   // Préstamos ACTIVE con al menos una cuota vencida impaga
+}
+
+// BR-DASH-002. Ambas fechas en formato YYYY-MM-DD (formato de cable, igual que
+// el resto del contrato -- la UI muestra DD/MM/AAAA y traduce en el borde).
+// Rango inclusivo en ambos extremos.
+message GetPeriodReportRequest {
+    string start_date = 1;
+    string end_date = 2;
+}
+
+message GetPeriodReportResponse {
+    // Eco del rango efectivamente aplicado (YYYY-MM-DD), para que el documento
+    // generado no dependa de lo que el cliente creía haber pedido.
+    string start_date = 1;
+    string end_date = 2;
+
+    // Altas ocurridas dentro del período
+    int32 clients_registered = 3;      // Client.created_at dentro del rango
+    int32 loans_created = 4;           // Loan.created_at dentro del rango
+    int32 loans_approved = 5;          // Loan.approved_at dentro del rango
+    string principal_created = 6;      // Capital solicitado en los préstamos creados
+    string principal_approved = 7;     // Capital de los préstamos aprobados
+
+    // Cobranza ocurrida dentro del período
+    int32 payments_count = 8;          // LoanPayment.paid_at dentro del rango
+    string payments_total = 9;         // Suma de LoanPayment.amount
+
+    // Cierre de préstamos dentro del período (por fecha del hecho que los cerró)
+    int32 loans_paid = 10;             // Pasaron a PAID (último pago dentro del rango)
+
+    // Foto al cierre del período (estado al momento de generar el reporte)
+    int32 active_loans_at_close = 11;
+    string outstanding_at_close = 12;  // Saldo pendiente total de los ACTIVE
+    string overdue_at_close = 13;      // Monto total de mora (BR-DASH-001)
+    int32 overdue_loans_at_close = 14;
 }

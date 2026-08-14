@@ -23,7 +23,13 @@ from PySide6.QtWidgets import (
 )
 
 from cas_client import documents, documents_docx, theme
-from cas_client.formatting import gs, rate_percent
+from cas_client.formatting import (
+    DISPLAY_DATE_PLACEHOLDER,
+    fecha,
+    fecha_a_iso,
+    gs,
+    rate_percent,
+)
 from cas_client.grpc_client import ApiError, ClientServiceClient, LoanServiceClient
 from cas_client.rbac_ui import (
     can_edit_installment_amount,
@@ -39,7 +45,7 @@ from cas_client.widgets.currency_input import CurrencyInput
 from cas_client.widgets.form_input import FormInput
 from cas_client.widgets.responsive_grid import ResponsiveGrid
 from cas_client.widgets.scroll_area import wrap_scrollable
-from cas_client.widgets.table import style_table
+from cas_client.widgets.table import size_columns, style_table
 from cas_client.widgets.toast import Toast
 
 (
@@ -86,7 +92,11 @@ _ESTADOS_LABEL = {
     "ACTIVE": "Activo",
     "PAID": "Pagado",
     "DEFAULTED": "Incumplido",
-    "EXPIRED": "Caducado",
+    # LoanStatusEnum.EXPIRED se muestra como "Rechazado" por decisión de
+    # producto (antes "Caducado") -- el estado del servidor no cambió, solo la
+    # etiqueta que ve el usuario. Ver documents.py, que tiene su propia copia
+    # de este mapa para los documentos generados.
+    "EXPIRED": "Rechazado",
 }
 
 # (background, foreground) per status -- single source of truth now lives in
@@ -99,6 +109,10 @@ _DOCUMENT_LABELS = {
     "pagare": "Pagaré",
     "contrato": "Contrato",
     "cronograma": "Cronograma de pago (para el cliente)",
+    # BR-LOAN-011. A diferencia de los otros cuatro, este no se puede armar en
+    # cualquier momento a partir del préstamo: describe UN pago puntual, así
+    # que solo se habilita después de registrar uno (ver _last_payment).
+    "comprobante": "Comprobante del último pago registrado",
 }
 
 
@@ -145,16 +159,9 @@ def _friendly_message(exc: Exception) -> str:
     return f"No se pudo conectar con el servidor: {exc}"
 
 
-def _friendly_file_error(exc: OSError) -> str:
-    """Translates a file I/O failure from saving/printing a document (locked
-    file, no permissions, disk full) into a user-facing message -- never a
-    raw traceback, matching the rule ES-003 §5 already enforces elsewhere."""
-    if isinstance(exc, PermissionError):
-        return (
-            "No se pudo guardar el documento: el archivo está abierto en otro "
-            "programa o no tiene permisos de escritura en esa carpeta."
-        )
-    return f"No se pudo guardar el documento: {exc.strerror or exc}"
+# Promovido a documents.py una vez que dashboard_view.py (reporte de cierre de
+# período) pasó a ser un segundo call site del mismo manejo de error de E/S.
+_friendly_file_error = documents.friendly_file_error
 
 
 class LoansView(BaseView):
@@ -178,6 +185,13 @@ class LoansView(BaseView):
         self._selected_loan_id: str | None = None
         self._detail_loan = None
         self._pending_document: tuple[str, str] | None = None
+        # BR-LOAN-011: RecordPaymentResponse del último pago registrado en
+        # esta sesión, junto al préstamo al que corresponde. El servidor no
+        # expone un historial de pagos, así que el comprobante solo puede
+        # emitirse para el pago recién hecho -- se descarta al cambiar de
+        # préstamo para no emitir un comprobante contra el préstamo equivocado.
+        self._last_payment = None
+        self._last_payment_loan_id: str | None = None
         self._pending_schedule_after_create = False
 
         self._progress = QProgressBar()
@@ -245,9 +259,7 @@ class LoansView(BaseView):
 
         self._client_results_table = QTableWidget(0, 2)
         self._client_results_table.setHorizontalHeaderLabels(("Nombre", "Documento"))
-        self._client_results_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
+        size_columns(self._client_results_table, stretch_column=0)
         self._client_results_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
         )
@@ -297,11 +309,9 @@ class LoansView(BaseView):
 
         self._loans_table = QTableWidget(0, len(_LOANS_TABLE_HEADERS))
         self._loans_table.setHorizontalHeaderLabels(_LOANS_TABLE_HEADERS)
-        self._loans_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
-        # Default column width truncates "Cuota vencida (N)" to "Cuota …".
-        self._loans_table.setColumnWidth(1, 150)
+        # La columna "Cuotas" ("Cuota vencida (N)") ya no necesita un ancho
+        # fijo de 150px: size_columns la mide contra su propio contenido.
+        size_columns(self._loans_table, stretch_column=0)
         self._loans_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._loans_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
@@ -340,11 +350,7 @@ class LoansView(BaseView):
 
         self._active_loans_table = QTableWidget(0, len(_ACTIVE_LOANS_TABLE_HEADERS))
         self._active_loans_table.setHorizontalHeaderLabels(_ACTIVE_LOANS_TABLE_HEADERS)
-        self._active_loans_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
-        # Default column width truncates "Cuota vencida (N)" to "Cuota …".
-        self._active_loans_table.setColumnWidth(1, 150)
+        size_columns(self._active_loans_table, stretch_column=0)
         self._active_loans_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
         )
@@ -685,7 +691,7 @@ class LoansView(BaseView):
         card_layout.addWidget(grid)
 
         due_date_field, self._edit_first_due_date = labeled_field(
-            "Primer vencimiento", "AAAA-MM-DD"
+            "Primer vencimiento", DISPLAY_DATE_PLACEHOLDER
         )
         card_layout.addWidget(due_date_field)
 
@@ -774,7 +780,7 @@ class LoansView(BaseView):
             return
         self._edit_principal.set_amount(self._detail_loan.principal_amount)
         self._edit_term.setText(str(self._detail_loan.term_months))
-        self._edit_first_due_date.setText(self._detail_loan.first_due_date)
+        self._edit_first_due_date.setText(fecha(self._detail_loan.first_due_date))
         self._edit_guarantee_type.setText(self._detail_loan.guarantee_type)
         self._edit_guarantee_amount.set_amount(self._detail_loan.guarantee_amount)
         self._edit_charge_interest_tax.set_amount(self._detail_loan.charge_interest_tax)
@@ -808,7 +814,7 @@ class LoansView(BaseView):
             loan_id=self._selected_loan_id,
             principal_amount=principal,
             term_months=term_months,
-            first_due_date=first_due_date,
+            first_due_date=fecha_a_iso(first_due_date),
         )
         self._worker.succeeded.connect(
             lambda _r: self._on_action_success("Propuesta actualizada.")
@@ -990,8 +996,10 @@ class LoansView(BaseView):
         docs_frame, docs_card = card()
         docs_card.addWidget(section_label("Documentos"))
         docs_hint = QLabel(
-            "Los documentos generados son un borrador -- su texto legal aún no "
-            "fue revisado. No usar en producción sin validación legal."
+            "La Liquidación, el Pagaré y el Contrato son un borrador -- su texto "
+            "legal aún no fue revisado. No usar en producción sin validación "
+            "legal. El Cronograma y el Comprobante de pago no llevan texto legal: "
+            "solo cifras ya registradas."
         )
         docs_hint.setWordWrap(True)
         docs_hint.setStyleSheet(f"color: {theme.ERROR}; font-size: 11px;")
@@ -1069,7 +1077,7 @@ class LoansView(BaseView):
             f"Capital: {gs(loan.principal_amount)}  ·  "
             f"Tasa de interés: {rate_percent(loan.interest_rate)}  ·  "
             f"Plazo: {loan.term_months} meses  ·  "
-            f"Primer vencimiento: {loan.first_due_date}\n"
+            f"Primer vencimiento: {fecha(loan.first_due_date)}\n"
             f"Total pagado: {gs(loan.total_paid)}  ·  "
             f"Saldo restante: {gs(loan.remaining_balance)}\n"
             f"Garantía: {garantia}  ·  Total cargos: {gs(loan.total_charges)}  ·  "
@@ -1084,9 +1092,17 @@ class LoansView(BaseView):
             docx_button,
             print_button,
         ) in self._document_buttons.items():
-            enabled = (
-                puede_liquidacion if kind == "liquidacion" else puede_pagare_contrato
-            )
+            if kind == "liquidacion":
+                enabled = puede_liquidacion
+            elif kind == "comprobante":
+                # BR-LOAN-011: solo hay comprobante para un pago concreto, y
+                # solo se conserva el de esta sesión (ver _last_payment).
+                enabled = (
+                    self._last_payment is not None
+                    and self._last_payment_loan_id == loan.id
+                )
+            else:
+                enabled = puede_pagare_contrato
             # "cronograma" se entrega al cliente una vez que el préstamo tiene
             # un cronograma confirmado (mismo criterio que pagaré/contrato:
             # APPROVED/ACTIVE/PAID), no ya en PENDING, aunque el cronograma
@@ -1191,7 +1207,7 @@ class LoansView(BaseView):
                 continue
             label = (
                 f"Cuota {installment.installment_number} · "
-                f"Vence {installment.due_date} · {gs(installment.amount_due)}"
+                f"Vence {fecha(installment.due_date)} · {gs(installment.amount_due)}"
             )
             self._payment_installment_combo.addItem(
                 label, (installment.installment_number, installment.amount_due)
@@ -1233,9 +1249,19 @@ class LoansView(BaseView):
             on_success=self._on_payment_recorded,
         )
 
-    def _on_payment_recorded(self, _response) -> None:
+    def _on_payment_recorded(self, response) -> None:
         self._payment_reference_input.clear()
-        self._on_action_success("Pago registrado.")
+        self._last_payment = response
+        self._last_payment_loan_id = self._selected_loan_id
+        cuotas = documents.cuotas_cubiertas_texto(
+            response.covered_installments, response.total_installments
+        )
+        # _on_action_success recarga el detalle, que es lo que re-habilita la
+        # fila del comprobante en la tarjeta de Documentos.
+        self._on_action_success(
+            f"Pago registrado — {cuotas}. Puede descargar el comprobante en "
+            '"Documentos".'
+        )
 
     def _on_action_success(self, message: str) -> None:
         self._toast.show_message(message)
@@ -1278,11 +1304,19 @@ class LoansView(BaseView):
 
         self._schedule_table = QTableWidget(0, len(_SCHEDULE_TABLE_HEADERS))
         self._schedule_table.setHorizontalHeaderLabels(_SCHEDULE_TABLE_HEADERS)
+        size_columns(self._schedule_table, stretch_column=2)
+        # La última columna lleva el botón "Ajustar" vía setCellWidget, y
+        # ResizeToContents mide el delegate del ítem, no el widget de la
+        # celda -- por eso quedaba a un ancho que recortaba el botón a "ust".
+        # Se fija a partir del sizeHint real del mismo botón que se va a
+        # insertar, en vez de un número mágico que dependa de la fuente.
+        probe = QPushButton("Ajustar")
+        probe.setStyleSheet(theme.flat_button_style())
         self._schedule_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.Stretch
+            _SCHEDULE_COL_ADJUST, QHeaderView.ResizeMode.Fixed
         )
-        self._schedule_table.horizontalHeader().setSectionResizeMode(
-            _SCHEDULE_COL_ADJUST, QHeaderView.ResizeMode.ResizeToContents
+        self._schedule_table.setColumnWidth(
+            _SCHEDULE_COL_ADJUST, probe.sizeHint().width() + 32
         )
         self._schedule_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
@@ -1333,7 +1367,7 @@ class LoansView(BaseView):
                 monto_label += " (ajustada)"
             values = (
                 str(installment.installment_number),
-                installment.due_date,
+                fecha(installment.due_date),
                 monto_label,
                 gs(installment.principal_portion),
                 gs(installment.interest_portion),
@@ -1454,6 +1488,9 @@ class LoansView(BaseView):
         elif kind == "cronograma":
             html = documents.cronograma_html(loan, client, schedule)
             default_name = f"cronograma_{loan.id[:8]}.pdf"
+        elif kind == "comprobante":
+            html = documents.comprobante_pago_html(loan, client, self._last_payment)
+            default_name = f"comprobante_{loan.id[:8]}.pdf"
         else:
             html = documents.contrato_html(loan, client)
             default_name = f"contrato_{loan.id[:8]}.pdf"
@@ -1495,6 +1532,11 @@ class LoansView(BaseView):
         elif kind == "cronograma":
             docx_document = documents_docx.cronograma_docx(loan, client, schedule)
             default_name = f"cronograma_{loan.id[:8]}.docx"
+        elif kind == "comprobante":
+            docx_document = documents_docx.comprobante_pago_docx(
+                loan, client, self._last_payment
+            )
+            default_name = f"comprobante_{loan.id[:8]}.docx"
         else:
             docx_document = documents_docx.contrato_docx(loan, client)
             default_name = f"contrato_{loan.id[:8]}.docx"

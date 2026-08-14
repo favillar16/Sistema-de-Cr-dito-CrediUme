@@ -81,6 +81,42 @@ No ejecutar sin antes decidir con el usuario/dueños del producto — **ninguno 
 
 ---
 
+---
+
+## Bloque 6 — Sesión 2026-08-13 (identidad, fechas, mora y reportes)
+
+Pedido del usuario, ejecutado íntegramente en esta sesión. Estado inicial verificado antes de tocar nada: `pytest` 156/156 en verde.
+
+- [x] **Identidad del establecimiento → CREDIMED UME.** Nombre según la DNIT, RUC `1276703-4`, dirección "Ayolas c/ Acaray — Coronel Oviedo, Paraguay", celular `(0984) 319243`. Reemplaza los placeholders anteriores (`CREDIUME S.A.`, `80XXXXXXX-X`, "Servicios Financieros — Coronel Oviedo, Py") en `documents.py`/`documents_docx.py`, y el texto de marca de la interfaz (`theme.BRAND_NAME`, usado por el login, el sidebar y el título de ventana). El celular es un dato nuevo: no existía en el encabezado antes, ahora se imprime en los cuatro documentos. Guardado por `tests/client/test_documents_identity.py`.
+  **No incluido, a propósito:** los bitmaps de `cas_client/assets/` siguen siendo el logo/isotipo de CrediUme — son assets de diseño provistos, no algo a regenerar acá; hace falta un logo nuevo del diseñador. Tampoco se tocó el texto legal de las cláusulas (sigue en borrador, ver Bloque 4).
+- [x] **Fechas `AAAA-MM-DD` → `DD/MM/AAAA`** en toda la interfaz y en los documentos generados. La traducción vive solo en `cas_client/formatting.py` (`fecha`, `fecha_a_iso`, `fecha_hora`, `DISPLAY_DATE_PLACEHOLDER`); **el contrato gRPC sigue en ISO** y el servidor sigue validando con `analizar_fecha` — no se cambió el formato de cable, y hay un test que lo fija (`test_period_report_rejects_a_malformed_date`). Convertidos: fecha de nacimiento, vencimiento de cédula, primer vencimiento, columna "Vencimiento" del cronograma, desplegable de cuota a pagar, último acceso de usuarios, y los cuatro documentos. Cobertura: `tests/client/test_formatting.py`.
+- [x] **"Préstamos Caducados" → "Préstamos Rechazados".** Cambio de etiqueta en el dashboard, en la vista de préstamos (`_ESTADOS_LABEL`) y en los documentos. `LoanStatusEnum.EXPIRED`, el campo `expired_loans_count` y la regla BR-LOAN-003 quedan intactos: es terminología, no un estado nuevo.
+- [x] **Monto total de mora en el dashboard (`BR-DASH-001`).** Suma de todo lo vencido e impago de los préstamos ACTIVE, más un contador de préstamos en mora. Reutiliza `_estado_pago_prestamo` (BR-LOAN-009) en vez de recalcular, así el total del panel siempre coincide con la suma de los `overdue_amount` de cada préstamo. Se muestra en rojo (`theme.ERROR`) al lado del saldo pendiente justamente para que no se lean como lo mismo: **la mora es un subconjunto del saldo**, que además incluye las cuotas futuras.
+- [x] **Reportes de cierre de período (`BR-DASH-002`).** Nueva RPC `GetPeriodReport(start_date, end_date)`, gateada `MANAGER_AND_ABOVE` (más arriba que `GetDashboardStats`, que es de todos los roles). Tarjeta nueva en el dashboard con atajos Mes actual / Mes anterior / Año actual, tabla de resultados y exportación a PDF/DOCX/impresión. El contenido del reporte se define una sola vez (`documents._filas_reporte`) y lo consumen la tabla, el PDF y el DOCX. Especificado en `specs/dashboard/README` (módulo nuevo).
+- [x] **Revisión visual.** Se revisaron las capturas de `Templates y Detalles/` y se reprodujo la interfaz real (renderizando `MainWindow` a 1366×728 y al mínimo de 900×560):
+  - La compresión de tarjetas del dashboard que muestran `Errores del Dashboard.png` / `error.png` **ya estaba corregida** por el `wrap_scrollable()` del Bloque 1 y no se pudo reproducir. Sin cambios.
+  - **Encabezados de tabla recortados** ("Saldo restante (" en `Ajustes en la Tabla de Datos.png`): real y corregido con el helper nuevo `size_columns()` en `cas_client/widgets/table.py`, aplicado a las 7 tablas de la app. Caso aparte: la columna del botón "Ajustar" usa un ancho fijo derivado del `sizeHint()` del propio botón, porque `ResizeToContents` no mide widgets puestos con `setCellWidget`.
+  - **Fila en blanco sobre la lista de clientes** (`Errores en la ventana de clientes.png`): no se pudo reproducir. Queda anotado en `CLAUDE.md` como pendiente de capturar en la máquina real antes de intentar un arreglo a ciegas.
+- [x] **Estado final:** `black`/`flake8` limpios, `pytest` **186/186** (30 tests nuevos).
+
+---
+
+## Bloque 7 — Sesión 2026-08-13 (comprobante de pago y datos del operador)
+
+Pedido del usuario: dos elementos nuevos. Estado inicial: `pytest` 186/186 en verde.
+
+- [x] **`BR-AUTH-006` — datos personales del operador.** `users` suma `first_name`, `last_name` y `national_id` (C.I.), obligatorios en `CreateUser` y cargados desde `UsersView` (formulario + columnas nuevas en la tabla). Migración `875e90c71fc6_add_personal_data_to_users.py`: columnas nullable planas, sin backfill.
+  - Los usuarios que ya existían siguen funcionando: sin datos personales, los documentos caen de vuelta a su `username`.
+  - `seed_admin` los acepta como **opcionales** a propósito: es el único camino para crear el primer ADMIN cuando todavía nadie puede llamar a `CreateUser`, y exigirlos dejaría una instalación nueva sin forma de entrar.
+  - `users.national_id` **no** lleva UNIQUE (a diferencia de `clients.national_id`): obligaría a distinguir cuál de las dos restricciones falló para devolver un mensaje correcto, y los operadores son pocos y los da de alta un ADMIN que ve la lista.
+- [x] **`BR-LOAN-011` — Comprobante de Pago.** `RecordPayment` ahora devuelve monto abonado, referencia, fecha/hora, total de cuotas, operador que lo registró (nombre + C.I.) y **las cuotas que cubrió el pago**. El documento (PDF y `.docx`) imprime "Cuota(s) 1 de 18" o "Cuota(s) 1,2 de 18" según corresponda. Se emite desde la tarjeta "Documentos" del préstamo, habilitado solo después de registrar un pago en esa sesión.
+  - **Decisión a revisar con el usuario:** las cuotas informadas salen de la imputación FIFO real del préstamo, no de la cuota que el operador eligió en el desplegable. Difieren cuando quedan cuotas anteriores impagas (el dinero siempre se imputa a la más antigua). Se eligió la imputación real para que el comprobante no contradiga el cronograma que el cliente puede ver; hay un test (`test_record_payment_covered_installments_match_the_schedule_fifo`) que fija esa coherencia.
+  - Sin banner de borrador: no tiene texto legal, solo cifras de un pago ya registrado. El aviso de la tarjeta "Documentos" se acotó a Liquidación/Pagaré/Contrato.
+- [x] **Arreglo visual encontrado de paso:** la columna del botón "Restablecer contraseña" en `UsersView` salía recortada al agregarle 2 columnas a la tabla — mismo caso que la columna "Ajustar" del cronograma (`ResizeToContents` no mide widgets puestos con `setCellWidget`), misma solución: ancho fijo derivado del `sizeHint()` del propio botón.
+- [x] **Estado final:** `black`/`flake8` limpios, `pytest` **205/205** (19 tests nuevos).
+
+---
+
 ## Verificado sin problemas — no se necesita ningún cambio aquí
 
 (Para no perder tiempo mañana re-revisando lo que ya se confirmó que está bien: RBAC sin RPCs huérfanas, sin SQL injection, `rbac_ui.py`↔`rbac.py` sincronizados, cobertura de tests de las RPCs nuevas, migraciones con backfill seguro, `conftest.py` con las 7 tablas cubiertas, sin bugs de closures en loops de señales Qt, validación cliente-servidor consistente en campos requeridos. Detalle completo en ES-006 §6.)

@@ -74,6 +74,14 @@ def can_manage_users(role: str | None) -> bool:
     return role_at_least(role, "ADMIN")
 
 
+def can_view_period_report(role: str | None) -> bool:
+    """BR-DASH-002: el reporte de cierre de período es material de gestión, no
+    una consulta operativa -- mirrors rbac.py's MANAGER_AND_ABOVE gate on
+    GetPeriodReport. Las tarjetas del dashboard (GetDashboardStats) siguen
+    siendo visibles para todos los roles."""
+    return role_at_least(role, "MANAGER")
+
+
 def can_edit_installment_amount(role: str | None) -> bool:
     """Only Agente de Créditos (MANAGER) and Administrador (ADMIN) can adjust
     an individual installment's amount (UpdateInstallmentAmount) -- mirrors

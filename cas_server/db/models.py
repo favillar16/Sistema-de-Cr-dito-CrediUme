@@ -41,6 +41,26 @@ class User(Base):
     role: Mapped[RoleEnum] = mapped_column(
         SAEnum(RoleEnum, name="role_enum", native_enum=True), nullable=False
     )
+    # Datos personales del operador (BR-AUTH-006). Se imprimen en los
+    # documentos que llevan la firma de un responsable -- el "Asesor
+    # responsable" del Cronograma de Pago y el "Registrado por" del
+    # Comprobante de Pago -- para que el cliente sepa con quién trató.
+    #
+    # Nullable a nivel de base como el resto de los campos agregados después
+    # (source_of_funds, first_due_date...): el requisito se hace cumplir en
+    # el servicer (CreateUser), no con una restricción de esquema, así que
+    # los usuarios que ya existían (p. ej. el ADMIN de seed_admin) no
+    # necesitaron backfill y siguen funcionando -- los documentos caen de
+    # vuelta al `username` cuando no hay nombre cargado.
+    #
+    # `national_id` NO lleva UNIQUE, a diferencia de Client.national_id: los
+    # operadores son pocos y los da de alta un ADMIN que ve la lista
+    # completa, y una restricción única acá obligaría a distinguir cuál de
+    # las dos (username o C.I.) falló para poder devolver un mensaje
+    # correcto desde confirmar_o_duplicado.
+    first_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    national_id: Mapped[str | None] = mapped_column(String, nullable=True)
     failed_login_attempts: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0
     )

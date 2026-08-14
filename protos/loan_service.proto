@@ -136,6 +136,13 @@ message GetLoanByIdResponse {
     // pago entregado al cliente. "" si no se conoce (préstamos anteriores a
     // este campo, o creados sin un actor autenticado).
     string created_by_username = 23;
+    // Datos personales del mismo asesor (BR-AUTH-006), para identificarlo en
+    // el Cronograma de Pago por nombre y C.I. y no solo por su usuario del
+    // sistema. "" cuando el usuario no tiene esos datos cargados (usuarios
+    // anteriores a BR-AUTH-006) -- en ese caso el documento cae de vuelta a
+    // created_by_username.
+    string created_by_full_name = 24;
+    string created_by_national_id = 25;
 }
 
 message ListClientLoansRequest {
@@ -212,6 +219,27 @@ message RecordPaymentResponse {
     string status = 2; // ACTIVE o PAID después de este pago
     string total_paid = 3;
     string remaining_balance = 4;
+
+    // BR-LOAN-011: datos para emitir el Comprobante de Pago que se entrega al
+    // deudor. Se devuelven desde el servidor (y no se rearman en el cliente a
+    // partir de lo que este creía haber enviado) para que el comprobante
+    // refleje exactamente lo que quedó registrado.
+    //
+    // `covered_installments` son los números de cuota que ESTE pago cubrió,
+    // total o parcialmente, según la imputación FIFO real del préstamo -- que
+    // es la misma que usan BR-LOAN-009 y el cronograma para marcar cuotas como
+    // pagadas. Puede tener más de un elemento (un pago que salda el resto de
+    // una cuota y parte de la siguiente): "Cuota(s) 1,2 de 18".
+    repeated int32 covered_installments = 5;
+    int32 total_installments = 6;   // term_months -- el "de 18"
+    string amount_paid = 7;         // Monto efectivamente registrado
+    google.protobuf.Timestamp paid_at = 8;
+    string transfer_reference = 9;
+    // Operador que registró el pago (BR-AUTH-006). Nombre y apellido si los
+    // tiene cargados; si no, su username, para que el campo nunca salga vacío
+    // en el comprobante.
+    string recorded_by_name = 10;
+    string recorded_by_national_id = 11;
 }
 
 message MarkDefaultedRequest {

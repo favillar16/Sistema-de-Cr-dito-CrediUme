@@ -118,7 +118,12 @@ def test_admin_can_call_create_user(grpc_stub):
 
     response = grpc_stub.CreateUser(
         auth_service_pb2.CreateUserRequest(
-            username="new_from_admin", password="Passw0rd!", role="CREDIT_ANALYST"
+            username="new_from_admin",
+            password="Passw0rd!",
+            role="CREDIT_ANALYST",
+            first_name="Nuevo",
+            last_name="Operador",
+            national_id="5123456",
         ),
         metadata=(("authorization", f"Bearer {login.access_token}"),),
     )

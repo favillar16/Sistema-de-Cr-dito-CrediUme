@@ -75,3 +75,42 @@ def test_get_dashboard_stats_without_token_is_unauthenticated(stubs):
             dashboard_service_pb2.GetDashboardStatsRequest()
         )
     assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+
+def _period_request():
+    return dashboard_service_pb2.GetPeriodReportRequest(
+        start_date="2026-01-01", end_date="2026-12-31"
+    )
+
+
+@pytest.mark.parametrize("role", [RoleEnum.MANAGER, RoleEnum.ADMIN])
+def test_get_period_report_allows_manager_and_above(stubs, role):
+    auth_stub, dashboard_stub = stubs
+    username = f"report_ok_{role.value.lower()}"
+    _create_user(username, "Passw0rd!", role)
+    metadata = _login(auth_stub, username, "Passw0rd!")
+
+    response = dashboard_stub.GetPeriodReport(_period_request(), metadata=metadata)
+    assert response.start_date == "2026-01-01"
+    assert response.end_date == "2026-12-31"
+
+
+@pytest.mark.parametrize("role", [RoleEnum.CASHIER, RoleEnum.CREDIT_ANALYST])
+def test_get_period_report_denies_roles_below_manager(stubs, role):
+    """BR-DASH-002 se gatea más arriba que GetDashboardStats a propósito: el
+    reporte de cierre es material de gestión, no una consulta operativa."""
+    auth_stub, dashboard_stub = stubs
+    username = f"report_no_{role.value.lower()}"
+    _create_user(username, "Passw0rd!", role)
+    metadata = _login(auth_stub, username, "Passw0rd!")
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        dashboard_stub.GetPeriodReport(_period_request(), metadata=metadata)
+    assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+
+
+def test_get_period_report_without_token_is_unauthenticated(stubs):
+    _, dashboard_stub = stubs
+    with pytest.raises(grpc.RpcError) as exc_info:
+        dashboard_stub.GetPeriodReport(_period_request())
+    assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED

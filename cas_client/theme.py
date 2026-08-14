@@ -1,6 +1,18 @@
 """Shared color palette per docs/Detalles de UI para CrediUme.txt (the "CrediMed"
 palette doc) -- supersedes the earlier ES-003 palette by explicit product decision.
-Brand text stays "CrediUME" (ES-003); only colors/fonts came from this doc."""
+Only colors/fonts came from that doc; the brand name below is the entity's real
+registered name.
+
+BRAND_NAME is the single source of truth for the establishment's name in the
+UI chrome (login wordmark, sidebar, window title). The generated documents
+keep their own copy in documents.py's _COMPANY_* block, since those also carry
+RUC/address/phone and are a legal-identity concern rather than a styling one --
+keep the two in sync by hand if the registered name ever changes again.
+"""
+
+# Nombre del establecimiento según su inscripción ante la DNIT (reemplaza al
+# anterior "CrediUME" de ES-003, por decisión de producto).
+BRAND_NAME = "CREDIMED UME"
 
 APP_BACKGROUND = "#F8F9FA"  # off-white, both docs agree
 PRIMARY = "#2B407B"  # navy -- primary/header color

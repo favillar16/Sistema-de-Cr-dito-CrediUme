@@ -29,7 +29,7 @@ if sys.platform == "win32":
 
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "CrediUME.CAS.DesktopClient"
+            "CredimedUme.CAS.DesktopClient"
         )
     except (AttributeError, OSError):
         pass

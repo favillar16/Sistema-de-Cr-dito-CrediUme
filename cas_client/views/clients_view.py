@@ -3,7 +3,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QMessageBox,
     QProgressBar,
@@ -16,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from cas_client import theme
+from cas_client.formatting import DISPLAY_DATE_PLACEHOLDER, fecha, fecha_a_iso
 from cas_client.grpc_client import ApiError, ClientServiceClient
 from cas_client.rbac_ui import role_at_least
 from cas_client.session import Session
@@ -26,7 +26,7 @@ from cas_client.widgets.currency_input import CurrencyInput
 from cas_client.widgets.form_input import FormInput
 from cas_client.widgets.responsive_grid import ResponsiveGrid
 from cas_client.widgets.scroll_area import wrap_scrollable
-from cas_client.widgets.table import style_table
+from cas_client.widgets.table import size_columns, style_table
 from cas_client.widgets.toast import Toast
 
 _PAGE_LIST, _PAGE_CREATE, _PAGE_DETAIL = range(3)
@@ -113,7 +113,9 @@ def _extended_profile_card() -> tuple:
     frame, layout = card()
     layout.addWidget(section_label("Perfil extendido (opcional)"))
     grid = ResponsiveGrid(min_cell_width=220)
-    expiry_field, expiry = labeled_field("Vencimiento de cédula", "AAAA-MM-DD")
+    expiry_field, expiry = labeled_field(
+        "Vencimiento de cédula", DISPLAY_DATE_PLACEHOLDER
+    )
     grid.add_widget(expiry_field)
     marital_field, marital = labeled_field("Estado civil")
     grid.add_widget(marital_field)
@@ -198,9 +200,7 @@ class ClientsView(BaseView):
 
         self._table = QTableWidget(0, len(_TABLE_HEADERS))
         self._table.setHorizontalHeaderLabels(_TABLE_HEADERS)
-        self._table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
+        size_columns(self._table, stretch_column=0)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -296,7 +296,7 @@ class ClientsView(BaseView):
         )
         grid.add_widget(national_id_field)
         dob_field, self._new_dob = labeled_field(
-            "Fecha de nacimiento", "AAAA-MM-DD", required=True
+            "Fecha de nacimiento", DISPLAY_DATE_PLACEHOLDER, required=True
         )
         grid.add_widget(dob_field)
 
@@ -430,12 +430,17 @@ class ClientsView(BaseView):
         if has_blank:
             self._toast.show_message("Complete los campos marcados en rojo.")
             return
+        # El usuario tipea DD/MM/AAAA; el contrato gRPC es ISO (ver formatting.py).
+        fields["date_of_birth"] = fecha_a_iso(fields["date_of_birth"])
+
         income = self._new_income.raw_value()
         if income:
             fields["declared_monthly_income"] = income
 
         fields.update(
-            national_id_expiry_date=self._new_national_id_expiry_date.text().strip(),
+            national_id_expiry_date=fecha_a_iso(
+                self._new_national_id_expiry_date.text()
+            ),
             marital_status=self._new_marital_status.text().strip(),
             education_level=self._new_education_level.text().strip(),
             occupation=self._new_occupation.text().strip(),
@@ -614,7 +619,9 @@ class ClientsView(BaseView):
         self._detail_address.setText(client.address)
         self._detail_income.set_amount(client.declared_monthly_income)
         self._detail_source_of_funds.setText(client.source_of_funds)
-        self._detail_national_id_expiry_date.setText(client.national_id_expiry_date)
+        self._detail_national_id_expiry_date.setText(
+            fecha(client.national_id_expiry_date)
+        )
         self._detail_marital_status.setText(client.marital_status)
         self._detail_education_level.setText(client.education_level)
         self._detail_occupation.setText(client.occupation)
@@ -694,8 +701,8 @@ class ClientsView(BaseView):
             fields["declared_monthly_income"] = income
 
         fields.update(
-            national_id_expiry_date=(
-                self._detail_national_id_expiry_date.text().strip()
+            national_id_expiry_date=fecha_a_iso(
+                self._detail_national_id_expiry_date.text()
             ),
             marital_status=self._detail_marital_status.text().strip(),
             education_level=self._detail_education_level.text().strip(),

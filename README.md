@@ -1,6 +1,6 @@
-# CrediUme — Sistema de Administración de Créditos (CAS)
+# CREDIMED UME — Sistema de Administración de Créditos (CAS)
 
-Sistema centralizado de gestión de créditos: clientes (KYC), ciclo de vida de préstamos con amortización francesa, y un panel de estadísticas agregadas. Arquitectura cliente-servidor sobre gRPC, con un cliente de escritorio en PySide6 y un servidor Python respaldado por PostgreSQL.
+Sistema centralizado de gestión de créditos de **CREDIMED UME** (RUC 1276703-4 — Ayolas c/ Acaray, Coronel Oviedo, Paraguay): clientes (KYC), ciclo de vida de préstamos con amortización francesa, un panel de estadísticas agregadas y reportes de cierre de período. Arquitectura cliente-servidor sobre gRPC, con un cliente de escritorio en PySide6 y un servidor Python respaldado por PostgreSQL.
 
 ## Estado del proyecto
 
@@ -8,10 +8,10 @@ Cuatro servicios implementados en el servidor, cada uno con su vista correspondi
 
 | Servicio | Funcionalidad | Vista cliente |
 |---|---|---|
-| `AuthService` | Login/Logout, reseteo de contraseña, alta y listado de usuarios (solo ADMIN) | Login, `UsersView` |
+| `AuthService` | Login/Logout, reseteo de contraseña, alta y listado de usuarios con sus datos personales (solo ADMIN) | Login, `UsersView` |
 | `ClientService` | Alta/edición/baja de clientes, reglas KYC, referencias personales/laborales | `ClientsView` |
 | `LoanService` | Ciclo de vida completo del préstamo, propuesta editable, garantías, cargos, cronograma de amortización, pagos, mora | `LoansView` |
-| `DashboardService` | Estadísticas agregadas de solo lectura (clientes, préstamos por estado, cartera) | `DashboardView` |
+| `DashboardService` | Estadísticas agregadas de solo lectura (clientes, préstamos por estado, cartera, monto total de mora) y reportes de cierre de período | `DashboardView` |
 
 Los cuatro servicios están registrados en `cas_server/server.py` y cubiertos por el control de acceso basado en roles (`cas_server/security/rbac.py`).
 
@@ -24,7 +24,7 @@ PySide6 Client  →  gRPC / Protocol Buffers  →  CAS Server  →  SQLAlchemy  
 - **`cas_client/`** — Aplicación de escritorio (PySide6). Solo presentación y validación superficial; nunca accede a la base de datos directamente, todo pasa por un stub gRPC.
 - **`cas_server/`** — Lógica de negocio, validación profunda y persistencia. Las RPC devuelven códigos gRPC estándar (`OK`, `INVALID_ARGUMENT`, `NOT_FOUND`, `UNAUTHENTICATED`, `PERMISSION_DENIED`).
 - **`protos/`** — Contrato fuente de verdad entre cliente y servidor.
-- **`specs/`** — Reglas de negocio autoritativas por módulo (autenticación, clientes, préstamos).
+- **`specs/`** — Reglas de negocio autoritativas por módulo (autenticación, clientes, préstamos, panel/reportes).
 - **PostgreSQL** — Sistema de registro, accedido únicamente desde `cas_server`.
 
 ## Reglas de negocio destacadas
@@ -32,10 +32,15 @@ PySide6 Client  →  gRPC / Protocol Buffers  →  CAS Server  →  SQLAlchemy  
 - RBAC por niveles de rol: `CASHIER` < `CREDIT_ANALYST` < `MANAGER` < `ADMIN`.
 - Hash de contraseñas con Argon2, bloqueo temporal tras 5 intentos fallidos, JWT de 8 horas sin refresh.
 - Máximo 3 préstamos activos por cliente; cuota mensual limitada al 40% del ingreso declarado.
-- Aprobaciones no desembolsadas caducan a los 30 días.
+- Aprobaciones no desembolsadas caducan a los 30 días (estado `EXPIRED`, presentado al usuario como "Rechazado").
+- El panel muestra el **monto total de mora**: la suma de lo ya vencido e impago de los préstamos activos, que es un subconjunto del saldo pendiente total (este último incluye además las cuotas futuras).
+- Reportes de cierre de período (mes/trimestre/año), exportables a PDF y `.docx`, restringidos a MANAGER+.
+- Fechas: la interfaz y los documentos usan `DD/MM/AAAA`; el contrato gRPC sigue usando ISO `YYYY-MM-DD`.
 - Tasa de interés estándar fija (24% anual); solo roles MANAGER+ pueden fijar una tasa distinta.
 - Todo cobro se registra con referencia de transferencia/débito directo (no se maneja efectivo).
-- Documentos de préstamo generados (Liquidación, Pagaré, Contrato, Cronograma de Pago) en PDF y `.docx` — **el texto legal de Pagaré/Contrato es un borrador pendiente de revisión legal real**, no usar en producción con clientes reales sin ese paso.
+- Cada pago registrado emite un Comprobante de Pago para el deudor, con el monto abonado y las cuotas que cubrió ("Cuota(s) 1,2 de 18").
+- Los operadores se registran con nombre, apellido y C.I.; esos datos identifican al responsable en el Cronograma y en el Comprobante de Pago.
+- Documentos de préstamo generados (Liquidación, Pagaré, Contrato, Cronograma de Pago, Comprobante de Pago) en PDF y `.docx` — **el texto legal de Pagaré/Contrato es un borrador pendiente de revisión legal real**, no usar en producción con clientes reales sin ese paso.
 
 El detalle completo de cada regla vive en `specs/` y en `CLAUDE.md`.
 
