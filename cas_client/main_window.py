@@ -19,7 +19,7 @@ from cas_client.grpc_client import (
     LoanServiceClient,
 )
 from cas_client.rbac_ui import can_manage_users
-from cas_client.session import Session
+from cas_client.session import Session, session_events
 from cas_client.views.clients_view import ClientsView
 from cas_client.views.dashboard_view import DashboardView
 from cas_client.views.loans_view import LoansView
@@ -231,6 +231,8 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._shell_view)
         self._stack.setCurrentWidget(self._login_view)
 
+        session_events.expired.connect(self._on_session_expired)
+
     def _on_login_succeeded(
         self, username: str, token: str, role: str, expires_in: int
     ) -> None:
@@ -255,3 +257,18 @@ class MainWindow(QMainWindow):
         self._session.clear()
         self._shell_view.set_user("", "")
         self._stack.setCurrentWidget(self._login_view)
+
+    def _on_session_expired(self) -> None:
+        """BR-AUTH-003's 8-hour token ran out (or was revoked) while the app
+        was open. Unlike _on_logout_clicked this does NOT call Logout: the
+        token the server just rejected is exactly the one we'd be sending, so
+        the round trip can only fail. Guarded on access_token because several
+        in-flight calls can fail at once (e.g. a dashboard refresh alongside a
+        list query) and each emits `expired` -- only the first one should
+        actually tear the session down."""
+        if not self._session.access_token:
+            return
+        self._session.clear()
+        self._shell_view.set_user("", "")
+        self._stack.setCurrentWidget(self._login_view)
+        self._login_view.notify_session_expired()

@@ -1,6 +1,10 @@
 from typing import Callable
 
+import grpc
 from PySide6.QtCore import QThread, Signal
+
+from cas_client.grpc_client import ApiError, AuthError
+from cas_client.session import SESSION_EXPIRED_MESSAGE, session_events
 
 # Every view keeps only a single `self._worker` attribute and reassigns it
 # per call (see e.g. loans_view.py) -- fine for one-off calls, but a success
@@ -52,6 +56,31 @@ class AsyncWorker(QThread):
         try:
             result = self._fn(*self._args, **self._kwargs)
         except Exception as exc:  # noqa: BLE001 -- translated below, never re-raised
+            if _is_expired_session(exc):
+                # Handled here rather than in each view's own
+                # _friendly_message(): this is the single choke point every
+                # authenticated gRPC call in the client already goes through,
+                # so one check covers all ~25 call sites at once and can't
+                # drift out of sync the way five hand-maintained translators
+                # would. LoginView deliberately does NOT go through here (it
+                # has its own _LoginWorker), which is what keeps a genuine
+                # wrong-password UNAUTHENTICATED from being misreported as an
+                # expired session.
+                session_events.expired.emit()
+                self.failed.emit(SESSION_EXPIRED_MESSAGE)
+                return
             self.failed.emit(self._error_translator(exc))
             return
         self.succeeded.emit(result)
+
+
+def _is_expired_session(exc: Exception) -> bool:
+    """True when the server rejected the call because our token is no longer
+    usable. AuthInterceptor answers UNAUTHENTICATED for all of: missing
+    bearer token, expired token, malformed token, revoked token (post-logout)
+    and unknown role -- every one of them means "this session is over, log in
+    again", so they're deliberately not distinguished here."""
+    return (
+        isinstance(exc, (ApiError, AuthError))
+        and exc.code == grpc.StatusCode.UNAUTHENTICATED
+    )

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from cas_client import assets, theme
 from cas_client.grpc_client import AuthClient, AuthError
+from cas_client.session import SESSION_EXPIRED_MESSAGE
 from cas_client.widgets.async_worker import _ACTIVE_WORKERS
 from cas_client.widgets.card import labeled_field
 from cas_client.widgets.toast import Toast
@@ -293,3 +294,13 @@ class LoginView(QWidget):
 
     def _on_failure(self, message: str) -> None:
         self._toast.show_message(message)
+
+    def notify_session_expired(self) -> None:
+        """Called by MainWindow when it bounces the user back here because the
+        token expired mid-session. Shown for longer than the default toast:
+        the operator was working in another view when this fired, so the
+        message has to survive the moment it takes them to notice the screen
+        changed under them. The password is cleared (never the username) so
+        logging back in is one field away."""
+        self._password_input.clear()
+        self._toast.show_message(SESSION_EXPIRED_MESSAGE, duration_ms=8000)
