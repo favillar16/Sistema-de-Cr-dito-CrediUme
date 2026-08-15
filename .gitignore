@@ -2,6 +2,12 @@
 *.env
 !*.env.example
 
+# TLS certs/keys generated on the deployment machine
+certs/
+
+# Server runtime logs on the deployment machine
+logs/
+
 # Python
 __pycache__/
 *.pyc
