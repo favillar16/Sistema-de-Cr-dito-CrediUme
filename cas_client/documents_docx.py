@@ -1,11 +1,14 @@
-"""DOCX counterparts of documents.py's three loan documents (Liquidación de
-Préstamo, Pagaré, Contrato) -- same data sources (GetLoanById/GetClientById/
-GetAmortizationSchedule), same placeholder legal text/draft banner, but saved
-as an editable .docx instead of a flattened PDF so a user can tweak specific
-fields (e.g. correct a client address) without regenerating from the app.
+"""DOCX counterparts of documents.py's loan documents (Liquidación de
+Préstamo, Pagaré, Contrato, Cronograma, Comprobante de Pago) -- same data
+sources (GetLoanById/GetClientById/GetAmortizationSchedule) and the same legal
+clause text, but saved as an editable .docx instead of a flattened PDF so a
+user can tweak specific fields (e.g. correct a client address) without
+regenerating from the app.
 
 Mirrors documents.py's structure section-by-section; reuses its shared
-constants (_COMPANY_*, _ESTADOS_LABEL) rather than duplicating them."""
+constants (_COMPANY_*, _TERM_*, _ESTADOS_LABEL) rather than duplicating them,
+so the authorised commercial terms can't drift between the PDF and the DOCX
+of the same contract."""
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -14,7 +17,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 from cas_client import assets, documents, theme
-from cas_client.formatting import fecha, gs, rate_percent
+from cas_client.formatting import fecha, gs, rate_percent, rate_percent_mensual
 
 
 def _rgb(hex_color: str) -> RGBColor:
@@ -27,7 +30,6 @@ def _rgb(hex_color: str) -> RGBColor:
 _PRIMARY = _rgb(theme.PRIMARY)
 _TEXT_PRIMARY = _rgb(theme.TEXT_PRIMARY)
 _TEXT_MUTED = _rgb(theme.TEXT_MUTED)
-_ERROR = _rgb(theme.ERROR)
 
 
 def _add_divider(document: Document) -> None:
@@ -54,26 +56,28 @@ def _add_title(document: Document, title: str) -> None:
     run.font.color.rgb = _PRIMARY
 
 
-def _add_draft_banner(document: Document) -> None:
-    paragraph = document.add_paragraph()
-    run = paragraph.add_run(
-        "BORRADOR — TEXTO LEGAL PENDIENTE DE REVISIÓN. No usar en producción "
-        "sin validación legal."
-    )
-    run.bold = True
-    run.font.size = Pt(9)
-    run.font.color.rgb = _ERROR
+def _dias_de_gracia() -> str:
+    """ "11 (once) días" -- el plazo desde el que se devenga la mora, en
+    dígitos y letras, igual que documents.py."""
+    dias = documents._TERM_MORATORY_GRACE_DAYS
+    return f"{dias} ({documents._numero_en_letras(dias)}) días"
 
 
-def _add_header(document: Document, title: str, draft_banner: bool = True) -> None:
+def _cuotas_para_acelerar() -> str:
+    """ "4 (cuatro) cuotas vencidas" -- el umbral que habilita a exigir el
+    total adeudado."""
+    cuotas = documents._TERM_ACCELERATION_INSTALLMENTS
+    return f"{cuotas} ({documents._numero_en_letras(cuotas)}) cuotas vencidas"
+
+
+def _add_header(document: Document, title: str) -> None:
     """Logo + legal-entity block + centered title, same layout as
     documents.py's _header() / HeaderDocumentos.png.
 
-    draft_banner=False for documents with no legal clause text to review
-    (e.g. cronograma_docx, a computed schedule) -- mirrors documents.py's
-    per-template opt-in {_DRAFT_BANNER} rather than stamping every
-    document with a "texto legal pendiente" notice that would be
-    misleading where there's no legal text at all."""
+    Ya no recibe draft_banner: el cartel "BORRADOR -- TEXTO LEGAL PENDIENTE
+    DE REVISIÓN" se quitó de los tres documentos que lo llevaban al
+    autorizarse el texto legal y cargarse las condiciones reales (ver los
+    _TERM_* de documents.py)."""
     table = document.add_table(rows=1, cols=2)
     table.columns[0].width = Inches(1.5)
     table.columns[1].width = Inches(4.8)
@@ -101,8 +105,6 @@ def _add_header(document: Document, title: str, draft_banner: bool = True) -> No
 
     _add_divider(document)
     _add_title(document, title)
-    if draft_banner:
-        _add_draft_banner(document)
 
 
 def _add_labeled_lines(document: Document, lines: list[tuple[str, str]]) -> None:
@@ -195,7 +197,7 @@ def comprobante_pago_docx(loan, client, payment) -> Document:
     banner de borrador, mismo criterio que el Cronograma: no tiene texto legal
     a revisar, solo el detalle de un pago ya registrado."""
     document = Document()
-    _add_header(document, "Comprobante de Pago", draft_banner=False)
+    _add_header(document, "Comprobante de Pago")
     _add_client_block(document, client)
     _add_labeled_lines(document, [("Préstamo", loan.id)])
 
@@ -257,7 +259,7 @@ def reporte_periodo_docx(report, generated_by: str = "") -> Document:
 
     report: dashboard_service_pb2.GetPeriodReportResponse"""
     document = Document()
-    _add_header(document, "Reporte de Cierre de Período", draft_banner=False)
+    _add_header(document, "Reporte de Cierre de Período")
 
     lineas = [
         ("Período", f"del {fecha(report.start_date)} al {fecha(report.end_date)}")
@@ -306,7 +308,12 @@ def liquidacion_docx(loan, client, schedule) -> Document:
             ("Préstamo", loan.id),
             ("Estado", estado),
             ("Capital", gs(loan.principal_amount)),
-            ("Tasa de interés", rate_percent(loan.interest_rate)),
+            (
+                "Tasa de interés",
+                f"{rate_percent(loan.interest_rate)} anual "
+                f"({rate_percent_mensual(loan.interest_rate)} mensual sobre "
+                "saldos deudores)",
+            ),
             ("Plazo", f"{loan.term_months} meses"),
             ("Total pagado", gs(loan.total_paid)),
             ("Saldo restante", gs(loan.remaining_balance)),
@@ -373,27 +380,33 @@ def pagare_docx(loan, client) -> Document:
     interest_paragraph.add_run(
         "Queda expresamente pactado que los importes de las cuotas "
         "documentadas en este instrumento devengarán un interés "
-        f"compensatorio del {rate_percent(loan.interest_rate)} sobre saldos "
-        f"deudores. En caso de mora, un interés moratorio del "
-        f"{documents._PLACEHOLDER_MORATORY_RATE} sobre saldos deudores, y "
-        f"un interés punitorio del {documents._PLACEHOLDER_PUNITIVE_RATE} "
-        "sobre cada cuota en mora."
+        f"compensatorio del {rate_percent_mensual(loan.interest_rate)} "
+        "mensual sobre saldos deudores."
+    )
+
+    mora_paragraph = document.add_paragraph()
+    mora_paragraph.add_run(
+        "En caso de mora se aplicará, sobre cada cuota vencida e impaga, un "
+        "interés moratorio en carácter punitorio del "
+        f"{documents._TERM_MORATORY_RATE}, que se devengará a partir de los "
+        f"{_dias_de_gracia()} corridos contados desde la fecha de su primer "
+        "vencimiento."
     )
 
     acceleration_paragraph = document.add_paragraph()
     acceleration_paragraph.add_run(
-        f"La falta de pago de {documents._PLACEHOLDER_ACCELERATION_INSTALLMENTS} "
-        "cuotas consecutivas de amortización del capital hará automáticamente "
-        "exigible el total adeudado, inclusive las cuotas no vencidas, "
-        "produciéndose la mora por el mero vencimiento del plazo, sin "
-        "necesidad de ningún requerimiento judicial y/o extrajudicial."
+        f"La falta de pago de {_cuotas_para_acelerar()} facultará a "
+        f"{documents._COMPANY_NAME} a exigir el total adeudado, inclusive "
+        "las cuotas no vencidas, produciéndose la mora por el mero "
+        "vencimiento del plazo, sin necesidad de ningún requerimiento "
+        "judicial y/o extrajudicial."
     )
 
     jurisdiction_paragraph = document.add_paragraph()
     jurisdiction_paragraph.add_run(
         "Todas las partes intervinientes en este documento se someten a la "
         "jurisdicción y competencia de los Jueces y Tribunales de "
-        f"{documents._PLACEHOLDER_JURISDICTION_CITY}."
+        f"{documents._TERM_JURISDICTION_CITY}."
     )
 
     _add_labeled_lines(document, [("Préstamo", loan.id)])
@@ -407,7 +420,7 @@ def cronograma_docx(loan, client, schedule) -> Document:
     razonamiento (documento standalone para entregar al cliente, con nombre
     del cliente y asesor responsable)."""
     document = Document()
-    _add_header(document, "Cronograma de Pago", draft_banner=False)
+    _add_header(document, "Cronograma de Pago")
     _add_client_block(document, client)
 
     asesor = documents.responsable(
@@ -499,23 +512,22 @@ def contrato_docx(loan, client) -> Document:
         (
             "Tercera (Intereses)",
             "Se acuerda el pago de un interés compensatorio del "
-            f"{rate_percent(loan.interest_rate)} sobre saldos deudores, "
-            "abonado junto con las cuotas de amortización del capital. Para "
-            "el caso de falta de pago en la fecha convenida, se aplicará "
-            f"además un interés moratorio del "
-            f"{documents._PLACEHOLDER_MORATORY_RATE} y un interés "
-            f"punitorio del {documents._PLACEHOLDER_PUNITIVE_RATE} sobre "
-            "los montos o cuotas vencidas e impagas.",
+            f"{rate_percent_mensual(loan.interest_rate)} mensual sobre "
+            "saldos deudores, abonado junto con las cuotas de amortización "
+            "del capital. Para el caso de falta de pago en la fecha "
+            "convenida, se aplicará además, sobre cada cuota vencida e "
+            "impaga, un interés moratorio en carácter punitorio del "
+            f"{documents._TERM_MORATORY_RATE}, que se devengará a partir de "
+            f"los {_dias_de_gracia()} corridos contados desde la fecha de su "
+            "primer vencimiento.",
         ),
         (
             "Cuarta (Mora y vencimiento anticipado)",
             "La mora se producirá por el mero vencimiento de los plazos, "
             "sin necesidad de interpelación judicial alguna. La falta de "
-            f"pago de {documents._PLACEHOLDER_ACCELERATION_INSTALLMENTS} "
-            "cuotas consecutivas de amortización del capital y/o de sus "
-            "intereses hará decaer de pleno derecho todos los plazos "
-            f"estipulados para el pago, facultando a "
-            f"{documents._COMPANY_NAME} a declarar vencidas todas las "
+            f"pago de {_cuotas_para_acelerar()} hará decaer de pleno "
+            "derecho todos los plazos estipulados para el pago, facultando "
+            f"a {documents._COMPANY_NAME} a declarar vencidas todas las "
             "cuotas y exigir el pago de la totalidad de la deuda, "
             "ejecutando para el efecto el Pagaré suscripto junto con este "
             "contrato.",
@@ -533,7 +545,7 @@ def contrato_docx(loan, client) -> Document:
             "Sexta (Jurisdicción)",
             "Todas las partes intervinientes en este contrato se someten a "
             "la jurisdicción y competencia de los Jueces y Tribunales de "
-            f"{documents._PLACEHOLDER_JURISDICTION_CITY}.",
+            f"{documents._TERM_JURISDICTION_CITY}.",
         ),
     ]
     for heading, text in clauses:

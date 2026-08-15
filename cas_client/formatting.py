@@ -45,6 +45,38 @@ def rate_percent(value: str) -> str:
     return f"{text}%"
 
 
+def rate_percent_mensual(value: str) -> str:
+    """Formats a nominal *annual* decimal-fraction rate as its equivalent
+    monthly percentage: "0.18" -> "1,5%".
+
+    The loan's interest_rate is a nominal annual rate and amortization.py
+    charges tasa_anual / 12 per period, so the monthly figure is what the
+    borrower is actually charged each month -- and it's how the Pagaré and
+    Contrato clauses express the interés compensatorio ("1,5% mensual sobre
+    saldos deudores"). Quoting the annual number in that clause would state a
+    different rate than the one the contract text promises.
+
+    Uses a decimal comma, unlike rate_percent() above: these render into legal
+    documents written in Spanish, where "1.5%" reads as a thousands separator.
+    Rounded to 3 decimals so a rate that doesn't divide evenly by 12 (e.g.
+    "0.10" -> 0,833%) doesn't print 28 significant digits. Display-only, same
+    contract as gs()/rate_percent(): never feed the result back into a
+    request field.
+    """
+    if not value:
+        return value
+    try:
+        percent = (Decimal(value) * 100 / 12).quantize(
+            Decimal("0.001"), rounding=ROUND_HALF_UP
+        )
+    except InvalidOperation:
+        return value
+    text = f"{percent:f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return f"{text.replace('.', ',')}%"
+
+
 def fecha(value: str) -> str:
     """Formats a wire-format date string for display: "2026-10-10" ->
     "10/10/2026".

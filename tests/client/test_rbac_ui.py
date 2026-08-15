@@ -71,7 +71,7 @@ def test_fixed_interest_rate_matches_server_side_constant():
     # two processes, same as rbac_ui.py's own module docstring notes for
     # role_at_least/rbac.py). This test exists so a drift is caught here
     # instead of silently rejecting loans in the UI's "Estándar" flow.
-    assert FIXED_INTEREST_RATE == "0.24"
+    assert FIXED_INTEREST_RATE == "0.18"  # 18% anual = 1,5% mensual
 
 
 def test_period_report_gate_matches_rbac_tables_exactly():

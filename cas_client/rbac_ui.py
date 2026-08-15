@@ -38,7 +38,9 @@ def tier_label(role: str | None) -> str:
 # BR-LOAN-002's 40%-of-income cap is still enforced server-side regardless of
 # who sets the rate -- this only controls whether the rate *field* is
 # editable in the "Nuevo préstamo" form.
-FIXED_INTEREST_RATE = "0.24"  # decimal fraction, sistema francés -- ver loans_view.py
+FIXED_INTEREST_RATE = "0.18"  # decimal fraction, sistema francés -- ver loans_view.py
+# 18% nominal anual = 1,5% mensual sobre saldos deudores (la tasa compensatoria
+# que declaran el Pagaré y el Contrato). El servidor divide por 12 por período.
 # Guarded by tests/client/test_rbac_ui.py's test_fixed_interest_rate_matches_
 # server_side_constant -- must stay the exact decimal-fraction string
 # cas_server/config.py's LOAN_FIXED_INTEREST_RATE compares against.

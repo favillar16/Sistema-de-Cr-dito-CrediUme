@@ -13,12 +13,19 @@ import loan_service_pb2
 import loan_service_pb2_grpc
 import pytest
 
+from cas_server.config import LOAN_FIXED_INTEREST_RATE
 from cas_server.db.base import SessionLocal
 from cas_server.db.models import Client, Loan, LoanStatusEnum, RoleEnum, User
 from cas_server.security.interceptor import AuthInterceptor
 from cas_server.security.passwords import hash_password
 from cas_server.services.auth_service import AuthServicer
 from cas_server.services.loan_service import LoanServicer
+
+# BR-LOAN-007: la tasa que un rol Estándar tiene permitido mandar. Se lee de la
+# config en vez de repetirse a mano acá para que un cambio de tasa (p. ej. el
+# paso de 24% a 18% anual) no rompa media docena de tests que sólo la usaban
+# como "una tasa cualquiera que el servidor debería aceptar".
+_TASA_ESTANDAR = str(LOAN_FIXED_INTEREST_RATE)
 
 
 @pytest.fixture
@@ -119,7 +126,7 @@ def test_create_loan_allows_cashier(stubs):
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount="1000.00",
-            interest_rate="0.24",
+            interest_rate=_TASA_ESTANDAR,
             term_months=6,
         ),
         metadata=metadata,
@@ -323,7 +330,7 @@ def test_get_loan_by_id_reports_creating_advisor(stubs):
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount="1000.00",
-            interest_rate="0.24",
+            interest_rate=_TASA_ESTANDAR,
             term_months=6,
         ),
         metadata=metadata,
@@ -385,7 +392,7 @@ def test_get_loan_by_id_reports_advisor_personal_data(stubs):
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount="1000.00",
-            interest_rate="0.24",
+            interest_rate=_TASA_ESTANDAR,
             term_months=6,
         ),
         metadata=metadata,
@@ -410,7 +417,7 @@ def test_get_loan_by_id_advisor_personal_data_empty_for_legacy_user(stubs):
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount="1000.00",
-            interest_rate="0.24",
+            interest_rate=_TASA_ESTANDAR,
             term_months=6,
         ),
         metadata=metadata,

@@ -16,17 +16,17 @@ neither was copied: the company identity below is CREDIMED UME's own real
 registered data, and every borrower-identifying field is pulled from
 `client`/`loan`, never hardcoded.
 
-The moratory/punitory interest rates, the number of consecutive unpaid
-installments that triggers acceleration, and the jurisdiction city are still
-literal placeholders (see the _PLACEHOLDER_* constants below) -- adapting the
-structure from a real document is not the same as legal review, and these
-figures are CREDIMED UME's own business decisions to make, not something to
-infer from another institution's contract. Every document still carries a
-visible draft banner. Do not use in production without real legal review
-(see CLAUDE.md)."""
+The commercial terms in those clauses (compensatory rate, moratory/punitive
+rate and its grace period, the number of overdue installments that lets the
+lender accelerate, and the jurisdiction city) are no longer placeholders: they
+are the terms CREDIMED UME authorised, and the draft banner these documents
+used to carry was removed on that authorisation. See the _TERM_* constants
+below -- they are the single place to change if the entity revises its terms,
+and tests/client/test_documents_identity.py guards them against a silent
+revert, the same way it guards the legal identity."""
 
 from cas_client import assets, theme
-from cas_client.formatting import fecha, gs, rate_percent
+from cas_client.formatting import fecha, gs, rate_percent, rate_percent_mensual
 
 # Datos reales de la entidad, según su inscripción ante la DNIT. Estos ya no
 # son placeholders: reemplazan al nombre/RUC de relleno que traía el header de
@@ -37,14 +37,56 @@ _COMPANY_RUC = "1276703-4"
 _COMPANY_ADDRESS = "Ayolas c/ Acaray — Coronel Oviedo, Paraguay"
 _COMPANY_PHONE = "(0984) 319243"
 
-# Business terms CREDIMED UME still needs to decide -- not inferable from the
-# reference document (that was a different institution's own commercial
-# terms). Kept as one place to swap in real values once decided. A diferencia
-# de los datos de la entidad de arriba, estos siguen siendo placeholders.
-_PLACEHOLDER_MORATORY_RATE = "[TASA MORATORIA A DEFINIR]% mensual"
-_PLACEHOLDER_PUNITIVE_RATE = "[TASA PUNITORIA A DEFINIR]% mensual"
-_PLACEHOLDER_ACCELERATION_INSTALLMENTS = "[N]"
-_PLACEHOLDER_JURISDICTION_CITY = "[CIUDAD A DEFINIR]"
+# Condiciones comerciales autorizadas por la entidad. Ya no son placeholders:
+# se imprimen tal cual en el Pagaré y el Contrato que firma el cliente, así que
+# cambiarlas cambia el instrumento legal -- no tocar sin autorización expresa.
+#
+# La mora se cobra como UN solo interés, moratorio con carácter punitorio, sobre
+# cada cuota vencida (no hay un segundo interés separado sobre saldos deudores:
+# la entidad definió una sola tasa). Por eso hay un único _TERM_MORATORY_RATE
+# donde antes había un par moratoria/punitoria.
+_TERM_MORATORY_RATE = "0,38% mensual"
+_TERM_MORATORY_GRACE_DAYS = 11
+_TERM_ACCELERATION_INSTALLMENTS = 4
+_TERM_JURISDICTION_CITY = "Coronel Oviedo"
+
+# El interés compensatorio NO es constante acá: sale de loan.interest_rate, para
+# que el documento no pueda contradecir la cuota que el sistema realmente
+# calculó. Con la tasa fija vigente (config.LOAN_FIXED_INTEREST_RATE = 0.18)
+# rate_percent_mensual() imprime "1,5%", la tasa mensual autorizada.
+
+_NUMEROS_EN_LETRAS = {
+    1: "uno",
+    2: "dos",
+    3: "tres",
+    4: "cuatro",
+    5: "cinco",
+    6: "seis",
+    7: "siete",
+    8: "ocho",
+    9: "nueve",
+    10: "diez",
+    11: "once",
+    12: "doce",
+    15: "quince",
+    30: "treinta",
+    60: "sesenta",
+    90: "noventa",
+}
+
+
+def _numero_en_letras(valor: int) -> str:
+    """Duplica un número en letras entre paréntesis, como es costumbre en un
+    pagaré/contrato ("4 (cuatro) cuotas"), para que no pueda alterarse a mano
+    después de firmado.
+
+    Solo cubre los valores que aparecen en las cláusulas (_TERM_* arriba); un
+    número fuera de la tabla se devuelve en dígitos en vez de reventar, porque
+    esto renderiza un documento y una excepción acá dejaría al operador sin
+    poder imprimir. Si se agrega una condición con un número nuevo, sumarlo a
+    la tabla -- el test de condiciones legales lo verifica."""
+    return _NUMEROS_EN_LETRAS.get(valor, str(valor))
+
 
 _ESTADOS_LABEL = {
     "PENDING": "Pendiente",
@@ -57,13 +99,11 @@ _ESTADOS_LABEL = {
     "EXPIRED": "Rechazado",
 }
 
-_DRAFT_BANNER = f"""
-<div style="border: 2px solid {theme.ERROR}; color: {theme.ERROR};
-            padding: 8px 12px; font-weight: 600; font-size: 12px; margin-bottom: 16px;">
-BORRADOR &mdash; TEXTO LEGAL PENDIENTE DE REVISI&Oacute;N. No usar en producci&oacute;n
-sin validaci&oacute;n legal.
-</div>
-"""
+# Nota histórica: acá vivía _DRAFT_BANNER ("BORRADOR -- TEXTO LEGAL PENDIENTE DE
+# REVISIÓN"), estampado en la Liquidación, el Pagaré y el Contrato. Se quitó al
+# autorizarse el texto legal y cargarse las condiciones reales (_TERM_* arriba).
+# Si alguna cláusula vuelve a quedar sin definir, corresponde reponerlo antes de
+# entregar el documento a un cliente, no dejarlo salir con un dato en blanco.
 
 
 def friendly_file_error(exc: OSError) -> str:
@@ -180,12 +220,12 @@ def liquidacion_html(loan, client, schedule) -> str:
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
     {_header("Liquidaci&oacute;n de Pr&eacute;stamo")}
-    {_DRAFT_BANNER}
     {_client_block(client)}
     <p><b>Pr&eacute;stamo:</b> {loan.id}<br/>
     <b>Estado:</b> {estado}<br/>
     <b>Capital:</b> {gs(loan.principal_amount)}<br/>
-    <b>Tasa de interés:</b> {rate_percent(loan.interest_rate)}<br/>
+    <b>Tasa de inter&eacute;s:</b> {rate_percent(loan.interest_rate)} anual
+    ({rate_percent_mensual(loan.interest_rate)} mensual sobre saldos deudores)<br/>
     <b>Plazo:</b> {loan.term_months} meses<br/>
     <b>Total pagado:</b> {gs(loan.total_paid)}<br/>
     <b>Saldo restante:</b> {gs(loan.remaining_balance)}</p>
@@ -225,7 +265,6 @@ def pagare_html(loan, client) -> str:
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
     {_header("Pagar&eacute; a la Orden")}
-    {_DRAFT_BANNER}
     {_client_block(client)}
     <p>{_garantia_linea(loan)}</p>
     <p>DECLARO(AMOS) ADEUDAR a {_COMPANY_NAME} la suma de
@@ -238,20 +277,24 @@ def pagare_html(loan, client) -> str:
     sito en {_COMPANY_ADDRESS}.</p>
     <p>Queda expresamente pactado que los importes de las cuotas
     documentadas en este instrumento devengar&aacute;n un inter&eacute;s
-    compensatorio del <b>{rate_percent(loan.interest_rate)}</b> sobre saldos
-    deudores. En caso de mora, un inter&eacute;s moratorio del
-    <b>{_PLACEHOLDER_MORATORY_RATE}</b> sobre saldos deudores, y un
-    inter&eacute;s punitorio del <b>{_PLACEHOLDER_PUNITIVE_RATE}</b> sobre
-    cada cuota en mora.</p>
-    <p>La falta de pago de <b>{_PLACEHOLDER_ACCELERATION_INSTALLMENTS}</b>
-    cuotas consecutivas de amortizaci&oacute;n del capital har&aacute;
-    autom&aacute;ticamente exigible el total adeudado, inclusive las cuotas
-    no vencidas, produci&eacute;ndose la mora por el mero vencimiento del
-    plazo, sin necesidad de ning&uacute;n requerimiento judicial y/o
-    extrajudicial.</p>
+    compensatorio del <b>{rate_percent_mensual(loan.interest_rate)}
+    mensual</b> sobre saldos deudores.</p>
+    <p>En caso de mora se aplicar&aacute;, sobre cada cuota vencida e impaga,
+    un inter&eacute;s moratorio en car&aacute;cter punitorio del
+    <b>{_TERM_MORATORY_RATE}</b>, que se devengar&aacute; a partir de los
+    <b>{_TERM_MORATORY_GRACE_DAYS} ({_numero_en_letras(_TERM_MORATORY_GRACE_DAYS)})
+    d&iacute;as</b> corridos contados desde la fecha de su primer
+    vencimiento.</p>
+    <p>La falta de pago de
+    <b>{_TERM_ACCELERATION_INSTALLMENTS}
+    ({_numero_en_letras(_TERM_ACCELERATION_INSTALLMENTS)}) cuotas
+    vencidas</b> facultar&aacute; a {_COMPANY_NAME} a exigir el total
+    adeudado, inclusive las cuotas no vencidas, produci&eacute;ndose la mora
+    por el mero vencimiento del plazo, sin necesidad de ning&uacute;n
+    requerimiento judicial y/o extrajudicial.</p>
     <p>Todas las partes intervinientes en este documento se someten a la
     jurisdicci&oacute;n y competencia de los Jueces y Tribunales de
-    <b>{_PLACEHOLDER_JURISDICTION_CITY}</b>.</p>
+    <b>{_TERM_JURISDICTION_CITY}</b>.</p>
     <p><b>Pr&eacute;stamo:</b> {loan.id}</p>
     <p style="margin-top:48px;">Firma del deudor: ______________________________</p>
     {_footer("Lugar y fecha: ______________________________")}
@@ -488,7 +531,6 @@ def contrato_html(loan, client) -> str:
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
     {_header("Contrato de Pr&eacute;stamo")}
-    {_DRAFT_BANNER}
     <p>Entre {_COMPANY_NAME}, con RUC {_COMPANY_RUC}, con domicilio en
     {_COMPANY_ADDRESS}, en adelante {_COMPANY_NAME} o LA ENTIDAD, por una
     parte; y por la otra el(la/los) Sr(a)(es). abajo identificado(s), en
@@ -512,22 +554,25 @@ def contrato_html(loan, client) -> str:
     bancaria, d&eacute;bito directo o descuento en cuenta, seg&uacute;n lo
     acordado.</p>
     <p><b>Tercera (Intereses):</b> Se acuerda el pago de un inter&eacute;s
-    compensatorio del <b>{rate_percent(loan.interest_rate)}</b> sobre saldos
-    deudores, abonado junto con las cuotas de amortizaci&oacute;n del
-    capital. Para el caso de falta de pago en la fecha convenida, se
-    aplicar&aacute; adem&aacute;s un inter&eacute;s moratorio del
-    <b>{_PLACEHOLDER_MORATORY_RATE}</b> y un inter&eacute;s punitorio del
-    <b>{_PLACEHOLDER_PUNITIVE_RATE}</b> sobre los montos o cuotas vencidas e
-    impagas.</p>
+    compensatorio del <b>{rate_percent_mensual(loan.interest_rate)}
+    mensual</b> sobre saldos deudores, abonado junto con las cuotas de
+    amortizaci&oacute;n del capital. Para el caso de falta de pago en la
+    fecha convenida, se aplicar&aacute; adem&aacute;s, sobre cada cuota
+    vencida e impaga, un inter&eacute;s moratorio en car&aacute;cter
+    punitorio del <b>{_TERM_MORATORY_RATE}</b>, que se devengar&aacute; a
+    partir de los <b>{_TERM_MORATORY_GRACE_DAYS}
+    ({_numero_en_letras(_TERM_MORATORY_GRACE_DAYS)}) d&iacute;as</b> corridos
+    contados desde la fecha de su primer vencimiento.</p>
     <p><b>Cuarta (Mora y vencimiento anticipado):</b> La mora se
     producir&aacute; por el mero vencimiento de los plazos, sin necesidad de
     interpelaci&oacute;n judicial alguna. La falta de pago de
-    <b>{_PLACEHOLDER_ACCELERATION_INSTALLMENTS}</b> cuotas consecutivas de
-    amortizaci&oacute;n del capital y/o de sus intereses har&aacute; decaer
-    de pleno derecho todos los plazos estipulados para el pago, facultando a
-    {_COMPANY_NAME} a declarar vencidas todas las cuotas y exigir el pago de
-    la totalidad de la deuda, ejecutando para el efecto el Pagar&eacute;
-    suscripto junto con este contrato.</p>
+    <b>{_TERM_ACCELERATION_INSTALLMENTS}
+    ({_numero_en_letras(_TERM_ACCELERATION_INSTALLMENTS)}) cuotas
+    vencidas</b> har&aacute; decaer de pleno derecho todos los plazos
+    estipulados para el pago, facultando a {_COMPANY_NAME} a declarar
+    vencidas todas las cuotas y exigir el pago de la totalidad de la deuda,
+    ejecutando para el efecto el Pagar&eacute; suscripto junto con este
+    contrato.</p>
     <p><b>Quinta (Central de riesgo crediticio):</b> El(Los) Prestatario(s)
     autoriza(n) expresamente a {_COMPANY_NAME} para que, por su cuenta o a
     trav&eacute;s de terceros, recabe informaci&oacute;n sobre su
@@ -536,7 +581,7 @@ def contrato_html(loan, client) -> str:
     correspondientes, conforme a la legislaci&oacute;n vigente.</p>
     <p><b>Sexta (Jurisdicci&oacute;n):</b> Todas las partes intervinientes en
     este contrato se someten a la jurisdicci&oacute;n y competencia de los
-    Jueces y Tribunales de <b>{_PLACEHOLDER_JURISDICTION_CITY}</b>.</p>
+    Jueces y Tribunales de <b>{_TERM_JURISDICTION_CITY}</b>.</p>
     <p><b>Pr&eacute;stamo:</b> {loan.id}</p>
     <p style="margin-top:48px;">Firma del deudor: ______________________________</p>
     {_footer("Firma de " + _COMPANY_NAME + ": ______________________________")}

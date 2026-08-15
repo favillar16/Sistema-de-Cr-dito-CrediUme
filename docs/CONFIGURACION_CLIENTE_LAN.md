@@ -61,11 +61,17 @@ repo. Si `GRPC_TLS_CA_FILE` queda vacío, el cliente conecta **sin TLS** y el
 servidor va a rechazar el handshake.
 
 Se usa el **nombre de red** del servidor (`DESKTOP-5H7BABS`) en vez de su
-IP: la IP LAN se asigna por DHCP y puede cambiar, mientras que el nombre se
-resuelve solo entre PCs Windows del mismo segmento de red (NetBIOS/LLMNR),
-sin necesitar un servidor DNS propio. El certificado del servidor también
-tiene ese hostname como Subject Alternative Name, así que la verificación
-TLS funciona con el nombre sin configuración extra.
+IP: la IP LAN se asigna por DHCP y puede cambiar, mientras que el nombre no.
+El certificado del servidor también tiene ese hostname como Subject
+Alternative Name, así que la verificación TLS funciona con el nombre sin
+configuración extra.
+
+En esta red el nombre resuelve por **DNS del propio router**
+(`192.168.100.1` registra los hostnames que entrega por DHCP), verificado
+con `Resolve-DnsName DESKTOP-5H7BABS -Server 192.168.100.1`. Eso es más
+robusto que NetBIOS/LLMNR: no depende de que el perfil de red de Windows
+esté en "Privado" ni del descubrimiento de red, y se actualiza solo si la
+IP del servidor cambia.
 
 Antes de abrir la app, conviene confirmar que el cliente llega al servidor.
 **No usar `ping` para esto**: en la PC cliente ya verificada, `ping
@@ -82,13 +88,14 @@ Si eso devuelve `OK`, la app va a conectar. Si falla, revisar en este orden:
 el servidor está encendido y `cas_server` corriendo, la regla de Firewall
 para el puerto TCP 50051, y por último la resolución del nombre.
 
-Como respaldo, si el nombre no resuelve (red distinta, NetBIOS
-deshabilitado, etc.), se puede poner la IP LAN actual del servidor en
-`GRPC_SERVER_HOST` -- con dos salvedades: puede cambiar si esa IP no está
-reservada en el router, y la verificación TLS solo funciona con una IP que
-figure en el Subject Alternative Name del certificado (hoy `127.0.0.1` y
-`192.168.100.74`). Si el servidor toma otra IP, hay que regenerar el
-certificado o usar el nombre de red.
+Como respaldo, si el nombre no resuelve (red distinta, router sin DNS
+propio), se puede poner la IP LAN del servidor en `GRPC_SERVER_HOST` -- con
+una salvedad que hoy hace fallar este respaldo: la verificación TLS solo
+funciona con una IP que figure en el Subject Alternative Name del
+certificado (hoy `127.0.0.1` y `192.168.100.74`), y esa IP **no está
+reservada en el router**, así que el servidor actualmente tiene otra. Leer
+la sección "Reserva DHCP" más abajo antes de recurrir a este respaldo; una
+vez hecha la reserva, `192.168.100.74` vuelve a ser válida.
 
 ## 5. Iniciar la app
 
@@ -103,12 +110,55 @@ configuró el servidor (no se documentan acá por tratarse de un repositorio
 de código). El primer usuario ADMIN puede crear el resto de los usuarios
 desde "Usuarios" en la barra lateral (`BR-AUTH-005`).
 
+## Reserva DHCP de la IP del servidor (tarea del router, una sola vez)
+
+Todas las PCs del sistema están en el mismo segmento `192.168.100.0/24`,
+con el router `192.168.100.1` haciendo de gateway, servidor DHCP y DNS.
+
+La IP del servidor se entrega por DHCP con un lease de 24 horas y **no está
+reservada**, así que puede cambiar en cualquier renovación. Ya cambió una
+vez: el certificado TLS fue emitido con `IP.2 = 192.168.100.74` en su
+Subject Alternative Name y la máquina pasó a `192.168.100.9`. El acceso por
+hostname no se vio afectado (el DNS del router se actualiza solo), pero el
+respaldo por IP quedó roto: apuntar `GRPC_SERVER_HOST` a una IP que no está
+en el SAN hace fallar la verificación TLS.
+
+Para cerrarlo, reservar en el router la IP que ya firma el certificado:
+
+| Dato | Valor |
+| --- | --- |
+| Equipo | `DESKTOP-5H7BABS` (servidor) |
+| Interfaz | Wi-Fi — Realtek RTL8188EU |
+| Dirección MAC | `A8-29-48-88-FB-FB` |
+| IP a reservar | `192.168.100.74` (la del SAN del certificado; verificada libre) |
+
+Pasos:
+
+1. Entrar a `http://192.168.100.1` con la clave de administrador del router.
+2. Buscar la sección de DHCP (suele llamarse *DHCP Reservation*, *Address
+   Reservation*, *Static Lease* o *Vinculación IP-MAC*).
+3. Agregar una entrada con la MAC y la IP de la tabla de arriba.
+4. En la PC servidor, renovar el lease para tomar la IP reservada:
+   `ipconfig /release; ipconfig /renew` (o reiniciar).
+5. Confirmar: `ipconfig` debe mostrar `192.168.100.74`, y
+   `Resolve-DnsName DESKTOP-5H7BABS -Server 192.168.100.1` debe devolver
+   esa misma IP.
+
+Se reserva `.74` y no la IP actual justamente para no tener que reemitir el
+certificado ni volver a copiar `server.crt` a cada PC cliente. Si en cambio
+se prefiere fijar la IP actual (`192.168.100.9`), hay que actualizar `IP.2`
+en `certs/openssl.cnf`, regenerar el certificado y repetir el paso 3 de esta
+guía en **todas** las PCs cliente.
+
 ## Del lado del servidor (ya hecho en `DESKTOP-5H7BABS`)
 
 Para referencia -- no hace falta repetir esto por cada PC cliente:
 
-- Regla de Firewall de Windows abierta para el puerto TCP 50051 (entrada).
+- Regla de Firewall de Windows abierta para el puerto TCP 50051 (entrada),
+  perfil `Any` -- funciona aunque el perfil de red de Windows esté en
+  "Público".
 - `cas_server` corriendo con `GRPC_HOST=0.0.0.0` y TLS habilitado
   (`GRPC_TLS_CERT_FILE`/`GRPC_TLS_KEY_FILE` en `cas_server/.env`).
 - Certificado autofirmado en `certs/server.crt` con el hostname del
-  servidor en su Subject Alternative Name (`certs/openssl.cnf`).
+  servidor en su Subject Alternative Name (`certs/openssl.cnf`), válido
+  hasta el 11/08/2036.

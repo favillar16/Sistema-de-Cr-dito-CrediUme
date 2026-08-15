@@ -55,4 +55,10 @@ LOAN_MAX_ACTIVE_PER_CLIENT = 3  # BR-LOAN-001
 LOAN_MAX_INSTALLMENT_INCOME_RATIO = Decimal("0.40")  # BR-LOAN-002
 LOAN_APPROVAL_EXPIRY_DAYS = 30  # BR-LOAN-003
 LOAN_DEFAULT_FIRST_DUE_DAYS = 30  # BR-LOAN-004
-LOAN_FIXED_INTEREST_RATE = Decimal("0.24")  # BR-LOAN-007, 24% anual
+# BR-LOAN-007. Tasa nominal anual: amortization.py aplica tasa_anual / 12 por
+# período, así que 0.18 = 18% anual = el 1,5% mensual sobre saldos deudores que
+# fija la cláusula de interés compensatorio del Pagaré/Contrato (autorizado por
+# la entidad). Si cambia esta tasa hay que mover también cas_client/rbac_ui.py's
+# FIXED_INTEREST_RATE (no hay fuente compartida entre los dos procesos) y
+# revisar el texto de esa cláusula en cas_client/documents.py.
+LOAN_FIXED_INTEREST_RATE = Decimal("0.18")  # 18% anual = 1,5% mensual

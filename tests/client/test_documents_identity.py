@@ -1,13 +1,23 @@
-"""Guarda de la identidad legal impresa en los documentos generados.
+"""Guarda de la identidad legal y de las condiciones comerciales impresas en
+los documentos generados.
 
 El nombre/RUC/dirección/celular de la entidad son datos reales de inscripción
 ante la DNIT: si alguien los revierte a los placeholders anteriores
 ("CREDIUME S.A.", "80XXXXXXX-X") los documentos salen a la calle con datos de
-otra denominación. Estos tests no validan el texto legal de las cláusulas
-(eso sigue pendiente de revisión legal, ver CLAUDE.md), solo la identidad.
+otra denominación.
+
+Desde que la entidad autorizó el texto legal, estos tests cubren además las
+condiciones que el Pagaré y el Contrato declaran (interés compensatorio y
+moratorio, plazo de gracia de la mora, umbral de vencimiento anticipado y
+jurisdicción). Ya no son placeholders: se imprimen en un instrumento que firma
+el cliente, así que un cambio silencioso acá cambia lo que la entidad puede
+cobrar y ejecutar.
 
 Sin dependencia de Qt: documents.py solo arma HTML como string.
 """
+
+import re
+from html import unescape
 
 from cas_client import documents
 
@@ -80,6 +90,102 @@ def test_period_report_has_no_draft_banner():
     """Igual que el Cronograma: son cifras calculadas, no texto legal."""
     html = documents.reporte_periodo_html(_FakeReport())
     assert "BORRADOR" not in html
+
+
+# ---- Condiciones comerciales autorizadas (Pagaré / Contrato) --------------
+
+
+class _FakeLoanCompleto:
+    """Lo mínimo que pagare_html()/contrato_html() leen del préstamo."""
+
+    id = "91cc3960-1111-2222-3333-444455556666"
+    status = "ACTIVE"
+    principal_amount = "18000000.00"
+    interest_rate = "0.18"  # tasa fija vigente: 18% anual = 1,5% mensual
+    term_months = 18
+    first_due_date = "2026-09-15"
+    total_paid = "0.00"
+    remaining_balance = "18000000.00"
+    guarantee_type = ""
+    guarantee_amount = "0.00"
+    charge_interest_tax = ""
+    charge_admin_fee = ""
+    charge_cancellation_insurance = ""
+    charge_contracted_insurance = ""
+    total_charges = "0.00"
+    total_credit_with_charges = "18000000.00"
+
+
+def _texto_plano(documento: str) -> str:
+    """Texto tal como lo lee el cliente en el documento renderizado.
+
+    Las plantillas cortan las frases con saltos de línea e indentación y
+    escapan los acentos como entidades ("facultar&aacute;"); QTextDocument
+    colapsa ambas cosas al imprimir. Estos tests afirman sobre las condiciones
+    que el cliente firma, no sobre en qué columna quedó cortado el f-string,
+    así que normalizan primero -- si no, reformatear una cláusula sin cambiar
+    una sola palabra rompería la guarda."""
+    return " ".join(unescape(re.sub(r"<[^>]+>", " ", documento)).split())
+
+
+def test_authorised_commercial_terms():
+    """Las condiciones que autorizó la entidad. Cambiarlas cambia el
+    instrumento legal, no solo la redacción."""
+    assert documents._TERM_MORATORY_RATE == "0,38% mensual"
+    assert documents._TERM_MORATORY_GRACE_DAYS == 11
+    assert documents._TERM_ACCELERATION_INSTALLMENTS == 4
+    assert documents._TERM_JURISDICTION_CITY == "Coronel Oviedo"
+
+
+def test_compensatory_interest_is_quoted_monthly_not_annually():
+    """El sistema guarda la tasa nominal anual (0.18) pero la cláusula la
+    declara mensual (1,5%), que es lo que amortization.py cobra por período.
+    Imprimir "18%" ahí prometería una tasa distinta de la cuota calculada."""
+    for documento in (
+        documents.pagare_html(_FakeLoanCompleto, _FakeClient),
+        documents.contrato_html(_FakeLoanCompleto, _FakeClient),
+    ):
+        texto = _texto_plano(documento)
+        assert "compensatorio del 1,5% mensual sobre saldos deudores" in texto
+        assert "18% mensual" not in texto
+
+
+def test_pagare_and_contrato_print_the_mora_terms():
+    for documento in (
+        documents.pagare_html(_FakeLoanCompleto, _FakeClient),
+        documents.contrato_html(_FakeLoanCompleto, _FakeClient),
+    ):
+        texto = _texto_plano(documento)
+        assert "punitorio del 0,38% mensual" in texto
+        # La mora recién se devenga a los 11 días del primer vencimiento.
+        assert "a partir de los 11 (once) días corridos" in texto
+        assert "4 (cuatro) cuotas vencidas" in texto
+        assert "Tribunales de Coronel Oviedo" in texto
+
+
+def test_acceleration_is_a_faculty_of_the_lender_not_automatic():
+    """La condición autorizada dice "se podrá proceder a exigir el total
+    adeudado" -- una facultad de la entidad. El texto anterior lo hacía
+    automático, que es una obligación distinta."""
+    texto = _texto_plano(documents.pagare_html(_FakeLoanCompleto, _FakeClient))
+    assert "facultará a CREDIMED UME a exigir el total adeudado" in texto
+    assert "automáticamente exigible" not in texto
+
+
+def test_no_placeholder_survives_in_the_signed_instruments():
+    """Un documento que va a la firma no puede salir con "[A DEFINIR]"."""
+    for html in (
+        documents.pagare_html(_FakeLoanCompleto, _FakeClient),
+        documents.contrato_html(_FakeLoanCompleto, _FakeClient),
+        documents.liquidacion_html(_FakeLoanCompleto, _FakeClient, _FakeSchedule),
+    ):
+        assert "A DEFINIR" not in html
+        assert "[N]" not in html
+        assert "BORRADOR" not in html
+
+
+class _FakeSchedule:
+    installments: list = []
 
 
 # ---- BR-LOAN-011: comprobante de pago -------------------------------------

@@ -996,13 +996,13 @@ class LoansView(BaseView):
         docs_frame, docs_card = card()
         docs_card.addWidget(section_label("Documentos"))
         docs_hint = QLabel(
-            "La Liquidación, el Pagaré y el Contrato son un borrador -- su texto "
-            "legal aún no fue revisado. No usar en producción sin validación "
-            "legal. El Cronograma y el Comprobante de pago no llevan texto legal: "
-            "solo cifras ya registradas."
+            "El Pagaré y el Contrato son instrumentos legales: se emiten con las "
+            "condiciones autorizadas por la entidad (interés compensatorio, mora "
+            "y vencimiento anticipado). Verificá los datos del cliente antes de "
+            "imprimir y entregar para la firma."
         )
         docs_hint.setWordWrap(True)
-        docs_hint.setStyleSheet(f"color: {theme.ERROR}; font-size: 11px;")
+        docs_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
         docs_card.addWidget(docs_hint)
 
         self._document_buttons: dict[

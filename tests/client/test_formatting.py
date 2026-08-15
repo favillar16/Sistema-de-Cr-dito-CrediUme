@@ -14,7 +14,33 @@ from cas_client.formatting import (
     fecha_hora,
     gs,
     rate_percent,
+    rate_percent_mensual,
 )
+
+
+def test_rate_percent_mensual_converts_the_nominal_annual_rate():
+    """La tasa fija vigente (18% anual) es el 1,5% mensual que declaran el
+    Pagaré y el Contrato -- amortization.py cobra tasa_anual / 12 por
+    período."""
+    assert rate_percent_mensual("0.18") == "1,5%"
+    assert rate_percent_mensual("0.24") == "2%"
+
+
+def test_rate_percent_mensual_uses_a_decimal_comma():
+    """Se imprime en documentos legales en español, donde "1.5%" se lee como
+    separador de miles."""
+    assert "," in rate_percent_mensual("0.18")
+    assert "." not in rate_percent_mensual("0.18")
+
+
+def test_rate_percent_mensual_rounds_rates_that_do_not_divide_evenly():
+    """10% anual / 12 es periódico: sin redondeo imprimiría 28 dígitos."""
+    assert rate_percent_mensual("0.10") == "0,833%"
+
+
+def test_rate_percent_mensual_leaves_empty_and_unparseable_values_untouched():
+    assert rate_percent_mensual("") == ""
+    assert rate_percent_mensual("no es una tasa") == "no es una tasa"
 
 
 def test_fecha_renders_wire_dates_as_day_month_year():
