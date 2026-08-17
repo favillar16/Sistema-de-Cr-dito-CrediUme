@@ -269,13 +269,20 @@ class MainWindow(QMainWindow):
         self._login_view = LoginView(self._auth_client)
         self._login_view.login_succeeded.connect(self._on_login_succeeded)
 
+        # Una sola instancia de cada cliente gRPC, compartida por las vistas
+        # que la necesitan, en vez de abrir un canal por vista: CashView cobra
+        # cuotas en ventanilla, así que necesita los mismos dos servicios que
+        # LoansView.
         client_service = ClientServiceClient()
+        loan_service = LoanServiceClient()
         clients_view = ClientsView(client_service, self._session)
         clients_view.view_loans_requested.connect(self._on_view_loans_requested)
-        loans_view = LoansView(LoanServiceClient(), client_service, self._session)
+        loans_view = LoansView(loan_service, client_service, self._session)
         loans_view.view_client_requested.connect(self._on_view_client_requested)
         dashboard_view = DashboardView(DashboardServiceClient(), self._session)
-        cash_view = CashView(CashServiceClient(), self._session)
+        cash_view = CashView(
+            CashServiceClient(), client_service, loan_service, self._session
+        )
         users_view = UsersView(self._auth_client, self._session)
 
         self._shell_view = _AppShellView(
