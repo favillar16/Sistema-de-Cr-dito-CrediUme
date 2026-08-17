@@ -14,12 +14,18 @@ from cas_client import assets, theme
 from cas_client.grpc_client import (
     AuthClient,
     AuthError,
+    CashServiceClient,
     ClientServiceClient,
     DashboardServiceClient,
     LoanServiceClient,
 )
-from cas_client.rbac_ui import can_manage_users
+from cas_client.rbac_ui import (
+    can_manage_users,
+    can_supervise_cash_sessions,
+    is_teller,
+)
 from cas_client.session import Session, session_events
+from cas_client.views.cash_view import CashView
 from cas_client.views.clients_view import ClientsView
 from cas_client.views.dashboard_view import DashboardView
 from cas_client.views.loans_view import LoansView
@@ -28,7 +34,36 @@ from cas_client.views.users_view import UsersView
 from cas_client.widgets.header_bar import HeaderBar
 from cas_client.widgets.scroll_area import wrap_scrollable
 
-NAV_ITEMS = ("Dashboard", "Clientes", "Préstamos", "Usuarios")
+NAV_ITEMS = ("Dashboard", "Caja", "Clientes", "Préstamos", "Usuarios")
+
+# Ítems que ve el rol Cajero (BR-CAJA-005). Es una lista explícita y no un
+# piso de jerarquía: el cajero no es "un rol con menos permisos que ve un
+# subconjunto de lo mismo", es un puesto de ventanilla cuya pantalla
+# principal es Caja y que además consulta clientes/préstamos para poder
+# informarle al cliente cuánto debe y cobrarle.
+_TELLER_NAV_ITEMS = ("Caja", "Clientes", "Préstamos")
+
+
+# Ítem de navegación -> índice en el QStackedWidget del área de contenido.
+# Derivado de NAV_ITEMS para que agregar una pantalla no requiera acordarse de
+# actualizar un diccionario literal aparte (el orden en que _AppShellView
+# agrega los widgets al stack tiene que seguir a NAV_ITEMS).
+_NAV_INDEX = {item: index for index, item in enumerate(NAV_ITEMS)}
+
+
+def _nav_item_visible(item: str, role: str) -> bool:
+    """Visibilidad de un ítem para todo rol que NO sea el Cajero (ese caso lo
+    resuelve _TELLER_NAV_ITEMS, que es una lista propia y no un filtro).
+
+    "Caja" la ven Gerente y Administrador porque son quienes supervisan los
+    arqueos y pueden cerrar una caja que un cajero dejó abierta; el Analista
+    de Crédito no maneja efectivo, así que no la ve.
+    """
+    if item == "Caja":
+        return can_supervise_cash_sessions(role)
+    if item == "Usuarios":
+        return can_manage_users(role)
+    return True
 
 
 class _Sidebar(QWidget):
@@ -97,12 +132,22 @@ class _Sidebar(QWidget):
 
         self.set_active(NAV_ITEMS[0])
 
-    def set_role(self, role: str) -> None:
-        # Hide, don't disable -- same convention already used for other
-        # role-gated actions in this client (e.g. the loan schedule's
-        # "Ajustar" button) rather than offering an item that would just
-        # come back PERMISSION_DENIED.
-        self._buttons["Usuarios"].setVisible(can_manage_users(role))
+    def set_role(self, role: str) -> str:
+        """Ajusta qué ítems ve este rol y devuelve el que debe quedar activo.
+
+        Hide, don't disable -- same convention already used for other
+        role-gated actions in this client (e.g. the loan schedule's
+        "Ajustar" button) rather than offering an item that would just
+        come back PERMISSION_DENIED.
+        """
+        visibles = (
+            _TELLER_NAV_ITEMS
+            if is_teller(role)
+            else tuple(item for item in NAV_ITEMS if _nav_item_visible(item, role))
+        )
+        for item, button in self._buttons.items():
+            button.setVisible(item in visibles)
+        return visibles[0]
 
     def set_active(self, label: str) -> None:
         for item, button in self._buttons.items():
@@ -130,6 +175,7 @@ class _AppShellView(QWidget):
     def __init__(
         self,
         dashboard_view: DashboardView,
+        cash_view: CashView,
         clients_view: ClientsView,
         loans_view: LoansView,
         users_view: UsersView,
@@ -146,6 +192,7 @@ class _AppShellView(QWidget):
         layout.addWidget(self._sidebar)
 
         self._dashboard_view = dashboard_view
+        self._cash_view = cash_view
         self._clients_view = clients_view
 
         self._header_bar = HeaderBar()
@@ -153,7 +200,13 @@ class _AppShellView(QWidget):
 
         self._content_stack = QStackedWidget()
         self._content_stack.setStyleSheet(f"background-color: {theme.APP_BACKGROUND};")
+        # El orden acá tiene que coincidir con _NAV_INDEX abajo. CashView va
+        # envuelta en wrap_scrollable por la misma razón que DashboardView y
+        # UsersView: es una página larga de tarjetas que, sin contenedor de
+        # scroll, Qt comprime por debajo de su tamaño mínimo en vez de dejar
+        # scrollear (ver widgets/scroll_area.py).
         self._content_stack.addWidget(wrap_scrollable(self._dashboard_view))
+        self._content_stack.addWidget(wrap_scrollable(self._cash_view))
         self._content_stack.addWidget(clients_view)
         self._content_stack.addWidget(loans_view)
         self._content_stack.addWidget(wrap_scrollable(users_view))
@@ -169,25 +222,30 @@ class _AppShellView(QWidget):
 
     def _on_nav_selected(self, label: str) -> None:
         self._sidebar.set_active(label)
-        index = {"Dashboard": 0, "Clientes": 1, "Préstamos": 2, "Usuarios": 3}[label]
-        self._content_stack.setCurrentIndex(index)
+        self._content_stack.setCurrentIndex(_NAV_INDEX[label])
 
     def show_loans_for_client(self, client_id: str, display_name: str) -> None:
         self._loans_view.load_client(client_id, display_name)
         self._sidebar.set_active("Préstamos")
-        self._content_stack.setCurrentIndex(2)
+        self._content_stack.setCurrentIndex(_NAV_INDEX["Préstamos"])
 
     def show_client_detail(self, client_id: str) -> None:
         self._clients_view.open_client_detail(client_id)
         self._sidebar.set_active("Clientes")
-        self._content_stack.setCurrentIndex(1)
+        self._content_stack.setCurrentIndex(_NAV_INDEX["Clientes"])
 
     def set_user(self, username: str, role: str) -> None:
         self._dashboard_view.set_user(username, role)
+        self._cash_view.set_user(username, role)
+        self._clients_view.apply_role(role)
+        self._loans_view.apply_role(role)
         self._header_bar.set_user(username, role)
-        self._sidebar.set_role(role)
-        self._sidebar.set_active("Dashboard")
-        self._content_stack.setCurrentIndex(0)
+        # set_role() devuelve el primer ítem visible para este rol, que es la
+        # pantalla de aterrizaje: "Dashboard" para casi todos, "Caja" para el
+        # Cajero, que no ve el dashboard (BR-CAJA-005).
+        inicial = self._sidebar.set_role(role)
+        self._sidebar.set_active(inicial)
+        self._content_stack.setCurrentIndex(_NAV_INDEX[inicial])
 
 
 class MainWindow(QMainWindow):
@@ -217,10 +275,12 @@ class MainWindow(QMainWindow):
         loans_view = LoansView(LoanServiceClient(), client_service, self._session)
         loans_view.view_client_requested.connect(self._on_view_client_requested)
         dashboard_view = DashboardView(DashboardServiceClient(), self._session)
+        cash_view = CashView(CashServiceClient(), self._session)
         users_view = UsersView(self._auth_client, self._session)
 
         self._shell_view = _AppShellView(
             dashboard_view,
+            cash_view,
             clients_view,
             loans_view,
             users_view,

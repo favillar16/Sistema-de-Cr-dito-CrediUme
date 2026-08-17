@@ -3,7 +3,10 @@ from cas_client.rbac_ui import (
     can_edit_installment_amount,
     can_edit_interest_rate,
     can_manage_users,
+    can_originate_credit,
+    can_supervise_cash_sessions,
     can_view_period_report,
+    is_teller,
     role_at_least,
     tier_label,
 )
@@ -33,7 +36,11 @@ def test_role_at_least_rejects_unknown_or_missing_role():
 
 
 def test_tier_label_maps_backend_roles_to_ui_tiers():
-    assert tier_label("CASHIER") == "Estándar"
+    # BR-CAJA-005: CASHIER dejó de estar agrupado bajo "Estándar" -- volvió a
+    # asignarse a personas reales y tiene un conjunto de permisos propio, así
+    # que mostrarlo como "Estándar" describiría mal lo que ese usuario puede
+    # hacer.
+    assert tier_label("CASHIER") == "Cajero"
     assert tier_label("CREDIT_ANALYST") == "Estándar"
     assert tier_label("MANAGER") == "Agente de Créditos"
     assert tier_label("ADMIN") == "Administrador"
@@ -72,6 +79,65 @@ def test_fixed_interest_rate_matches_server_side_constant():
     # role_at_least/rbac.py). This test exists so a drift is caught here
     # instead of silently rejecting loans in the UI's "Estándar" flow.
     assert FIXED_INTEREST_RATE == "0.18"  # 18% anual = 1,5% mensual
+
+
+def test_is_teller_only_matches_the_cashier_role():
+    """No es "por debajo de Analista de Crédito": el Cajero es un puesto con
+    su propia navegación, no un piso de jerarquía."""
+    assert is_teller("CASHIER")
+    assert not is_teller("CREDIT_ANALYST")
+    assert not is_teller("MANAGER")
+    assert not is_teller("ADMIN")
+    assert not is_teller(None)
+
+
+def test_can_supervise_cash_sessions_only_manager_and_above():
+    """Espeja cash_service.py's _es_supervisor(): ver los arqueos de todos los
+    cajeros y cerrar una caja ajena."""
+    assert not can_supervise_cash_sessions("CASHIER")
+    assert not can_supervise_cash_sessions("CREDIT_ANALYST")
+    assert can_supervise_cash_sessions("MANAGER")
+    assert can_supervise_cash_sessions("ADMIN")
+
+
+def test_can_originate_credit_matches_the_server_side_gate():
+    """Guarda de sincronización real contra METHOD_ROLES, igual que la de
+    GetPeriodReport de más abajo: BR-CAJA-005 subió el alta de clientes y de
+    préstamos a CREDIT_ANALYST_AND_ABOVE, y ocultar/mostrar esos botones en la
+    UI tiene que seguir esa tabla, no una copia a mano."""
+    from cas_server.security.rbac import allowed_roles
+
+    for metodo in (
+        "/clients.ClientService/CreateClient",
+        "/clients.ClientService/UpdateClient",
+        "/loans.LoanService/CreateLoan",
+        "/loans.LoanService/UpdateLoanProposal",
+    ):
+        permitidos = allowed_roles(metodo)
+        for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+            esperado = any(permitido.value == role for permitido in permitidos)
+            assert can_originate_credit(role) == esperado, (metodo, role)
+
+
+def test_cashier_keeps_the_lookup_and_collection_methods():
+    """La contracara del test anterior: lo que el Cajero sí conserva. Si
+    alguna de estas subiera de nivel, su pantalla quedaría sin poder informar
+    ni cobrar, que es justamente su trabajo."""
+    from cas_server.security.rbac import allowed_roles
+
+    for metodo in (
+        "/clients.ClientService/SearchClients",
+        "/clients.ClientService/GetClientById",
+        "/loans.LoanService/GetLoanById",
+        "/loans.LoanService/ListClientLoans",
+        "/loans.LoanService/GetAmortizationSchedule",
+        "/loans.LoanService/RecordPayment",
+        "/cash.CashService/OpenCashSession",
+        "/cash.CashService/RegisterCashMovement",
+        "/cash.CashService/CloseCashSession",
+    ):
+        permitidos = {permitido.value for permitido in allowed_roles(metodo)}
+        assert "CASHIER" in permitidos, metodo
 
 
 def test_period_report_gate_matches_rbac_tables_exactly():

@@ -5,6 +5,8 @@ import grpc
 
 import auth_service_pb2
 import auth_service_pb2_grpc
+import cash_service_pb2
+import cash_service_pb2_grpc
 import client_service_pb2
 import client_service_pb2_grpc
 import dashboard_service_pb2
@@ -343,13 +345,19 @@ class LoanServiceClient:
         *,
         installment_number: int = 0,
         amount: str = "",
+        payment_method: str = "",
     ) -> loan_service_pb2.RecordPaymentResponse:
         """`installment_number` (BR-LOAN-010) is the normal path from the UI
         now -- the server recalculates and enforces the fixed amount owed
         for that specific installment, ignoring `amount`. The free-form
         `amount` (installment_number=0) path stays for any future
         non-installment-specific payment, but the current UI always
-        supplies installment_number."""
+        supplies installment_number.
+
+        `payment_method` (BR-CAJA-004) is "EFECTIVO" or "TRANSFERENCIA"; an
+        empty string means TRANSFERENCIA server-side. EFECTIVO needs an open
+        cash session for the logged-in user and ignores transfer_reference.
+        """
         try:
             return self._stub.RecordPayment(
                 loan_service_pb2.RecordPaymentRequest(
@@ -357,6 +365,7 @@ class LoanServiceClient:
                     amount=amount,
                     transfer_reference=transfer_reference,
                     installment_number=installment_number,
+                    payment_method=payment_method,
                 ),
                 metadata=_bearer(access_token),
             )
@@ -415,6 +424,91 @@ class DashboardServiceClient:
         try:
             return self._stub.GetPeriodReport(
                 dashboard_service_pb2.GetPeriodReportRequest(
+                    start_date=start_date, end_date=end_date
+                ),
+                metadata=_bearer(access_token),
+            )
+        except grpc.RpcError as exc:
+            raise ApiError(exc.code(), exc.details()) from exc
+
+
+class CashServiceClient:
+    """Thin wrapper around the CashService gRPC stub (BR-CAJA-*).
+
+    None of these take a cashier id: the server resolves the cash session
+    from the bearer token, so the client can't accidentally address someone
+    else's caja. `close_cash_session`'s optional `session_id` is the one
+    exception, for a manager closing a session a cashier left open.
+    """
+
+    def __init__(self, host: str | None = None, port: int | None = None):
+        target = f"{host or config.GRPC_SERVER_HOST}:{port or config.GRPC_PORT}"
+        self._channel = _create_channel(target)
+        self._stub = cash_service_pb2_grpc.CashServiceStub(self._channel)
+
+    def open_cash_session(
+        self, access_token: str, opening_amount: str, notes: str = ""
+    ) -> cash_service_pb2.CashSessionDetail:
+        try:
+            return self._stub.OpenCashSession(
+                cash_service_pb2.OpenCashSessionRequest(
+                    opening_amount=opening_amount, notes=notes
+                ),
+                metadata=_bearer(access_token),
+            )
+        except grpc.RpcError as exc:
+            raise ApiError(exc.code(), exc.details()) from exc
+
+    def get_current_cash_session(
+        self, access_token: str
+    ) -> cash_service_pb2.GetCurrentCashSessionResponse:
+        try:
+            return self._stub.GetCurrentCashSession(
+                cash_service_pb2.GetCurrentCashSessionRequest(),
+                metadata=_bearer(access_token),
+            )
+        except grpc.RpcError as exc:
+            raise ApiError(exc.code(), exc.details()) from exc
+
+    def register_cash_movement(
+        self, access_token: str, movement_type: str, amount: str, concept: str
+    ) -> cash_service_pb2.CashSessionDetail:
+        try:
+            return self._stub.RegisterCashMovement(
+                cash_service_pb2.RegisterCashMovementRequest(
+                    movement_type=movement_type, amount=amount, concept=concept
+                ),
+                metadata=_bearer(access_token),
+            )
+        except grpc.RpcError as exc:
+            raise ApiError(exc.code(), exc.details()) from exc
+
+    def close_cash_session(
+        self,
+        access_token: str,
+        counted_amount: str,
+        notes: str = "",
+        session_id: str = "",
+    ) -> cash_service_pb2.CashSessionDetail:
+        try:
+            return self._stub.CloseCashSession(
+                cash_service_pb2.CloseCashSessionRequest(
+                    counted_amount=counted_amount, notes=notes, session_id=session_id
+                ),
+                metadata=_bearer(access_token),
+            )
+        except grpc.RpcError as exc:
+            raise ApiError(exc.code(), exc.details()) from exc
+
+    def list_cash_sessions(
+        self, access_token: str, start_date: str = "", end_date: str = ""
+    ) -> cash_service_pb2.ListCashSessionsResponse:
+        """Dates go in wire format (YYYY-MM-DD) -- the view shows DD/MM/AAAA
+        and converts with formatting.fecha_a_iso() before calling here, same
+        contract as DashboardServiceClient.get_period_report."""
+        try:
+            return self._stub.ListCashSessions(
+                cash_service_pb2.ListCashSessionsRequest(
                     start_date=start_date, end_date=end_date
                 ),
                 metadata=_bearer(access_token),
