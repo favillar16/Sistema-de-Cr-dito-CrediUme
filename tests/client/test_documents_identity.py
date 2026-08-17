@@ -229,6 +229,10 @@ class _FakePayment:
     total_paid = "1800000.00"
     remaining_balance = "16200000.00"
     transfer_reference = "TRF-99887"
+    # BR-CAJA-004. El desglose por medio de pago tiene su propio archivo
+    # (test_documents_payment_method.py); acá solo hace falta que el campo
+    # exista para poder renderizar el comprobante.
+    payment_method = "TRANSFERENCIA"
     recorded_by_name = "Ana Benítez"
     recorded_by_national_id = "4123456"
 

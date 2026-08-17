@@ -57,3 +57,15 @@ Use: - sdd - architecture - pyside6 - grpc - authorization - testing
 
 Use: - sdd - authentication - authorization - security - grpc -
 protobuf - testing
+
+### Cash register (caja / arqueo)
+
+Use: - sdd - domain - financial-rules - database - concurrency -
+authorization - grpc - protobuf - testing
+
+The domain Skill's Cash Session / Cash Movement section and
+`specs/cash/README` are authoritative here. Two traps worth loading
+`concurrency` and `authorization` for: the one-open-session-per-cashier
+rule is a partial unique index rather than a servicer check, and the
+"may close another cashier's caja" rule lives in the servicer rather
+than in `rbac.py`.

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 from cas_client import theme
 from cas_client.formatting import DISPLAY_DATE_PLACEHOLDER, fecha, fecha_a_iso
 from cas_client.grpc_client import ApiError, ClientServiceClient
-from cas_client.rbac_ui import role_at_least
+from cas_client.rbac_ui import can_originate_credit, role_at_least
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
 from cas_client.widgets.base_view import BaseView
@@ -191,10 +191,15 @@ class ClientsView(BaseView):
         search_button.clicked.connect(lambda: self._run_search(reset=True))
         toolbar.addWidget(search_button)
 
-        new_button = QPushButton("Nuevo cliente")
-        new_button.setStyleSheet(theme.accent_button_style())
-        new_button.clicked.connect(self._show_create_page)
-        toolbar.addWidget(new_button)
+        # BR-CAJA-005: el alta de clientes es CREDIT_ANALYST_AND_ABOVE en
+        # rbac.py desde que el rol Cajero volvió a usarse. Se oculta en vez de
+        # deshabilitarse, misma convención que el ítem "Usuarios" del sidebar.
+        # La visibilidad real se fija en apply_role(), que MainWindow llama al
+        # iniciar sesión -- acá la vista todavía no conoce el rol.
+        self._new_button = QPushButton("Nuevo cliente")
+        self._new_button.setStyleSheet(theme.accent_button_style())
+        self._new_button.clicked.connect(self._show_create_page)
+        toolbar.addWidget(self._new_button)
 
         layout.addLayout(toolbar)
 
@@ -553,10 +558,10 @@ class ClientsView(BaseView):
         actions_card.addWidget(section_label("Acciones"))
         actions = QHBoxLayout()
 
-        save_button = QPushButton("Guardar cambios")
-        save_button.setStyleSheet(theme.accent_button_style())
-        save_button.clicked.connect(self._on_update_submit)
-        actions.addWidget(save_button)
+        self._save_button = QPushButton("Guardar cambios")
+        self._save_button.setStyleSheet(theme.accent_button_style())
+        self._save_button.clicked.connect(self._on_update_submit)
+        actions.addWidget(self._save_button)
 
         self._deactivate_button = QPushButton("Desactivar cliente")
         self._deactivate_button.setStyleSheet(theme.secondary_button_style())
@@ -588,6 +593,16 @@ class ClientsView(BaseView):
 
         layout.addStretch()
         return page
+
+    def apply_role(self, role: str) -> None:
+        """BR-CAJA-005: el Cajero consulta la ficha del cliente para poder
+        informarle, pero no la crea ni la edita -- CreateClient/UpdateClient
+        son CREDIT_ANALYST_AND_ABOVE en rbac.py. Ocultar los botones evita
+        ofrecerle una acción que solo volvería como PERMISSION_DENIED; el
+        servidor sigue siendo la autoridad, esto es UX."""
+        puede_originar = can_originate_credit(role)
+        self._new_button.setVisible(puede_originar)
+        self._save_button.setVisible(puede_originar)
 
     def open_client_detail(self, client_id: str) -> None:
         """Entry point used by MainWindow when navigating here from LoansView's

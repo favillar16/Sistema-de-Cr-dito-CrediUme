@@ -114,31 +114,42 @@ def _login(auth_stub, username, password):
     return (("authorization", f"Bearer {response.access_token}"),)
 
 
-def test_create_loan_allows_cashier(stubs):
+def test_create_loan_requires_credit_analyst_or_above(stubs):
+    """BR-CAJA-005: originar un crédito dejó de estar al alcance del cajero
+    cuando el rol volvió a usarse como ventanilla."""
     auth_stub, loan_stub = stubs
     _create_user("cashier_l", "Passw0rd!", RoleEnum.CASHIER)
+    _create_user("analyst_l", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
     client_id = _create_client_row(
         national_id="7000002", email="cashier_loan@example.com"
     )
-    metadata = _login(auth_stub, "cashier_l", "Passw0rd!")
 
-    response = loan_stub.CreateLoan(
-        loan_service_pb2.CreateLoanRequest(
-            client_id=str(client_id),
-            principal_amount="1000.00",
-            interest_rate=_TASA_ESTANDAR,
-            term_months=6,
-        ),
-        metadata=metadata,
+    solicitud = loan_service_pb2.CreateLoanRequest(
+        client_id=str(client_id),
+        principal_amount="1000.00",
+        interest_rate=_TASA_ESTANDAR,
+        term_months=6,
     )
+
+    cashier_metadata = _login(auth_stub, "cashier_l", "Passw0rd!")
+    with pytest.raises(grpc.RpcError) as exc_info:
+        loan_stub.CreateLoan(solicitud, metadata=cashier_metadata)
+    assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+
+    analyst_metadata = _login(auth_stub, "analyst_l", "Passw0rd!")
+    response = loan_stub.CreateLoan(solicitud, metadata=analyst_metadata)
     assert response.loan_id
 
 
 def test_create_loan_rejects_non_standard_rate_for_standard_role(stubs):
+    # BR-LOAN-007 se define contra "roles por debajo de MANAGER"; desde
+    # BR-CAJA-005 el rol más bajo que puede crear un préstamo es
+    # CREDIT_ANALYST, así que la prueba usa ese (antes usaba CASHIER, que hoy
+    # fallaría antes por PERMISSION_DENIED y no probaría la regla de tasa).
     auth_stub, loan_stub = stubs
-    _create_user("cashier_r", "Passw0rd!", RoleEnum.CASHIER)
+    _create_user("analyst_r", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
     client_id = _create_client_row(national_id="7000008", email="rate_std@example.com")
-    metadata = _login(auth_stub, "cashier_r", "Passw0rd!")
+    metadata = _login(auth_stub, "analyst_r", "Passw0rd!")
 
     with pytest.raises(grpc.RpcError) as exc_info:
         loan_stub.CreateLoan(
@@ -173,14 +184,14 @@ def test_create_loan_allows_manager_to_set_custom_rate(stubs):
     assert response.loan_id
 
 
-def test_update_loan_proposal_allows_cashier(stubs):
+def test_update_loan_proposal_allows_credit_analyst(stubs):
     auth_stub, loan_stub = stubs
-    _create_user("cashier_u", "Passw0rd!", RoleEnum.CASHIER)
+    _create_user("analyst_u", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
     client_id = _create_client_row(
         national_id="7000005", email="update_proposal@example.com"
     )
     loan_id = _create_loan_row(client_id, LoanStatusEnum.PENDING)
-    metadata = _login(auth_stub, "cashier_u", "Passw0rd!")
+    metadata = _login(auth_stub, "analyst_u", "Passw0rd!")
 
     response = loan_stub.UpdateLoanProposal(
         loan_service_pb2.UpdateLoanProposalRequest(
@@ -195,14 +206,14 @@ def test_update_loan_proposal_allows_cashier(stubs):
     assert response.status == "PENDING"
 
 
-def test_update_loan_guarantee_allows_cashier(stubs):
+def test_update_loan_guarantee_allows_credit_analyst(stubs):
     auth_stub, loan_stub = stubs
-    _create_user("cashier_g", "Passw0rd!", RoleEnum.CASHIER)
+    _create_user("analyst_g", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
     client_id = _create_client_row(
         national_id="7000006", email="update_guarantee@example.com"
     )
     loan_id = _create_loan_row(client_id, LoanStatusEnum.PENDING)
-    metadata = _login(auth_stub, "cashier_g", "Passw0rd!")
+    metadata = _login(auth_stub, "analyst_g", "Passw0rd!")
 
     response = loan_stub.UpdateLoanGuarantee(
         loan_service_pb2.UpdateLoanGuaranteeRequest(
@@ -216,14 +227,14 @@ def test_update_loan_guarantee_allows_cashier(stubs):
     assert response.status == "PENDING"
 
 
-def test_update_loan_charges_allows_cashier(stubs):
+def test_update_loan_charges_allows_credit_analyst(stubs):
     auth_stub, loan_stub = stubs
-    _create_user("cashier_c", "Passw0rd!", RoleEnum.CASHIER)
+    _create_user("analyst_c", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
     client_id = _create_client_row(
         national_id="7000007", email="update_charges@example.com"
     )
     loan_id = _create_loan_row(client_id, LoanStatusEnum.PENDING)
-    metadata = _login(auth_stub, "cashier_c", "Passw0rd!")
+    metadata = _login(auth_stub, "analyst_c", "Passw0rd!")
 
     response = loan_stub.UpdateLoanCharges(
         loan_service_pb2.UpdateLoanChargesRequest(
@@ -322,9 +333,9 @@ def test_get_loan_by_id_reports_creating_advisor(stubs):
     used by the client to print an advisor name on the cronograma de pago
     handed to the client (see documents.py's cronograma_html)."""
     auth_stub, loan_stub = stubs
-    _create_user("cashier_adv", "Passw0rd!", RoleEnum.CASHIER)
+    _create_user("analyst_adv", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
     client_id = _create_client_row(national_id="7000011", email="advisor@example.com")
-    metadata = _login(auth_stub, "cashier_adv", "Passw0rd!")
+    metadata = _login(auth_stub, "analyst_adv", "Passw0rd!")
 
     created = loan_stub.CreateLoan(
         loan_service_pb2.CreateLoanRequest(
@@ -340,7 +351,7 @@ def test_get_loan_by_id_reports_creating_advisor(stubs):
         loan_service_pb2.GetLoanByIdRequest(loan_id=created.loan_id),
         metadata=metadata,
     )
-    assert detail.created_by_username == "cashier_adv"
+    assert detail.created_by_username == "analyst_adv"
 
 
 def test_get_loan_by_id_reports_no_advisor_for_loan_without_creator(stubs):
@@ -378,15 +389,15 @@ def test_get_loan_by_id_reports_advisor_personal_data(stubs):
     C.I., no solo por su usuario del sistema."""
     auth_stub, loan_stub = stubs
     _create_user(
-        "cashier_named",
+        "analyst_named",
         "Passw0rd!",
-        RoleEnum.CASHIER,
+        RoleEnum.CREDIT_ANALYST,
         first_name="Ana",
         last_name="Benítez",
         national_id="4123456",
     )
     client_id = _create_client_row(national_id="7000020", email="named@example.com")
-    metadata = _login(auth_stub, "cashier_named", "Passw0rd!")
+    metadata = _login(auth_stub, "analyst_named", "Passw0rd!")
 
     created = loan_stub.CreateLoan(
         loan_service_pb2.CreateLoanRequest(
@@ -402,16 +413,16 @@ def test_get_loan_by_id_reports_advisor_personal_data(stubs):
     )
     assert detail.created_by_full_name == "Ana Benítez"
     assert detail.created_by_national_id == "4123456"
-    assert detail.created_by_username == "cashier_named"
+    assert detail.created_by_username == "analyst_named"
 
 
 def test_get_loan_by_id_advisor_personal_data_empty_for_legacy_user(stubs):
     """Un operador sin datos personales cargados devuelve "" en los campos
     nuevos -- el documento cae de vuelta a created_by_username."""
     auth_stub, loan_stub = stubs
-    _create_user("cashier_unnamed", "Passw0rd!", RoleEnum.CASHIER)
+    _create_user("analyst_unnamed", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
     client_id = _create_client_row(national_id="7000021", email="unnamed@example.com")
-    metadata = _login(auth_stub, "cashier_unnamed", "Passw0rd!")
+    metadata = _login(auth_stub, "analyst_unnamed", "Passw0rd!")
 
     created = loan_stub.CreateLoan(
         loan_service_pb2.CreateLoanRequest(
@@ -427,7 +438,7 @@ def test_get_loan_by_id_advisor_personal_data_empty_for_legacy_user(stubs):
     )
     assert detail.created_by_full_name == ""
     assert detail.created_by_national_id == ""
-    assert detail.created_by_username == "cashier_unnamed"
+    assert detail.created_by_username == "analyst_unnamed"
 
 
 def test_record_payment_reports_the_operator_who_registered_it(stubs):

@@ -15,12 +15,22 @@ from cas_server.db.models import (
     LoanInstallmentAdjustment,
     LoanPayment,
     LoanStatusEnum,
+    PaymentMethodEnum,
     RoleEnum,
     User,
 )
 from cas_server.security import rbac
 from cas_server.security.current_user import get_current_claims
 from cas_server.services.amortization import calcular_cronograma
+
+# BR-CAJA-004. La dependencia va en un solo sentido (loan_service ->
+# cash_service): cash_service.py no importa nada de acá, así que no hay ciclo.
+# La forma del movimiento de caja vive allá, junto al resto del arqueo, para
+# que este servicer no tenga que saber cómo se compone un CashMovement.
+from cas_server.services.cash_service import (
+    obtener_sesion_abierta,
+    registrar_cobro_en_efectivo,
+)
 from cas_server.services.common import (
     analizar_decimal,
     analizar_fecha,
@@ -807,13 +817,44 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
 
     def RecordPayment(self, request, context):
         loan_id = analizar_uuid(request.loan_id, "loan_id", context)
-        # El cobro en efectivo no se usa (rol CASHIER fuera de uso) -- todo pago
-        # se hace por transferencia, descuento directo o descuento en cuenta
-        # específica, así que la referencia es obligatoria para trazabilidad.
+        # BR-CAJA-004: el medio de pago vuelve a admitir efectivo. Vacío se
+        # lee como TRANSFERENCIA para que los clientes anteriores a la caja
+        # (y los tests que ya existían) sigan funcionando sin cambios.
+        medio_texto = request.payment_method.strip().upper()
+        try:
+            medio_pago = (
+                PaymentMethodEnum(medio_texto)
+                if medio_texto
+                else PaymentMethodEnum.TRANSFERENCIA
+            )
+        except ValueError:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "payment_method debe ser EFECTIVO o TRANSFERENCIA",
+            )
+
+        es_efectivo = medio_pago == PaymentMethodEnum.EFECTIVO
+        # En transferencia/descuento la referencia es el único rastro del
+        # cobro, así que es obligatoria. En efectivo la trazabilidad la da el
+        # movimiento de caja que se genera más abajo, y no hay número que
+        # pedir -- exigir uno solo llevaría a inventarlo.
         referencia_transferencia = request.transfer_reference.strip()
-        if not referencia_transferencia:
+        if not es_efectivo and not referencia_transferencia:
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT, "transfer_reference es obligatorio"
+            )
+        if es_efectivo:
+            referencia_transferencia = ""
+
+        # A diferencia del resto de este servicer, el cobro en efectivo no
+        # tolera `claims is None`: sin operador autenticado no hay caja a la
+        # cual imputarlo, y registrar el pago igual dejaría el efectivo fuera
+        # de todo arqueo.
+        credenciales_efectivo = get_current_claims() if es_efectivo else None
+        if es_efectivo and credenciales_efectivo is None:
+            context.abort(
+                grpc.StatusCode.UNAUTHENTICATED,
+                "El cobro en efectivo requiere un usuario autenticado con caja abierta",
             )
 
         # BR-LOAN-010: si se especifica una cuota puntual, el monto se
@@ -875,22 +916,56 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
             total_programado, total_pagado = _totales_prestamo(prestamo)
             nuevo_total_pagado = total_pagado + monto
 
-            sesion.add(
-                LoanPayment(
-                    loan_id=prestamo.id,
-                    amount=monto,
-                    transfer_reference=referencia_transferencia,
-                    paid_at=ahora,
+            # BR-CAJA-004: la caja se busca (y se bloquea) DESPUÉS del
+            # préstamo, manteniendo el mismo orden de bloqueo en todos los
+            # caminos que tocan ambas filas, y ANTES de insertar el pago, para
+            # no dejar un LoanPayment registrado si resulta que no hay caja
+            # abierta donde imputarlo.
+            sesion_caja = None
+            if es_efectivo:
+                sesion_caja = obtener_sesion_abierta(
+                    sesion,
+                    uuid.UUID(credenciales_efectivo.user_id),
+                    bloquear=True,
                 )
+                if sesion_caja is None:
+                    context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "No hay una caja abierta para registrar un cobro en efectivo",
+                    )
+
+            pago = LoanPayment(
+                loan_id=prestamo.id,
+                amount=monto,
+                transfer_reference=referencia_transferencia or None,
+                payment_method=medio_pago,
+                paid_at=ahora,
             )
+            sesion.add(pago)
+
+            if sesion_caja is not None:
+                # flush para que el movimiento pueda referenciar el id del
+                # pago recién insertado (mismo patrón que el resto del
+                # servidor cuando necesita un id autogenerado antes del
+                # commit).
+                sesion.flush()
+                registrar_cobro_en_efectivo(
+                    sesion,
+                    sesion_caja,
+                    pago,
+                    uuid.UUID(credenciales_efectivo.user_id),
+                    ahora,
+                )
 
             sesion.add(
                 AuditLog(
                     user_id=id_actor_actual(get_current_claims()),
                     action=(
                         f"PRESTAMO_PAGO_REGISTRADO loan_id={prestamo.id} "
-                        f"amount={monto} referencia={referencia_transferencia}"
+                        f"amount={monto} medio={medio_pago.value} "
+                        f"referencia={referencia_transferencia}"
                         + (f" cuota={numero_cuota}" if usa_cuota_fija else "")
+                        + (f" caja={sesion_caja.id}" if sesion_caja is not None else "")
                     ),
                     ip_address=ip_remota(context),
                     timestamp=ahora,
@@ -929,6 +1004,7 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 transfer_reference=referencia_transferencia,
                 recorded_by_name=nombre_operador,
                 recorded_by_national_id=ci_operador,
+                payment_method=medio_pago.value,
             )
 
     def MarkDefaulted(self, request, context):

@@ -17,14 +17,16 @@ def role_at_least(current_role: str | None, minimum_role: str) -> bool:
     return ROLE_ORDER.index(current_role) >= ROLE_ORDER.index(minimum_role)
 
 
-# User-facing "nivel" labels shown in the UI (dashboard, sidebar). The backend
-# keeps its 4-role enum (CASHIER/CREDIT_ANALYST/MANAGER/ADMIN) unchanged --
-# the CASHIER role simply isn't assigned to anyone right now (cash handling
-# was dropped in favor of bank transfer/direct debit, per BR-LOAN policy
-# discussion), so it's grouped under "Estándar" defensively rather than left
-# unlabeled if it's ever used again.
+# User-facing "nivel" labels shown in the UI (dashboard, sidebar). These map
+# onto the backend's 4-role enum (CASHIER/CREDIT_ANALYST/MANAGER/ADMIN).
+#
+# CASHIER used to be folded into "Estándar" because nobody had that role --
+# cash handling had been dropped in favor of transfer/direct debit. It now
+# has its own label again: the establishment reincorporated a teller, and
+# BR-CAJA-005 gave the role a real (narrower) permission set, so showing it
+# as "Estándar" would misdescribe what that user can actually do.
 _TIER_LABELS = {
-    "CASHIER": "Estándar",
+    "CASHIER": "Cajero",
     "CREDIT_ANALYST": "Estándar",
     "MANAGER": "Agente de Créditos",
     "ADMIN": "Administrador",
@@ -81,6 +83,30 @@ def can_view_period_report(role: str | None) -> bool:
     una consulta operativa -- mirrors rbac.py's MANAGER_AND_ABOVE gate on
     GetPeriodReport. Las tarjetas del dashboard (GetDashboardStats) siguen
     siendo visibles para todos los roles."""
+    return role_at_least(role, "MANAGER")
+
+
+def is_teller(role: str | None) -> bool:
+    """El cajero es el único rol con una navegación distinta: su pantalla
+    principal es Caja y solo se le ofrece, además, la Consulta de cliente
+    (BR-CAJA-005). No es `not role_at_least(role, "CREDIT_ANALYST")` a
+    propósito -- es una identidad de puesto, no un piso de jerarquía."""
+    return role == "CASHIER"
+
+
+def can_originate_credit(role: str | None) -> bool:
+    """Dar de alta o editar clientes y propuestas de crédito -- refleja el
+    salto de esas RPC a CREDIT_ANALYST_AND_ABOVE en rbac.py (BR-CAJA-005).
+    El cajero conserva la consulta y el cobro, que son otras RPC."""
+    return role_at_least(role, "CREDIT_ANALYST")
+
+
+def can_supervise_cash_sessions(role: str | None) -> bool:
+    """Ver los arqueos de todos los cajeros y cerrar una caja que quedó
+    abierta -- mirrors cash_service.py's `_es_supervisor` (MANAGER_AND_ABOVE).
+    A diferencia del resto de este módulo, la restricción del servidor no vive
+    en rbac.py sino dentro del servicer, porque no es "puede llamar al método"
+    sino "sobre qué filas actúa"."""
     return role_at_least(role, "MANAGER")
 
 

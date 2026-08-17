@@ -9,11 +9,13 @@ from sqlalchemy import (
     DateTime,
     Enum as SAEnum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -277,6 +279,19 @@ class Loan(Base):
     )
 
 
+class PaymentMethodEnum(str, enum.Enum):
+    """Medio por el que entró un pago de cuota (BR-CAJA-004).
+
+    EFECTIVO se cobra en ventanilla y queda imputado a la caja abierta del
+    cajero que lo registró (ver CashMovement); TRANSFERENCIA cubre todo lo
+    que no pasa por la caja -- transferencia bancaria, débito automático o
+    descuento en cuenta -- y sigue exigiendo `transfer_reference`.
+    """
+
+    EFECTIVO = "EFECTIVO"
+    TRANSFERENCIA = "TRANSFERENCIA"
+
+
 class LoanPayment(Base):
     """Minimal payment ledger backing RecordPayment / the ACTIVE->PAID transition.
 
@@ -302,6 +317,15 @@ class LoanPayment(Base):
     # Nullable a nivel de columna únicamente para no requerir backfill de
     # filas históricas si algún día existieran.
     transfer_reference: Mapped[str | None] = mapped_column(String, nullable=True)
+    # BR-CAJA-004. Nullable porque la columna se agregó después: los pagos
+    # anteriores a la reincorporación de la caja son todos por transferencia
+    # (era el único medio admitido), así que un NULL se lee como
+    # TRANSFERENCIA en vez de requerir backfill -- mismo criterio que
+    # transfer_reference arriba.
+    payment_method: Mapped[PaymentMethodEnum | None] = mapped_column(
+        SAEnum(PaymentMethodEnum, name="payment_method_enum", native_enum=True),
+        nullable=True,
+    )
     paid_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -342,3 +366,131 @@ class LoanInstallmentAdjustment(Base):
     )
 
     loan: Mapped["Loan"] = relationship(back_populates="installment_adjustments")
+
+
+class CashSessionStatusEnum(str, enum.Enum):
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+
+
+class CashSession(Base):
+    """Turno de caja de un cajero: se abre declarando el efectivo inicial y se
+    cierra declarando el efectivo contado (arqueo) -- BR-CAJA-001/BR-CAJA-003.
+
+    El "esperado" del cierre NO se guarda como un dato que mande el cliente:
+    se recalcula en el servidor a partir de `opening_amount` más los
+    CashMovement del turno, y recién ahí se compara contra lo contado. Se
+    persisten los tres números (esperado, contado, diferencia) porque el
+    arqueo es justamente el registro histórico de esa comparación -- si solo
+    guardáramos los movimientos, un ajuste posterior cambiaría el resultado
+    de un arqueo ya firmado.
+    """
+
+    __tablename__ = "cash_sessions"
+    __table_args__ = (
+        # BR-CAJA-002: un cajero no puede tener dos turnos abiertos a la vez.
+        # Índice único parcial (solo sobre las filas OPEN) en vez de una
+        # verificación previa en el servicer: dos aperturas concurrentes del
+        # mismo usuario harían cada una su propio SELECT y ninguna vería a la
+        # otra, exactamente la clase de carrera que ES-006 §3.1 documenta.
+        # Con esto la base rechaza a la perdedora y confirmar_o_duplicado la
+        # traduce a ALREADY_EXISTS.
+        Index(
+            "uq_cash_session_open_por_usuario",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status = 'OPEN'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    status: Mapped[CashSessionStatusEnum] = mapped_column(
+        SAEnum(
+            CashSessionStatusEnum, name="cash_session_status_enum", native_enum=True
+        ),
+        nullable=False,
+        default=CashSessionStatusEnum.OPEN,
+    )
+    opening_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    opening_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Los tres campos del arqueo -- nulos mientras el turno siga abierto.
+    closing_expected_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    closing_counted_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    closing_difference: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2), nullable=True
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    closing_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Quién cerró el turno -- normalmente el mismo cajero, pero un Gerente
+    # puede cerrar una caja que quedó abierta (BR-CAJA-003), y en ese caso el
+    # arqueo tiene que decir quién lo firmó.
+    closed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+
+    user: Mapped["User"] = relationship(foreign_keys=[user_id])
+    closed_by: Mapped["User | None"] = relationship(foreign_keys=[closed_by_user_id])
+    movements: Mapped[list["CashMovement"]] = relationship(
+        back_populates="cash_session"
+    )
+
+
+class CashMovementTypeEnum(str, enum.Enum):
+    INGRESO = "INGRESO"
+    EGRESO = "EGRESO"
+
+
+class CashMovement(Base):
+    """Entrada o salida de efectivo dentro de un turno de caja (BR-CAJA-002).
+
+    Dos orígenes: los que carga el cajero a mano (con su concepto) y los
+    automáticos que genera RecordPayment cuando cobra una cuota en efectivo
+    (BR-CAJA-004) -- esos llevan `loan_payment_id` para poder rastrear el
+    movimiento hasta el pago que lo produjo, y no son editables desde la
+    pantalla de caja.
+    """
+
+    __tablename__ = "cash_movements"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    cash_session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cash_sessions.id"), nullable=False, index=True
+    )
+    movement_type: Mapped[CashMovementTypeEnum] = mapped_column(
+        SAEnum(CashMovementTypeEnum, name="cash_movement_type_enum", native_enum=True),
+        nullable=False,
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    concept: Mapped[str] = mapped_column(String, nullable=False)
+    # Solo en los movimientos generados por un cobro de cuota en efectivo.
+    loan_payment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("loan_payments.id"), nullable=True
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    cash_session: Mapped["CashSession"] = relationship(back_populates="movements")

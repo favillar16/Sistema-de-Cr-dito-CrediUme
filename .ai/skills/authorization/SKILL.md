@@ -28,9 +28,23 @@ mapped per RPC method:
 -   `cas_client/rbac_ui.py`'s `role_at_least()` mirrors these tiers by
     hand for UI gating only (no shared source with the server) — e.g.
     disbursement needs MANAGER+, approval needs CREDIT_ANALYST+.
--   The `CASHIER` role still exists in `RoleEnum` but is not currently
-    assigned to any real user; `CREDIT_ANALYST` is the de facto base
-    tier (cash handling was dropped, see `domain` skill).
+-   `CASHIER` **is assigned again** and is a real teller role
+    (`BR-CAJA-005`, `specs/cash/README`). It is deliberately *not* just
+    "the tier below CREDIT_ANALYST": origination RPCs
+    (`CreateClient`, `UpdateClient`, `CreateLoan`,
+    `UpdateLoanProposal/Guarantee/Charges`) are
+    `CREDIT_ANALYST_AND_ABOVE`, while lookup, `RecordPayment` and the
+    whole of `CashService` stay `CASHIER_AND_ABOVE`. This was an
+    earlier-model-corrected change: those origination methods used to
+    be `CASHIER_AND_ABOVE` back when nobody had the role.
+-   **Not every authorization rule belongs in `rbac.py`.** `rbac.py`
+    answers "may this role call this method". Rules of the form "on
+    which rows may it act" live in the servicer — see
+    `cash_service.py`'s `_es_supervisor()`, which decides whether a
+    caller may close another cashier's caja and whether
+    `ListCashSessions` returns everyone's arqueos or only their own.
+    Putting those in `rbac.py` would be wrong: the method itself is
+    callable by every role.
 
 Do not introduce a separate fine-grained permission table
 (`clients.create`, `cash.open`, etc.) without an explicit

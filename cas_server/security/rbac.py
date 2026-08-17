@@ -30,18 +30,25 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     "/auth.AuthService/ResetPassword": frozenset({RoleEnum.ADMIN}),
     "/auth.AuthService/CreateUser": frozenset({RoleEnum.ADMIN}),
     "/auth.AuthService/ListUsers": frozenset({RoleEnum.ADMIN}),
-    "/clients.ClientService/CreateClient": CASHIER_AND_ABOVE,
+    # BR-CAJA-005: el cajero es un rol de ventanilla, no de originación. Las
+    # altas y ediciones de clientes y de propuestas de crédito subieron a
+    # CREDIT_ANALYST_AND_ABOVE cuando se reincorporó el rol; lo que el cajero
+    # conserva es la CONSULTA (para poder informarle al cliente cuánto debe) y
+    # el cobro. Antes de la caja, CASHIER no estaba asignado a nadie y estos
+    # métodos estaban en CASHIER_AND_ABOVE por defecto -- ahora el rol se usa
+    # de verdad, así que el límite tiene que ser real.
+    "/clients.ClientService/CreateClient": CREDIT_ANALYST_AND_ABOVE,
     "/clients.ClientService/GetClientById": CASHIER_AND_ABOVE,
     "/clients.ClientService/SearchClients": CASHIER_AND_ABOVE,
-    "/clients.ClientService/UpdateClient": CASHIER_AND_ABOVE,
+    "/clients.ClientService/UpdateClient": CREDIT_ANALYST_AND_ABOVE,
     "/clients.ClientService/DeactivateClient": MANAGER_AND_ABOVE,  # BR-CLI-004
     "/clients.ClientService/UpdateNationalId": frozenset(
         {RoleEnum.ADMIN}
     ),  # BR-CLI-003
-    "/loans.LoanService/CreateLoan": CASHIER_AND_ABOVE,
-    "/loans.LoanService/UpdateLoanProposal": CASHIER_AND_ABOVE,  # BR-LOAN-004
-    "/loans.LoanService/UpdateLoanGuarantee": CASHIER_AND_ABOVE,  # BR-LOAN-005
-    "/loans.LoanService/UpdateLoanCharges": CASHIER_AND_ABOVE,  # BR-LOAN-006
+    "/loans.LoanService/CreateLoan": CREDIT_ANALYST_AND_ABOVE,
+    "/loans.LoanService/UpdateLoanProposal": CREDIT_ANALYST_AND_ABOVE,  # BR-LOAN-004
+    "/loans.LoanService/UpdateLoanGuarantee": CREDIT_ANALYST_AND_ABOVE,  # BR-LOAN-005
+    "/loans.LoanService/UpdateLoanCharges": CREDIT_ANALYST_AND_ABOVE,  # BR-LOAN-006
     "/loans.LoanService/GetLoanById": CASHIER_AND_ABOVE,
     "/loans.LoanService/ListClientLoans": CASHIER_AND_ABOVE,
     "/loans.LoanService/ListActiveLoans": CASHIER_AND_ABOVE,
@@ -57,6 +64,17 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     # MANAGER+ en vez de seguir a GetDashboardStats, que sí es CASHIER_AND_ABOVE
     # por ser solo conteos de la pantalla de inicio.
     "/dashboard.DashboardService/GetPeriodReport": MANAGER_AND_ABOVE,
+    # BR-CAJA-*. Todas son CASHIER_AND_ABOVE porque el turno sobre el que
+    # operan se resuelve desde el token, no desde el request: cada rol opera
+    # su propia caja. Las dos asimetrías por rol (un Gerente puede cerrar la
+    # caja de otro y ve el historial de todos los cajeros) NO se expresan acá
+    # sino dentro de cash_service.py, porque no son "puede o no llamar al
+    # método" sino "sobre qué filas actúa" -- ver _es_supervisor().
+    "/cash.CashService/OpenCashSession": CASHIER_AND_ABOVE,
+    "/cash.CashService/GetCurrentCashSession": CASHIER_AND_ABOVE,
+    "/cash.CashService/RegisterCashMovement": CASHIER_AND_ABOVE,
+    "/cash.CashService/CloseCashSession": CASHIER_AND_ABOVE,
+    "/cash.CashService/ListCashSessions": CASHIER_AND_ABOVE,
 }
 
 

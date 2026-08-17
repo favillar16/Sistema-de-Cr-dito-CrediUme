@@ -13,6 +13,8 @@ Maneja el acceso seguro al sistema por parte de los operadores (cajeros, analist
     Las tres columnas son nullable a nivel de esquema y el requisito se valida en el servicer, mismo criterio que las referencias de `specs/clients/README` (BR-CLI-005): los usuarios creados antes de esta regla -- típicamente el ADMIN inicial de `seed_admin`, que sigue aceptándolos como opcionales para poder arrancar un sistema vacío -- siguen funcionando y se identifican por su `username` en esos documentos.
     `national_id` **no** lleva restricción UNIQUE, a diferencia de `clients.national_id`: los operadores son pocos y los da de alta un ADMIN que ve la lista completa, y una restricción única obligaría a distinguir cuál de las dos (username o C.I.) falló para devolver un mensaje correcto.
 
+**Nota sobre el rol CASHIER:** durante un tiempo el rol existió en el enum pero no estaba asignado a nadie -- el cobro en efectivo se había reemplazado por transferencia/débito/descuento en cuenta. Al reincorporarse el puesto de cajero, el rol volvió a usarse **con un alcance más acotado** que el que tenía por defecto: consulta y cobro, sin originación de clientes ni de créditos. Ver **BR-CAJA-005** en `specs/cash/README` para el reparto exacto de RPC.
+
 ## 3. Modelo de Datos (PostgreSQL)
 **Tabla: `users` (Operadores del sistema)**
 *   `id` (UUID, PK)

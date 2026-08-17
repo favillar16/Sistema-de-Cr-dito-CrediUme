@@ -389,6 +389,33 @@ def cuotas_cubiertas_texto(numeros, total: int) -> str:
     return f"Cuota(s) {','.join(str(n) for n in numeros)} de {total}"
 
 
+_MEDIOS_DE_PAGO_LABEL = {
+    "EFECTIVO": "Efectivo (caja)",
+    "TRANSFERENCIA": "Transferencia / descuento",
+}
+
+
+def filas_medio_de_pago(payment) -> list[tuple[str, str]]:
+    """BR-CAJA-004: (concepto, detalle) de c&oacute;mo se cobr&oacute; el pago,
+    para el Comprobante de Pago.
+
+    La fila de referencia se omite en efectivo en vez de imprimirse vac&iacute;a:
+    ah&iacute; no hay n&uacute;mero de transferencia que mostrar, y una l&iacute;nea
+    "Referencia: " en blanco en un comprobante que se le entrega al deudor
+    parece un dato que se perdi&oacute;. Compartido por el HTML y el DOCX --
+    misma raz&oacute;n que _filas_reporte(): una sola definici&oacute;n para
+    que los dos formatos no se desincronicen.
+
+    payment: loan_service_pb2.RecordPaymentResponse"""
+    # Vac&iacute;o = un servidor anterior a BR-CAJA-004, donde todo pago era
+    # por transferencia -- mismo criterio por defecto que usa el servidor.
+    medio = payment.payment_method or "TRANSFERENCIA"
+    filas = [("Medio de pago", _MEDIOS_DE_PAGO_LABEL.get(medio, medio))]
+    if medio != "EFECTIVO":
+        filas.append(("Referencia de transferencia", payment.transfer_reference))
+    return filas
+
+
 def comprobante_pago_html(loan, client, payment) -> str:
     """Comprobante de Pago -- BR-LOAN-011. Se emite despu&eacute;s de
     registrar un pago, para entregar o enviar al deudor como constancia.
@@ -407,6 +434,10 @@ def comprobante_pago_html(loan, client, payment) -> str:
         payment.recorded_by_name, payment.recorded_by_national_id
     )
     fecha_pago = payment.paid_at.ToDatetime().strftime("%d/%m/%Y %H:%M")
+    medio_filas = "".join(
+        f'<tr><td>{concepto}</td><td align="right">{detalle}</td></tr>'
+        for concepto, detalle in filas_medio_de_pago(payment)
+    )
     saldado = payment.status == "PAID"
     cierre = (
         '<p style="font-weight:700; color:%s;">Con este pago el pr&eacute;stamo '
@@ -427,8 +458,7 @@ def comprobante_pago_html(loan, client, payment) -> str:
           <td align="right"><b>{gs(payment.amount_paid)}</b></td></tr>
       <tr><td>Cuota(s) abonada(s)</td><td align="right">{cuotas}</td></tr>
       <tr><td>Fecha y hora del pago</td><td align="right">{fecha_pago}</td></tr>
-      <tr><td>Referencia de transferencia</td>
-          <td align="right">{payment.transfer_reference}</td></tr>
+      {medio_filas}
       <tr><td>Total pagado del pr&eacute;stamo</td>
           <td align="right">{gs(payment.total_paid)}</td></tr>
       <tr><td>Saldo restante</td>

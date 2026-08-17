@@ -34,6 +34,7 @@ from cas_client.grpc_client import ApiError, ClientServiceClient, LoanServiceCli
 from cas_client.rbac_ui import (
     can_edit_installment_amount,
     can_edit_interest_rate,
+    can_originate_credit,
     fixed_interest_rate_percent,
     role_at_least,
 )
@@ -56,6 +57,14 @@ from cas_client.widgets.toast import Toast
     _PAGE_EDIT_PROPOSAL,
     _PAGE_ACTIVE_LOANS,
 ) = range(6)
+
+# BR-CAJA-004. El valor viaja tal cual al servidor (payment_method), que solo
+# acepta estos dos; "TRANSFERENCIA" va primero para que sea el preseleccionado
+# -- sigue siendo el medio habitual, el efectivo es la excepción de ventanilla.
+_PAYMENT_METHODS = (
+    ("Transferencia / descuento", "TRANSFERENCIA"),
+    ("Efectivo (caja)", "EFECTIVO"),
+)
 
 _LOANS_TABLE_HEADERS = (
     "Estado",
@@ -213,6 +222,14 @@ class LoansView(BaseView):
 
         self._toast = Toast(self)
 
+    def apply_role(self, role: str) -> None:
+        """BR-CAJA-005: el Cajero consulta préstamos y cuotas y registra
+        cobros, pero no origina crédito -- CreateLoan/UpdateLoanProposal son
+        CREDIT_ANALYST_AND_ABOVE en rbac.py. Los botones por estado
+        (Aprobar/Desembolsar/Marcar incumplido) ya se resuelven por rol en
+        _load_detail(); acá solo va lo que vive fuera del detalle."""
+        self._new_button.setVisible(can_originate_credit(role))
+
     def load_client(self, client_id: str, display_name: str) -> None:
         """Entry point used by MainWindow when navigating here from ClientsView."""
         self._stack.setCurrentIndex(_PAGE_SEARCH)
@@ -245,10 +262,13 @@ class LoansView(BaseView):
         active_loans_button.clicked.connect(self._show_active_loans_page)
         top_toolbar.addWidget(active_loans_button)
 
-        new_button = QPushButton("Nuevo préstamo")
-        new_button.setStyleSheet(theme.accent_button_style())
-        new_button.clicked.connect(self._show_create_page)
-        top_toolbar.addWidget(new_button)
+        # BR-CAJA-005: originar un crédito pasó a CREDIT_ANALYST_AND_ABOVE.
+        # La visibilidad real la fija apply_role(), que MainWindow llama al
+        # iniciar sesión -- acá la vista todavía no conoce el rol.
+        self._new_button = QPushButton("Nuevo préstamo")
+        self._new_button.setStyleSheet(theme.accent_button_style())
+        self._new_button.clicked.connect(self._show_create_page)
+        top_toolbar.addWidget(self._new_button)
         layout.addLayout(top_toolbar)
 
         # ---- Sub-estado 1: elegir cliente -----------------------------
@@ -963,6 +983,28 @@ class LoansView(BaseView):
         self._payment_amount_display.setReadOnly(True)
         payment_row.addWidget(amount_field, stretch=1)
 
+        # BR-CAJA-004: el efectivo volvió a ser un medio de cobro válido, y se
+        # imputa a la caja abierta del operador. El campo de referencia solo
+        # aplica al resto de los medios -- se deshabilita al elegir Efectivo
+        # en vez de ocultarse, para que el usuario vea que el campo existe y
+        # entienda por qué no se lo pide.
+        method_column = QVBoxLayout()
+        method_column.setContentsMargins(0, 0, 0, 0)
+        method_column.setSpacing(4)
+        method_caption = QLabel("Medio de pago")
+        method_caption.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600;"
+        )
+        method_column.addWidget(method_caption)
+        self._payment_method_combo = QComboBox()
+        for label, value in _PAYMENT_METHODS:
+            self._payment_method_combo.addItem(label, value)
+        self._payment_method_combo.currentIndexChanged.connect(
+            self._on_payment_method_changed
+        )
+        method_column.addWidget(self._payment_method_combo)
+        payment_row.addLayout(method_column, stretch=1)
+
         reference_field, self._payment_reference_input = labeled_field(
             "Código/número de transferencia"
         )
@@ -982,10 +1024,11 @@ class LoansView(BaseView):
         actions_card.addLayout(payment_row)
 
         payment_hint = QLabel(
-            "El cobro se realiza por transferencia, descuento directo o descuento "
-            "en cuenta específica -- no se maneja efectivo. La referencia es "
-            "obligatoria. El monto sale fijo de la cuota elegida; para cambiar el "
-            'monto de una cuota use "Ajustar" en el cronograma.'
+            "Efectivo se cobra en ventanilla y se imputa a la caja abierta del "
+            "operador. Transferencia cubre transferencia bancaria, descuento "
+            "directo o descuento en cuenta específica, y exige la referencia. "
+            "El monto sale fijo de la cuota elegida; para cambiar el monto de "
+            'una cuota use "Ajustar" en el cronograma.'
         )
         payment_hint.setWordWrap(True)
         payment_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
@@ -1113,7 +1156,9 @@ class LoansView(BaseView):
             print_button.setEnabled(enabled)
 
         role = self._session.role
-        self._edit_proposal_button.setEnabled(loan.status == "PENDING")
+        self._edit_proposal_button.setEnabled(
+            loan.status == "PENDING" and can_originate_credit(role)
+        )
         self._approve_button.setEnabled(
             loan.status == "PENDING" and role_at_least(role, "CREDIT_ANALYST")
         )
@@ -1126,7 +1171,12 @@ class LoansView(BaseView):
         can_pay = loan.status == "ACTIVE" and role_at_least(role, "CASHIER")
         self._record_payment_button.setEnabled(can_pay)
         self._payment_installment_combo.setEnabled(can_pay)
+        self._payment_method_combo.setEnabled(can_pay)
         self._payment_reference_input.setEnabled(can_pay)
+        # Re-aplica la regla de BR-CAJA-004 sobre el campo de referencia: si
+        # el medio seleccionado era Efectivo, la línea de arriba lo acaba de
+        # re-habilitar y hay que volver a apagarlo.
+        self._on_payment_method_changed(self._payment_method_combo.currentIndex())
         if can_pay:
             self._load_pending_installments()
         else:
@@ -1220,6 +1270,18 @@ class LoansView(BaseView):
             self._payment_installment_combo.currentIndex()
         )
 
+    def _on_payment_method_changed(self, _index: int) -> None:
+        """BR-CAJA-004: la referencia solo tiene sentido fuera del efectivo.
+        Se deshabilita (y se limpia) en vez de ocultarse, para que quede claro
+        que el campo existe y por qué no se pide en este medio."""
+        es_efectivo = self._payment_method_combo.currentData() == "EFECTIVO"
+        self._payment_reference_input.setEnabled(
+            not es_efectivo and self._record_payment_button.isEnabled()
+        )
+        if es_efectivo:
+            self._payment_reference_input.clear()
+            self._payment_reference_input.set_error(False)
+
     def _on_payment_installment_changed(self, index: int) -> None:
         data = self._payment_installment_combo.itemData(index)
         if data is None:
@@ -1235,17 +1297,23 @@ class LoansView(BaseView):
             self._toast.show_message("No hay cuotas pendientes para registrar un pago.")
             return
         numero_cuota, _monto = data
+        medio = self._payment_method_combo.currentData()
         reference = self._payment_reference_input.text().strip()
-        if not reference:
+        # BR-CAJA-004: en efectivo no hay referencia que pedir -- la
+        # trazabilidad la da el movimiento de caja que genera el servidor.
+        if medio != "EFECTIVO" and not reference:
+            self._payment_reference_input.set_error(True)
             self._toast.show_message(
                 "Ingrese el código o número de transferencia del pago."
             )
             return
+        self._payment_reference_input.set_error(False)
         self._run_loan_action(
             self._client.record_payment,
             self._selected_loan_id,
             reference,
             installment_number=numero_cuota,
+            payment_method=medio,
             on_success=self._on_payment_recorded,
         )
 

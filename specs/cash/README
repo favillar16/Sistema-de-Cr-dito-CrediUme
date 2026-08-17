@@ -1,0 +1,156 @@
+# Módulo: Caja (arqueo de ventanilla)
+
+## 1. Resumen
+Registra el efectivo que pasa por la ventanilla: un **turno de caja** se abre
+declarando el efectivo inicial, acumula **movimientos** (ingresos y egresos)
+durante el día, y se cierra con un **arqueo** — la comparación entre el
+efectivo que el sistema calcula que debería haber y el que el cajero contó
+realmente.
+
+Existe porque la entidad reincorporó el puesto de cajero. Hasta entonces todo
+el cobro era por transferencia / débito / descuento en cuenta, el rol `CASHIER`
+no estaba asignado a nadie, y `RecordPayment` exigía siempre una referencia de
+transferencia (ver el histórico en `specs/loans/README`).
+
+Dos decisiones estructurales atraviesan el módulo:
+
+*   **El turno se deduce del token, no del request.** Ninguna RPC recibe el id
+    del cajero. La única excepción es `CloseCashSession`, que acepta un
+    `session_id` explícito para el caso de supervisión de BR-CAJA-003. Un cajero
+    no puede cargar movimientos ni cerrar la caja de otro.
+*   **El monto esperado lo calcula el servidor.** El cliente solo declara cuánto
+    contó. Un arqueo donde el cliente mandara *ambos* números no probaría nada.
+
+## 2. Reglas de Negocio
+
+*   **BR-CAJA-001 (Apertura de turno):** `OpenCashSession` abre el turno del
+    usuario autenticado declarando `opening_amount`, el efectivo con el que
+    inicia. Un monto de **0 es válido** (caja sin fondo fijo); solo un monto
+    negativo se rechaza. `opened_at` queda registrado por el servidor, no por el
+    cliente. Las observaciones son opcionales.
+
+*   **BR-CAJA-002 (Un turno abierto por cajero, y sus movimientos):**
+    *   Un cajero no puede tener dos turnos abiertos a la vez. La restricción la
+        impone un **índice único parcial** sobre las filas `status = 'OPEN'`
+        (`uq_cash_session_open_por_usuario`), no una verificación previa en el
+        servicer: dos aperturas concurrentes harían cada una su propio SELECT y
+        ninguna vería a la otra. La perdedora recibe `ALREADY_EXISTS`.
+        Cerrar el turno libera al cajero para abrir el siguiente.
+    *   El límite es **por cajero, no global**: dos cajeros pueden tener cada uno
+        su turno abierto simultáneamente.
+    *   `RegisterCashMovement` registra un `INGRESO` o un `EGRESO` con monto
+        (mayor a cero) y **concepto obligatorio** — un arqueo con movimientos sin
+        concepto no es auditable.
+    *   Un **egreso no puede dejar la caja en negativo**: se rechaza si supera el
+        efectivo disponible en ese momento. Vaciar la caja exactamente sí es
+        válido (el límite es "más que", no "tanto como").
+
+*   **BR-CAJA-003 (Cierre y arqueo):** `CloseCashSession` recibe únicamente
+    `counted_amount`, el efectivo realmente contado. El servidor:
+    1.  recalcula el **esperado** = `opening_amount` + ingresos − egresos;
+    2.  calcula la **diferencia** = contado − esperado (positivo = sobrante,
+        negativo = faltante);
+    3.  persiste los tres números en el turno.
+
+    Los tres se guardan aunque sean derivables porque **el arqueo es un registro
+    histórico**: si solo se guardaran los movimientos, un ajuste posterior
+    cambiaría el resultado de un arqueo ya firmado.
+
+    Un **Gerente o Administrador puede cerrar la caja de otro cajero** pasando su
+    `session_id` — el caso real es el cajero que se fue sin cerrar. El arqueo
+    queda firmado por quien lo cerró (`closed_by_user_id`), que puede no ser el
+    dueño del turno. Un cajero que intenta cerrar una caja ajena recibe
+    `PERMISSION_DENIED`.
+
+*   **BR-CAJA-004 (Cobro de cuota en efectivo):** `RecordPayment` acepta
+    `payment_method`:
+    *   `TRANSFERENCIA` (y también el valor vacío, por compatibilidad con los
+        clientes anteriores a este módulo) mantiene el comportamiento previo:
+        `transfer_reference` sigue siendo **obligatoria**.
+    *   `EFECTIVO` **exige un turno de caja abierto** del operador autenticado y
+        genera automáticamente un movimiento de `INGRESO` en él, vinculado al
+        pago (`cash_movements.loan_payment_id`). No pide referencia de
+        transferencia: la trazabilidad la da ese movimiento. Un cobro en efectivo
+        sin caja abierta se rechaza con `FAILED_PRECONDITION` **sin registrar el
+        pago** — la caja se busca antes de insertar el `LoanPayment`, para que no
+        quede un cobro registrado a medias.
+
+    El movimiento generado se distingue del que carga el cajero a mano por tener
+    `loan_payment_id`, y se informa aparte del resto de los ingresos
+    (`total_loan_collections`) porque es la parte del efectivo que se puede
+    rastrear hasta un préstamo. Un cobro por transferencia **no toca la caja**,
+    aunque el operador tenga el turno abierto.
+
+    El Comprobante de Pago (BR-LOAN-011) imprime el medio de cobro, y omite la
+    fila de referencia cuando fue en efectivo en vez de imprimirla vacía.
+
+*   **BR-CAJA-005 (Alcance del rol Cajero):** el cajero es un puesto de
+    **ventanilla, no de originación**. Cuando el rol volvió a usarse, las RPC de
+    alta y edición subieron a `CREDIT_ANALYST_AND_ABOVE`:
+    `CreateClient`, `UpdateClient`, `CreateLoan`, `UpdateLoanProposal`,
+    `UpdateLoanGuarantee`, `UpdateLoanCharges`.
+
+    Lo que el cajero **conserva** es la consulta y el cobro — necesita poder
+    buscar a un cliente, ver sus cuotas y decirle cuánto debe:
+    `SearchClients`, `GetClientById`, `GetLoanById`, `ListClientLoans`,
+    `ListActiveLoans`, `GetAmortizationSchedule`, `RecordPayment`, y todas las
+    RPC de caja.
+
+    Antes de este módulo esos métodos estaban en `CASHIER_AND_ABOVE` sin que eso
+    tuviera consecuencias prácticas, porque nadie tenía el rol. Ahora el límite
+    es real.
+
+## 3. Modelo de datos
+
+`cash_sessions`
+*   `user_id` — cajero dueño del turno.
+*   `status` — `OPEN` | `CLOSED`. Índice único parcial sobre `user_id` donde
+    `status = 'OPEN'` (BR-CAJA-002).
+*   `opening_amount`, `opened_at`, `opening_notes`.
+*   `closing_expected_amount`, `closing_counted_amount`, `closing_difference`,
+    `closed_at`, `closing_notes`, `closed_by_user_id` — nulos mientras el turno
+    siga abierto (BR-CAJA-003).
+
+`cash_movements`
+*   `cash_session_id`, `movement_type` (`INGRESO` | `EGRESO`), `amount`,
+    `concept`, `created_by_user_id`, `created_at`.
+*   `loan_payment_id` — solo en los movimientos generados por BR-CAJA-004.
+
+`loan_payments.payment_method` — `EFECTIVO` | `TRANSFERENCIA`, nullable. Un NULL
+se lee como `TRANSFERENCIA`: los pagos anteriores a este módulo son todos de ese
+tipo, porque era el único medio admitido, así que no hizo falta backfill.
+
+## 4. Autorización
+
+Las cinco RPC de `CashService` son `CASHIER_AND_ABOVE` en `rbac.py`, porque
+cada rol opera su propia caja y el turno sale del token. Las dos asimetrías por
+rol **no se expresan en `rbac.py`** sino dentro de `cash_service.py`
+(`_es_supervisor`), porque no son "puede o no llamar al método" sino "sobre qué
+filas actúa":
+
+*   cerrar la caja de otro usuario (BR-CAJA-003) — `MANAGER_AND_ABOVE`;
+*   `ListCashSessions` devuelve los arqueos de **todos** los cajeros a
+    `MANAGER_AND_ABOVE`, y solo los propios al resto. El filtro lo aplica el
+    servidor según el rol del token, nunca un parámetro del request.
+
+A diferencia de `loan_service.py`, la caja **no tolera `claims is None`**: sin
+operador autenticado no hay caja a la cual imputar nada, así que un llamado sin
+credenciales aborta `UNAUTHENTICATED` en vez de continuar en silencio. Por eso
+toda la cobertura vive en `tests/server/test_cash_interceptor_integration.py`
+(servidor gRPC real con `AuthInterceptor`), y no hay un `test_cash_service.py`
+que llame al servicer directamente.
+
+## 5. Interfaz de usuario
+
+`cas_client/views/cash_view.py` — pantalla "Caja":
+*   tarjetas de totales (inicial, ingresos, egresos, cobros de cuotas, esperado);
+*   tarjeta de apertura, visible solo con la caja cerrada;
+*   tarjeta de movimientos + tabla del turno, visible solo con la caja abierta;
+*   tarjeta de cierre, con el conteo pre-cargado con el esperado (el caso normal
+    es que cuadre; el servidor recalcula y compara igual);
+*   historial de arqueos con filtro por rango de fechas.
+
+Es la pantalla principal del rol Cajero, cuya navegación es
+`Caja / Clientes / Préstamos` (sin Dashboard ni Usuarios). Gerente y
+Administrador también ven "Caja", porque son quienes supervisan los arqueos; el
+Analista de Crédito no, porque no maneja efectivo.

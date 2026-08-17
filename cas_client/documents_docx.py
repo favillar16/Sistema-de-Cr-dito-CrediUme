@@ -213,7 +213,7 @@ def comprobante_pago_docx(loan, client, payment) -> Document:
             "Fecha y hora del pago",
             payment.paid_at.ToDatetime().strftime("%d/%m/%Y %H:%M"),
         ),
-        ("Referencia de transferencia", payment.transfer_reference),
+        *documents.filas_medio_de_pago(payment),  # BR-CAJA-004
         ("Total pagado del préstamo", gs(payment.total_paid)),
         ("Saldo restante", gs(payment.remaining_balance)),
     ]
