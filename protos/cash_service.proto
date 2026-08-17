@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package cash;
+
+import "google/protobuf/timestamp.proto";
+
+// Módulo de caja (BR-CAJA-*): apertura de turno con efectivo inicial,
+// movimientos de efectivo durante el día, y cierre con arqueo -- la
+// comparación entre el efectivo que el sistema espera y el que el cajero
+// contó realmente.
+//
+// Ninguna RPC recibe el id del cajero: el turno sobre el que se opera es
+// siempre el del usuario autenticado (se resuelve desde el token en el
+// servidor), así un cajero no puede cargar movimientos en la caja de otro.
+// La única excepción es CloseCashSession, que acepta un session_id explícito
+// para que un Gerente pueda cerrar una caja que quedó abierta (BR-CAJA-003).
+service CashService {
+    // Abre el turno de caja del usuario autenticado declarando el efectivo
+    // inicial -- BR-CAJA-001.
+    rpc OpenCashSession (OpenCashSessionRequest) returns (CashSessionDetail);
+
+    // Turno abierto del usuario autenticado, con sus movimientos y totales.
+    // No es un error no tener ninguno: devuelve has_open_session = false.
+    rpc GetCurrentCashSession (GetCurrentCashSessionRequest) returns (GetCurrentCashSessionResponse);
+
+    // Registra un ingreso o egreso de efectivo en el turno abierto -- BR-CAJA-002.
+    rpc RegisterCashMovement (RegisterCashMovementRequest) returns (CashSessionDetail);
+
+    // Cierra el turno declarando el efectivo contado; el servidor calcula el
+    // esperado y la diferencia -- BR-CAJA-003.
+    rpc CloseCashSession (CloseCashSessionRequest) returns (CashSessionDetail);
+
+    // Historial de arqueos. Un cajero solo ve los suyos; Gerente/Administrador
+    // ven los de todos los cajeros -- el filtro lo aplica el servidor según el
+    // rol del token, no un parámetro del request.
+    rpc ListCashSessions (ListCashSessionsRequest) returns (ListCashSessionsResponse);
+}
+
+message OpenCashSessionRequest {
+    string opening_amount = 1; // Decimal como string, ej. "500000.00". Puede ser "0".
+    string notes = 2;          // Opcional
+}
+
+message GetCurrentCashSessionRequest {
+}
+
+message GetCurrentCashSessionResponse {
+    bool has_open_session = 1;
+    CashSessionDetail session = 2; // Sin fijar si has_open_session es false
+}
+
+message RegisterCashMovementRequest {
+    string movement_type = 1; // "INGRESO" | "EGRESO"
+    string amount = 2;        // Decimal como string, mayor a cero
+    string concept = 3;       // Obligatorio -- un arqueo sin concepto no es auditable
+}
+
+message CloseCashSessionRequest {
+    // Efectivo realmente contado en la caja al cerrar. El "esperado" NO se
+    // manda desde el cliente: lo recalcula el servidor a partir del monto de
+    // apertura y los movimientos del turno, que es lo único que hace que el
+    // arqueo signifique algo.
+    string counted_amount = 1;
+    string notes = 2; // Opcional -- típicamente la explicación de una diferencia
+    // Vacío = el turno abierto del propio usuario autenticado. Con un id, se
+    // cierra el turno de otro cajero; solo Gerente/Administrador pueden
+    // hacerlo (BR-CAJA-003).
+    string session_id = 3;
+}
+
+message ListCashSessionsRequest {
+    // Ambas en formato de cable YYYY-MM-DD, rango inclusivo sobre opened_at.
+    // Vacías = sin filtro por fecha.
+    string start_date = 1;
+    string end_date = 2;
+}
+
+message ListCashSessionsResponse {
+    repeated CashSessionSummary sessions = 1;
+}
+
+message CashMovementEntry {
+    string id = 1;
+    string movement_type = 2; // "INGRESO" | "EGRESO"
+    string amount = 3;
+    string concept = 4;
+    google.protobuf.Timestamp created_at = 5;
+    // Los movimientos generados automáticamente por un cobro de cuota en
+    // efectivo (BR-CAJA-004) llevan el id del pago que los originó y no son
+    // editables desde la pantalla de caja; los que carga el cajero a mano
+    // vienen con este campo vacío.
+    string loan_payment_id = 6;
+    bool is_automatic = 7;
+}
+
+message CashSessionDetail {
+    string id = 1;
+    string cashier_username = 2;
+    string cashier_full_name = 3; // "" si el usuario no tiene nombre/apellido cargados
+    string status = 4;            // "OPEN" | "CLOSED"
+
+    string opening_amount = 5;
+    google.protobuf.Timestamp opened_at = 6;
+    string opening_notes = 7;
+
+    // Totales calculados sobre los movimientos del turno.
+    string total_income = 8;           // Suma de los INGRESO
+    string total_expense = 9;          // Suma de los EGRESO
+    // Subconjunto de total_income: lo que entró por cobro de cuotas en
+    // efectivo (BR-CAJA-004). Se informa aparte porque es la parte que el
+    // cajero no cargó a mano y que se puede rastrear hasta un préstamo.
+    string total_loan_collections = 10;
+    // opening_amount + total_income - total_expense. Mientras el turno está
+    // abierto es cuánto efectivo debería haber en la caja ahora mismo; al
+    // cerrar es contra lo que se compara el conteo.
+    string expected_amount = 11;
+    int32 movements_count = 12;
+
+    repeated CashMovementEntry movements = 13;
+
+    // Arqueo -- vacíos mientras status sea "OPEN".
+    string closing_counted_amount = 14;
+    string closing_expected_amount = 15;
+    // counted - expected. Positivo = sobrante, negativo = faltante.
+    string closing_difference = 16;
+    google.protobuf.Timestamp closed_at = 17;
+    string closing_notes = 18;
+    string closed_by_username = 19;
+}
+
+// Versión sin movimientos para el historial de arqueos.
+message CashSessionSummary {
+    string id = 1;
+    string cashier_username = 2;
+    string cashier_full_name = 3;
+    string status = 4;
+    string opening_amount = 5;
+    google.protobuf.Timestamp opened_at = 6;
+    google.protobuf.Timestamp closed_at = 7;
+    string total_income = 8;
+    string total_expense = 9;
+    string total_loan_collections = 10;
+    string expected_amount = 11;
+    string closing_counted_amount = 12;
+    string closing_difference = 13;
+    int32 movements_count = 14;
+    string closing_notes = 15;
+    string closed_by_username = 16;
+}

@@ -5,12 +5,14 @@ from pathlib import Path
 import grpc
 
 import auth_service_pb2_grpc
+import cash_service_pb2_grpc
 import client_service_pb2_grpc
 import dashboard_service_pb2_grpc
 import loan_service_pb2_grpc
 from cas_server import config
 from cas_server.security.interceptor import AuthInterceptor
 from cas_server.services.auth_service import AuthServicer
+from cas_server.services.cash_service import CashServicer
 from cas_server.services.client_service import ClientServicer
 from cas_server.services.dashboard_service import DashboardServicer
 from cas_server.services.loan_service import LoanServicer
@@ -61,6 +63,7 @@ def serve() -> None:
     dashboard_service_pb2_grpc.add_DashboardServiceServicer_to_server(
         DashboardServicer(), server
     )
+    cash_service_pb2_grpc.add_CashServiceServicer_to_server(CashServicer(), server)
 
     address = f"{config.GRPC_HOST}:{config.GRPC_PORT}"
     logger = logging.getLogger(__name__)

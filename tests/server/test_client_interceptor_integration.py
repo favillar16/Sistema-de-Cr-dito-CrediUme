@@ -77,35 +77,62 @@ def _login(auth_stub, username, password):
     return (("authorization", f"Bearer {response.access_token}"),)
 
 
-def test_create_client_allows_cashier(stubs):
+def _solicitud_alta_cliente() -> client_service_pb2.CreateClientRequest:
+    return client_service_pb2.CreateClientRequest(
+        first_name="New",
+        last_name="Client",
+        national_id="6000001",
+        email="new@example.com",
+        phone_number="0981333333",
+        date_of_birth="1990-01-01",
+        address="Calle Nueva 1",
+        source_of_funds="Salario",
+        personal_reference_1_name="Maria Gomez",
+        personal_reference_1_relationship="Hermana",
+        personal_reference_1_phone="0981111111",
+        personal_reference_2_name="Carlos Ruiz",
+        personal_reference_2_relationship="Amigo",
+        personal_reference_2_phone="0981111112",
+        employment_reference_employer="ACME S.A.",
+        employment_reference_position="Vendedor",
+        employment_reference_phone="0981111113",
+        employment_reference_seniority="3 años",
+    )
+
+
+def test_create_client_requires_credit_analyst_or_above(stubs):
+    """BR-CAJA-005: el cajero es un rol de ventanilla -- consulta y cobra,
+    pero el alta de clientes subió a Analista de Crédito cuando el rol volvió
+    a usarse."""
     auth_stub, client_stub = stubs
     _create_user("cashier_c", "Passw0rd!", RoleEnum.CASHIER)
-    metadata = _login(auth_stub, "cashier_c", "Passw0rd!")
+    _create_user("analyst_c", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
 
+    cashier_metadata = _login(auth_stub, "cashier_c", "Passw0rd!")
+    with pytest.raises(grpc.RpcError) as exc_info:
+        client_stub.CreateClient(_solicitud_alta_cliente(), metadata=cashier_metadata)
+    assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+
+    analyst_metadata = _login(auth_stub, "analyst_c", "Passw0rd!")
     response = client_stub.CreateClient(
-        client_service_pb2.CreateClientRequest(
-            first_name="New",
-            last_name="Client",
-            national_id="6000001",
-            email="new@example.com",
-            phone_number="0981333333",
-            date_of_birth="1990-01-01",
-            address="Calle Nueva 1",
-            source_of_funds="Salario",
-            personal_reference_1_name="Maria Gomez",
-            personal_reference_1_relationship="Hermana",
-            personal_reference_1_phone="0981111111",
-            personal_reference_2_name="Carlos Ruiz",
-            personal_reference_2_relationship="Amigo",
-            personal_reference_2_phone="0981111112",
-            employment_reference_employer="ACME S.A.",
-            employment_reference_position="Vendedor",
-            employment_reference_phone="0981111113",
-            employment_reference_seniority="3 años",
-        ),
-        metadata=metadata,
+        _solicitud_alta_cliente(), metadata=analyst_metadata
     )
     assert response.client_id
+
+
+def test_search_clients_still_allows_cashier(stubs):
+    """La contracara de BR-CAJA-005: el cajero necesita encontrar al cliente
+    para poder informarle cuánto debe."""
+    auth_stub, client_stub = stubs
+    _create_user("cashier_s", "Passw0rd!", RoleEnum.CASHIER)
+    _create_client_row(national_id="5000009", email="lookup@example.com")
+    metadata = _login(auth_stub, "cashier_s", "Passw0rd!")
+
+    response = client_stub.SearchClients(
+        client_service_pb2.SearchClientsRequest(search_term="5000009"),
+        metadata=metadata,
+    )
+    assert len(response.clients) == 1
 
 
 def test_deactivate_client_requires_manager_or_above(stubs):

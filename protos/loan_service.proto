@@ -200,9 +200,10 @@ message RecordPaymentRequest {
     string loan_id = 1;
     // Decimal como string -- ignorado si installment_number > 0 (ver abajo).
     string amount = 2;
-    // Código o número de transferencia bancaria / descuento directo -- el cobro
-    // ya no se realiza en efectivo (rol CASHIER fuera de uso), así que esta
-    // referencia es obligatoria para trazabilidad.
+    // Código o número de transferencia bancaria / descuento directo.
+    // Obligatorio cuando payment_method es TRANSFERENCIA (el caso por
+    // defecto); ignorado cuando es EFECTIVO, donde la trazabilidad la da el
+    // movimiento de caja generado (BR-CAJA-004).
     string transfer_reference = 3;
     // Cuota puntual que se está saldando -- BR-LOAN-010. Si se informa
     // (>=1), el servidor recalcula el monto pendiente exacto de esa cuota
@@ -212,6 +213,11 @@ message RecordPaymentRequest {
     // decida el cliente. 0 = modo libre (usa `amount` tal cual, para
     // compatibilidad con pagos que no corresponden a una cuota puntual).
     int32 installment_number = 4;
+    // BR-CAJA-004. "EFECTIVO" | "TRANSFERENCIA". Vacío = "TRANSFERENCIA",
+    // para que los clientes anteriores a la caja sigan funcionando sin
+    // cambios. EFECTIVO exige que el operador tenga un turno de caja abierto
+    // y genera un movimiento de INGRESO en él.
+    string payment_method = 5;
 }
 
 message RecordPaymentResponse {
@@ -240,6 +246,10 @@ message RecordPaymentResponse {
     // en el comprobante.
     string recorded_by_name = 10;
     string recorded_by_national_id = 11;
+    // BR-CAJA-004: medio efectivamente registrado ("EFECTIVO" |
+    // "TRANSFERENCIA"), para que el Comprobante de Pago diga cómo se cobró
+    // sin depender de lo que el cliente creía haber enviado.
+    string payment_method = 12;
 }
 
 message MarkDefaultedRequest {

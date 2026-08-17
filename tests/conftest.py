@@ -18,6 +18,7 @@ def clean_db():
         conn.execute(
             text(
                 "TRUNCATE TABLE audit_logs, revoked_tokens, users, "
+                "cash_movements, cash_sessions, "
                 "loan_payments, loan_installment_adjustments, loans, clients "
                 "RESTART IDENTITY CASCADE"
             )
