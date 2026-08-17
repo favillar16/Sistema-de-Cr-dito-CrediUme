@@ -145,10 +145,40 @@ que llame al servicer directamente.
 `cas_client/views/cash_view.py` — pantalla "Caja":
 *   tarjetas de totales (inicial, ingresos, egresos, cobros de cuotas, esperado);
 *   tarjeta de apertura, visible solo con la caja cerrada;
+*   **tarjeta de cobro de cuotas** (ver abajo), visible solo con la caja abierta;
 *   tarjeta de movimientos + tabla del turno, visible solo con la caja abierta;
 *   tarjeta de cierre, con el conteo pre-cargado con el esperado (el caso normal
     es que cuadre; el servidor recalcula y compara igual);
 *   historial de arqueos con filtro por rango de fechas.
+
+### Cobro de cuotas en la ventanilla
+
+Es la operación que el cajero repite decenas de veces por turno, así que vive en
+la pantalla de Caja y va antes que los movimientos manuales y el arqueo. La
+secuencia es de arriba hacia abajo, igual que la atención real:
+
+1.  **Buscar al cliente** que está abonando, por nombre, documento o teléfono
+    (`SearchClients`). Un clic simple en la fila lo selecciona — no doble clic,
+    a diferencia de `ClientsView`, donde la lista es de navegación.
+2.  **Elegir el préstamo**. Solo se ofrecen los `ACTIVE`: un `PENDING`/`APPROVED`
+    todavía no tiene cuotas exigibles y un `PAID`/`DEFAULTED`/`EXPIRED` ya no las
+    tiene. Se muestra el saldo restante y si está al día o con cuotas vencidas.
+3.  **Elegir la cuota**, con su vencimiento y su monto pendiente. El monto se
+    muestra en un campo de solo lectura: lo fija el cronograma y el servidor lo
+    recalcula por su cuenta igual (BR-LOAN-010).
+4.  **Elegir el medio**. Acá **Efectivo va primero**, al revés que en
+    `LoansView`: esta pantalla *es* la caja, así que el cobro en ventanilla es el
+    caso normal. Con Efectivo el campo de referencia se deshabilita.
+5.  **Registrar el cobro** y **emitir el Comprobante de Pago** (PDF, DOCX o
+    impresión). Los botones del comprobante se habilitan recién después del
+    cobro, porque el documento describe *ese* pago (BR-LOAN-011).
+
+Tras el cobro la vista recarga el préstamo y el cronograma —así el saldo y las
+cuotas pendientes quedan al día— y vuelve a pedir el estado de la caja, que
+acaba de cambiar si el pago fue en efectivo.
+
+`LoansView` conserva su propio cobro para los demás roles. Ambos llaman a la
+misma RPC con las mismas reglas: lo que cambia es desde dónde se llega.
 
 Es la pantalla principal del rol Cajero, cuya navegación es
 `Caja / Clientes / Préstamos` (sin Dashboard ni Usuarios). Gerente y

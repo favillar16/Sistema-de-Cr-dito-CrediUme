@@ -1,18 +1,26 @@
-"""Pantalla de Caja (BR-CAJA-001..004): apertura del turno, movimientos de
-efectivo del día y cierre con arqueo, más el historial de arqueos.
+"""Pantalla de Caja (BR-CAJA-001..004): apertura del turno, cobro de cuotas en
+ventanilla, movimientos de efectivo del día y cierre con arqueo, más el
+historial de arqueos.
 
-Es la pantalla principal del rol Cajero. La vista nunca calcula el monto
-esperado por su cuenta: siempre muestra el `expected_amount` que devuelve el
-servidor, porque es ese número -- y no uno recalculado acá -- el que se usa
-para el arqueo del cierre.
+Es la pantalla principal del rol Cajero, y por eso concentra el cobro: el
+cajero busca acá al cliente que está abonando, elige la cuota y registra el
+pago sin salir de la caja. `LoansView` sigue teniendo su propio cobro para los
+demás roles, y ambos llaman a la misma RPC (`RecordPayment`) -- lo que cambia
+es desde dónde se llega, no la regla.
+
+La vista nunca calcula el monto esperado por su cuenta: siempre muestra el
+`expected_amount` que devuelve el servidor, porque es ese número -- y no uno
+recalculado acá -- el que se usa para el arqueo del cierre.
 """
 
 import grpc
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QTextDocument
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QProgressBar,
@@ -23,20 +31,27 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cas_client import theme
+from cas_client import documents, documents_docx, theme
 from cas_client.formatting import (
     DISPLAY_DATE_PLACEHOLDER,
+    fecha,
     fecha_a_iso,
     fecha_hora,
     gs,
 )
-from cas_client.grpc_client import ApiError, CashServiceClient
+from cas_client.grpc_client import (
+    ApiError,
+    CashServiceClient,
+    ClientServiceClient,
+    LoanServiceClient,
+)
 from cas_client.rbac_ui import can_supervise_cash_sessions
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
 from cas_client.widgets.base_view import BaseView
 from cas_client.widgets.card import card, labeled_field, section_label, stat_tile
 from cas_client.widgets.currency_input import CurrencyInput
+from cas_client.widgets.form_input import FormInput
 from cas_client.widgets.responsive_grid import ResponsiveGrid
 from cas_client.widgets.table import size_columns, style_table
 from cas_client.widgets.toast import Toast
@@ -58,6 +73,20 @@ _MOVEMENT_TYPES = (("Ingreso", "INGRESO"), ("Egreso", "EGRESO"))
 
 _STATUS_LABELS = {"OPEN": "Abierta", "CLOSED": "Cerrada"}
 
+_CLIENT_HEADERS = ("Cliente", "Documento", "Teléfono")
+
+# Efectivo va primero acá, al revés que en loans_view.py: esta pantalla ES la
+# caja, así que el cobro en ventanilla es el caso normal y la transferencia la
+# excepción. El valor viaja tal cual al servidor (BR-CAJA-004).
+_PAYMENT_METHODS = (
+    ("Efectivo (caja)", "EFECTIVO"),
+    ("Transferencia / descuento", "TRANSFERENCIA"),
+)
+
+# Solo se cobra sobre préstamos en curso: un PENDING/APPROVED todavía no tiene
+# cuotas exigibles y un PAID/DEFAULTED/EXPIRED ya no las tiene.
+_COBRABLE = "ACTIVE"
+
 
 def _friendly_message(exc: Exception) -> str:
     if isinstance(exc, ApiError):
@@ -76,6 +105,30 @@ def _friendly_message(exc: Exception) -> str:
         if exc.code == grpc.StatusCode.UNAVAILABLE:
             return "No se pudo conectar con el servidor."
         return "No se pudo completar la operación de caja. Intente nuevamente."
+    return f"No se pudo conectar con el servidor: {exc}"
+
+
+def _friendly_collection_message(exc: Exception) -> str:
+    """Separado de _friendly_message porque los mismos códigos significan
+    otra cosa acá: un FAILED_PRECONDITION en la caja es "no hay turno
+    abierto", y en el cobro puede ser "el préstamo no está activo" o "la
+    cuota ya está saldada"."""
+    if isinstance(exc, ApiError):
+        if exc.code == grpc.StatusCode.NOT_FOUND:
+            return "No se encontró el cliente o el préstamo indicado."
+        if exc.code in (
+            grpc.StatusCode.FAILED_PRECONDITION,
+            grpc.StatusCode.INVALID_ARGUMENT,
+        ):
+            # El servidor ya devuelve mensajes específicos y en español para
+            # estos casos (cuota saldada, préstamo no activo, sin caja
+            # abierta); aplanarlos perdería el motivo real.
+            return exc.message
+        if exc.code == grpc.StatusCode.PERMISSION_DENIED:
+            return "No tiene permisos para registrar cobros."
+        if exc.code == grpc.StatusCode.UNAVAILABLE:
+            return "No se pudo conectar con el servidor."
+        return "No se pudo registrar el cobro. Intente nuevamente."
     return f"No se pudo conectar con el servidor: {exc}"
 
 
@@ -102,14 +155,30 @@ class CashView(BaseView):
     def __init__(
         self,
         client: CashServiceClient,
+        clients_client: ClientServiceClient,
+        loans_client: LoanServiceClient,
         session: Session,
         parent: QWidget | None = None,
     ):
         super().__init__("Caja", parent=parent)
         self._client = client
+        # El cobro de cuotas vive en esta pantalla (es la ventanilla), así que
+        # necesita los otros dos servicios: buscar al cliente que abona y leer
+        # su cronograma. MainWindow pasa las mismas instancias que usan
+        # ClientsView/LoansView en vez de abrir canales nuevos.
+        self._clients_client = clients_client
+        self._loans_client = loans_client
         self._session = session
         self._worker: AsyncWorker | None = None
         self._history_worker: AsyncWorker | None = None
+        self._collection_worker: AsyncWorker | None = None
+        # Cliente y préstamo elegidos para el cobro en curso, y el último pago
+        # registrado (BR-LOAN-011: el comprobante describe UN pago concreto y
+        # el servidor no expone historial de pagos, así que solo se puede
+        # emitir el de la sesión actual).
+        self._selected_client = None
+        self._selected_loan = None
+        self._last_payment = None
         self._detail = None  # último CashSessionDetail abierto, o None
         # Se fija de verdad en set_user(); el valor inicial importa porque la
         # vista se construye antes del login (igual que el resto del shell).
@@ -145,6 +214,14 @@ class CashView(BaseView):
 
         self._open_card = self._build_open_card()
         self.content_layout.addWidget(self._open_card)
+
+        # Va antes que movimientos y cierre a propósito: cobrar una cuota es
+        # lo que el cajero hace decenas de veces por turno; los movimientos
+        # manuales y el arqueo son ocasionales.
+        self._collection_section = section_label("Cobro de cuotas")
+        self.content_layout.addWidget(self._collection_section)
+        self._collection_card = self._build_collection_card()
+        self.content_layout.addWidget(self._collection_card)
 
         self._movement_section = section_label("Movimientos del turno")
         self.content_layout.addWidget(self._movement_section)
@@ -197,6 +274,159 @@ class CashView(BaseView):
         layout.addLayout(actions)
 
         return frame
+
+    def _build_collection_card(self) -> QWidget:
+        """Buscar al cliente que abona -> elegir su préstamo -> elegir la cuota
+        -> registrar el cobro -> emitir el comprobante. Todo en una tarjeta,
+        de arriba hacia abajo, porque es la secuencia real de la ventanilla."""
+        frame, layout = card()
+
+        intro = QLabel(
+            "Busque al cliente que está abonando, elija la cuota y registre el "
+            "cobro. El monto lo fija el sistema a partir del cronograma."
+        )
+        intro.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        # -- Paso 1: buscar el cliente --
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        self._client_search = FormInput("Buscar por nombre, documento o teléfono")
+        self._client_search.returnPressed.connect(self._on_client_search)
+        search_row.addWidget(self._client_search, stretch=1)
+        search_button = QPushButton("Buscar cliente")
+        search_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        search_button.setStyleSheet(theme.secondary_button_style())
+        search_button.clicked.connect(self._on_client_search)
+        search_row.addWidget(search_button)
+        layout.addLayout(search_row)
+
+        self._client_table = QTableWidget(0, len(_CLIENT_HEADERS))
+        self._client_table.setHorizontalHeaderLabels(_CLIENT_HEADERS)
+        size_columns(self._client_table, stretch_column=0)
+        self._client_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._client_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._client_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        # Un clic simple alcanza: el cajero tiene al cliente enfrente y el
+        # doble clic (la convención de ClientsView, donde la lista es de
+        # navegación) sería un paso de más en una tarea repetitiva.
+        self._client_table.cellClicked.connect(self._on_client_selected)
+        self._client_table.setMaximumHeight(160)
+        style_table(self._client_table)
+        self._client_table.setVisible(False)
+        layout.addWidget(self._client_table)
+
+        # -- Paso 2: elegir préstamo y cuota --
+        self._collection_detail = QWidget()
+        detail_layout = QVBoxLayout(self._collection_detail)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(10)
+
+        self._selected_client_label = QLabel("")
+        self._selected_client_label.setStyleSheet(
+            f"color: {theme.PRIMARY}; font-size: 14px; font-weight: 600;"
+        )
+        self._selected_client_label.setWordWrap(True)
+        detail_layout.addWidget(self._selected_client_label)
+
+        selectors = ResponsiveGrid(min_cell_width=240)
+        selectors.add_widget(
+            self._combo_field("Préstamo", "_loan_combo", self._on_loan_changed)
+        )
+        selectors.add_widget(
+            self._combo_field(
+                "Cuota a cobrar", "_installment_combo", self._on_installment_changed
+            )
+        )
+        selectors.add_widget(
+            self._combo_field("Medio de pago", "_method_combo", self._on_method_changed)
+        )
+        amount_field, self._collection_amount = labeled_field(
+            "Monto a cobrar (Gs)", input_cls=CurrencyInput
+        )
+        # El monto sale del cronograma y el servidor lo recalcula igual
+        # (BR-LOAN-010): se muestra para confirmar, no para editar.
+        self._collection_amount.setReadOnly(True)
+        selectors.add_widget(amount_field)
+        reference_field, self._collection_reference = labeled_field(
+            "Código/número de transferencia"
+        )
+        selectors.add_widget(reference_field)
+        detail_layout.addWidget(selectors)
+
+        # Se puebla DESPUÉS de crear el campo de referencia: el primer
+        # addItem() mueve el índice de -1 a 0 y dispara _on_method_changed,
+        # que lo toca. Poblarlo junto al combo reventaría con AttributeError.
+        for label, value in _PAYMENT_METHODS:
+            self._method_combo.addItem(label, value)
+
+        self._loan_summary = QLabel("")
+        self._loan_summary.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        self._loan_summary.setWordWrap(True)
+        detail_layout.addWidget(self._loan_summary)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self._collect_button = QPushButton("Registrar cobro")
+        self._collect_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._collect_button.setStyleSheet(theme.accent_button_style())
+        self._collect_button.clicked.connect(self._on_collect)
+        actions.addWidget(self._collect_button)
+
+        # BR-LOAN-011: se habilitan recién cuando hay un pago registrado en
+        # esta sesión -- el comprobante describe ese pago, no el préstamo.
+        self._receipt_buttons: list[QPushButton] = []
+        for label, handler in (
+            ("Comprobante PDF", self._on_receipt_pdf),
+            ("Comprobante DOCX", self._on_receipt_docx),
+            ("Imprimir comprobante", self._on_receipt_print),
+        ):
+            button = QPushButton(label)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(theme.secondary_button_style())
+            button.clicked.connect(handler)
+            button.setEnabled(False)
+            actions.addWidget(button)
+            self._receipt_buttons.append(button)
+        actions.addStretch()
+        detail_layout.addLayout(actions)
+
+        self._collection_detail.setVisible(False)
+        layout.addWidget(self._collection_detail)
+
+        self._collection_progress = QProgressBar()
+        self._collection_progress.setRange(0, 0)
+        self._collection_progress.setTextVisible(False)
+        self._collection_progress.setFixedHeight(4)
+        self._collection_progress.hide()
+        layout.addWidget(self._collection_progress)
+
+        return frame
+
+    def _combo_field(self, caption_text: str, attr: str, on_change) -> QWidget:
+        """Un QComboBox con la misma leyenda pequeña que labeled_field() pone
+        sobre un FormInput -- card.py solo cubre inputs de texto, y esta
+        tarjeta mezcla los dos tipos de campo."""
+        wrapper = QWidget()
+        column = QVBoxLayout(wrapper)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        caption = QLabel(caption_text)
+        caption.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600;"
+        )
+        column.addWidget(caption)
+        combo = QComboBox()
+        combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        combo.currentIndexChanged.connect(on_change)
+        column.addWidget(combo)
+        setattr(self, attr, combo)
+        return wrapper
 
     def _build_movement_card(self) -> QWidget:
         frame, layout = card()
@@ -410,6 +640,10 @@ class CashView(BaseView):
         abierta = detail is not None
 
         self._open_card.setVisible(not abierta)
+        # El cobro exige caja abierta (BR-CAJA-004): ofrecerlo con la caja
+        # cerrada solo produciría un FAILED_PRECONDITION del servidor.
+        self._collection_section.setVisible(abierta)
+        self._collection_card.setVisible(abierta)
         self._movement_section.setVisible(abierta)
         self._movement_card.setVisible(abierta)
         self._close_section.setVisible(abierta)
@@ -591,6 +825,308 @@ class CashView(BaseView):
         self._progress.hide()
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
+
+    # ---- Cobro de cuotas (BR-CAJA-004) -----------------------------------
+
+    def _run_collection(self, fn, *args, on_success, **kwargs) -> None:
+        """Toda consulta de la tarjeta de cobro usa su propia barra de
+        progreso, para no confundirse con la del estado de la caja."""
+        self._collection_progress.setRange(0, 0)
+        self._collection_progress.show()
+        self._collection_worker = AsyncWorker(
+            fn, *args, error_translator=_friendly_collection_message, **kwargs
+        )
+        self._collection_worker.succeeded.connect(on_success)
+        self._collection_worker.failed.connect(self._toast.show_message)
+        self._collection_worker.finished.connect(self._hide_collection_progress)
+        self._collection_worker.start()
+
+    def _hide_collection_progress(self) -> None:
+        self._collection_progress.hide()
+        self._collection_progress.setRange(0, 1)
+        self._collection_progress.setValue(0)
+
+    def _on_client_search(self) -> None:
+        if not self._session.access_token:
+            return
+        termino = self._client_search.text().strip()
+        self._client_search.set_error(not termino)
+        if not termino:
+            self._toast.show_message(
+                "Escriba el nombre, documento o teléfono del cliente."
+            )
+            return
+        self._run_collection(
+            self._clients_client.search_clients,
+            self._session.access_token,
+            termino,
+            on_success=self._on_clients_found,
+        )
+
+    def _on_clients_found(self, response) -> None:
+        self._client_table.setRowCount(0)
+        for cliente in response.clients:
+            row = self._client_table.rowCount()
+            self._client_table.insertRow(row)
+            celdas = (
+                f"{cliente.first_name} {cliente.last_name}",
+                cliente.national_id,
+                cliente.phone_number,
+            )
+            for col, texto in enumerate(celdas):
+                item = QTableWidgetItem(texto)
+                if col == 0:
+                    # La respuesta ya trae la ficha completa (SearchClients
+                    # devuelve GetClientByIdResponse), así que el comprobante
+                    # puede armarse sin una segunda consulta.
+                    item.setData(Qt.ItemDataRole.UserRole, cliente)
+                self._client_table.setItem(row, col, item)
+        self._client_table.setVisible(True)
+        if not response.clients:
+            self._toast.show_message("No se encontraron clientes con ese dato.")
+
+    def _on_client_selected(self, row: int, _column: int) -> None:
+        item = self._client_table.item(row, 0)
+        if item is None:
+            return
+        cliente = item.data(Qt.ItemDataRole.UserRole)
+        self._selected_client = cliente
+        self._selected_client_label.setText(
+            f"{cliente.first_name} {cliente.last_name} · C.I. {cliente.national_id}"
+        )
+        self._reset_collection_selection()
+        self._run_collection(
+            self._loans_client.list_client_loans,
+            self._session.access_token,
+            cliente.id,
+            on_success=self._on_client_loans_loaded,
+        )
+
+    def _reset_collection_selection(self) -> None:
+        """Un cliente nuevo invalida el préstamo, la cuota y el comprobante
+        anterior -- dejarlos habilitados permitiría emitir el comprobante de
+        otro cliente sobre la pantalla del actual."""
+        self._selected_loan = None
+        self._last_payment = None
+        self._loan_combo.clear()
+        self._installment_combo.clear()
+        self._collection_amount.clear()
+        self._loan_summary.setText("")
+        for button in self._receipt_buttons:
+            button.setEnabled(False)
+
+    def _on_client_loans_loaded(self, response) -> None:
+        activos = [loan for loan in response.loans if loan.status == _COBRABLE]
+        self._loan_combo.clear()
+        for loan in activos:
+            etiqueta = (
+                f"{loan.id[:8]} · {loan.term_months} cuotas · "
+                f"saldo {gs(loan.remaining_balance)}"
+            )
+            self._loan_combo.addItem(etiqueta, loan)
+        self._collection_detail.setVisible(True)
+        if not activos:
+            self._loan_summary.setText(
+                "Este cliente no tiene préstamos activos con cuotas por cobrar."
+            )
+            self._collect_button.setEnabled(False)
+            return
+        self._collect_button.setEnabled(True)
+
+    def _on_loan_changed(self, index: int) -> None:
+        loan = self._loan_combo.itemData(index)
+        self._selected_loan = loan
+        self._installment_combo.clear()
+        self._collection_amount.clear()
+        if loan is None:
+            return
+        estado = (
+            "al día"
+            if loan.payment_status == "AL_DIA"
+            else f"con {loan.overdue_installments_count} cuota(s) vencida(s) "
+            f"por {gs(loan.overdue_amount)}"
+        )
+        self._loan_summary.setText(
+            f"Saldo restante {gs(loan.remaining_balance)} · Préstamo {estado}."
+        )
+        self._run_collection(
+            self._loans_client.get_amortization_schedule,
+            self._session.access_token,
+            loan.id,
+            on_success=self._on_schedule_loaded,
+        )
+
+    def _on_schedule_loaded(self, response) -> None:
+        self._installment_combo.clear()
+        for cuota in response.installments:
+            if cuota.is_paid:
+                continue
+            self._installment_combo.addItem(
+                f"Cuota {cuota.installment_number} · Vence "
+                f"{fecha(cuota.due_date)} · {gs(cuota.amount_due)}",
+                (cuota.installment_number, cuota.amount_due),
+            )
+        hay_pendientes = self._installment_combo.count() > 0
+        self._collect_button.setEnabled(hay_pendientes)
+        if not hay_pendientes:
+            self._loan_summary.setText(
+                "Este préstamo no tiene cuotas pendientes de cobro."
+            )
+
+    def _on_installment_changed(self, index: int) -> None:
+        data = self._installment_combo.itemData(index)
+        if data is None:
+            self._collection_amount.clear()
+            return
+        _numero, monto = data
+        self._collection_amount.set_amount(monto)
+
+    def _on_method_changed(self, _index: int) -> None:
+        """En efectivo no hay referencia que pedir (BR-CAJA-004). Se
+        deshabilita en vez de ocultarse, misma decisión que en loans_view."""
+        es_efectivo = self._method_combo.currentData() == "EFECTIVO"
+        self._collection_reference.setEnabled(not es_efectivo)
+        if es_efectivo:
+            self._collection_reference.clear()
+            self._collection_reference.set_error(False)
+
+    def _on_collect(self) -> None:
+        if not self._session.access_token or self._selected_loan is None:
+            return
+        data = self._installment_combo.itemData(self._installment_combo.currentIndex())
+        if data is None:
+            self._toast.show_message("Elija la cuota que está abonando.")
+            return
+        numero_cuota, _monto = data
+        medio = self._method_combo.currentData()
+        referencia = self._collection_reference.text().strip()
+        if medio != "EFECTIVO" and not referencia:
+            self._collection_reference.set_error(True)
+            self._toast.show_message(
+                "Ingrese el código o número de transferencia del pago."
+            )
+            return
+        self._collection_reference.set_error(False)
+        # El cobro en efectivo exige caja abierta; el servidor lo rechaza si no
+        # la hay, pero la tarjeta ya está oculta en ese caso.
+        self._run_collection(
+            self._loans_client.record_payment,
+            self._session.access_token,
+            self._selected_loan.id,
+            referencia,
+            installment_number=numero_cuota,
+            payment_method=medio,
+            on_success=self._on_payment_recorded,
+        )
+
+    def _on_payment_recorded(self, payment) -> None:
+        self._last_payment = payment
+        self._collection_reference.clear()
+        for button in self._receipt_buttons:
+            button.setEnabled(True)
+        cuotas = documents.cuotas_cubiertas_texto(
+            payment.covered_installments, payment.total_installments
+        )
+        self._toast.show_message(
+            f"Cobro registrado por {gs(payment.amount_paid)} — {cuotas}. "
+            "Ya puede emitir el comprobante."
+        )
+        # Refresca el saldo del préstamo y las cuotas pendientes, y (si fue en
+        # efectivo) los totales de la caja, que acaban de cambiar.
+        self._reload_selected_loan()
+        self.refresh()
+
+    def _reload_selected_loan(self) -> None:
+        if self._selected_loan is None:
+            return
+        self._run_collection(
+            self._loans_client.get_loan_by_id,
+            self._session.access_token,
+            self._selected_loan.id,
+            on_success=self._on_selected_loan_reloaded,
+        )
+
+    def _on_selected_loan_reloaded(self, loan) -> None:
+        self._selected_loan = loan
+        indice = self._loan_combo.currentIndex()
+        if indice >= 0:
+            self._loan_combo.setItemData(indice, loan)
+        estado = "cancelado" if loan.status == "PAID" else "activo"
+        self._loan_summary.setText(
+            f"Saldo restante {gs(loan.remaining_balance)} · Préstamo {estado}."
+        )
+        if loan.status != _COBRABLE:
+            # Quedó saldado con este cobro: no hay más cuotas que ofrecer.
+            self._installment_combo.clear()
+            self._collection_amount.clear()
+            self._collect_button.setEnabled(False)
+            return
+        self._run_collection(
+            self._loans_client.get_amortization_schedule,
+            self._session.access_token,
+            loan.id,
+            on_success=self._on_schedule_loaded,
+        )
+
+    # ---- Comprobante de pago (BR-LOAN-011) -------------------------------
+
+    def _receipt_html(self) -> str:
+        return documents.comprobante_pago_html(
+            self._selected_loan, self._selected_client, self._last_payment
+        )
+
+    def _receipt_name(self, extension: str) -> str:
+        return f"comprobante_{self._selected_loan.id[:8]}.{extension}"
+
+    def _on_receipt_pdf(self) -> None:
+        if self._last_payment is None:
+            return
+        path, _filtro = QFileDialog.getSaveFileName(
+            self, "Guardar comprobante", self._receipt_name("pdf"), "PDF (*.pdf)"
+        )
+        if not path:
+            return
+        document = QTextDocument()
+        document.setHtml(self._receipt_html())
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+        try:
+            document.print_(printer)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Comprobante guardado.")
+
+    def _on_receipt_docx(self) -> None:
+        if self._last_payment is None:
+            return
+        path, _filtro = QFileDialog.getSaveFileName(
+            self, "Guardar comprobante", self._receipt_name("docx"), "Word (*.docx)"
+        )
+        if not path:
+            return
+        try:
+            documents_docx.comprobante_pago_docx(
+                self._selected_loan, self._selected_client, self._last_payment
+            ).save(path)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Comprobante guardado.")
+
+    def _on_receipt_print(self) -> None:
+        if self._last_payment is None:
+            return
+        document = QTextDocument()
+        document.setHtml(self._receipt_html())
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        dialog = QPrintDialog(printer, self)
+        if dialog.exec() == QPrintDialog.DialogCode.Accepted:
+            try:
+                document.print_(printer)
+            except OSError as exc:
+                self._toast.show_message(documents.friendly_file_error(exc))
 
     # ---- Historial -------------------------------------------------------
 
