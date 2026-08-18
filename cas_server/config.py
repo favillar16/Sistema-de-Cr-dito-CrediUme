@@ -39,6 +39,42 @@ GRPC_TLS_KEY_FILE = os.environ.get("GRPC_TLS_KEY_FILE")
 # instead of plain server-side TLS.
 GRPC_TLS_CLIENT_CA_FILE = os.environ.get("GRPC_TLS_CLIENT_CA_FILE")
 
+# ---- Salud de la conexión (keepalive) ------------------------------------
+#
+# Contraparte obligatoria del bloque homónimo en cas_client/config.py -- ver
+# ahí la explicación de por qué una conexión ociosa se cae sola en la LAN.
+#
+# El valor que importa acá es GRPC_MIN_PING_INTERVAL_WITHOUT_DATA_MS: por
+# defecto gRPC lo fija en 300000 (5 min) y, si el cliente hace ping más
+# seguido que eso sin tráfico de por medio, el servidor considera el ping
+# abusivo y responde GOAWAY/ENHANCE_YOUR_CALM, cortando la conexión. Es decir,
+# con el default un cliente con keepalive de 30 s sería desconectado
+# activamente por el servidor. Se baja por debajo del intervalo del cliente
+# para que los pings que mantienen viva la conexión sean aceptados.
+GRPC_KEEPALIVE_TIME_MS = int(os.environ.get("GRPC_KEEPALIVE_TIME_MS", "30000"))
+GRPC_KEEPALIVE_TIMEOUT_MS = int(os.environ.get("GRPC_KEEPALIVE_TIMEOUT_MS", "10000"))
+GRPC_MIN_PING_INTERVAL_WITHOUT_DATA_MS = int(
+    os.environ.get("GRPC_MIN_PING_INTERVAL_WITHOUT_DATA_MS", "10000")
+)
+
+
+def grpc_keepalive_options() -> list[tuple[str, int]]:
+    """Opciones de canal del servidor para keepalive. `permit_without_calls`
+    es imprescindible: la caja pasa la mayor parte del turno sin RPC en vuelo,
+    que es justamente cuando el router descarta la conexión ociosa, así que un
+    keepalive que sólo funcione durante las llamadas no serviría de nada."""
+    return [
+        ("grpc.keepalive_time_ms", GRPC_KEEPALIVE_TIME_MS),
+        ("grpc.keepalive_timeout_ms", GRPC_KEEPALIVE_TIMEOUT_MS),
+        ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.http2.max_pings_without_data", 0),
+        (
+            "grpc.http2.min_ping_interval_without_data_ms",
+            GRPC_MIN_PING_INTERVAL_WITHOUT_DATA_MS,
+        ),
+    ]
+
+
 JWT_SECRET_KEY = _require("JWT_SECRET_KEY")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRES_SECONDS = 8 * 60 * 60  # BR-AUTH-003: 8 hour session, no refresh tokens

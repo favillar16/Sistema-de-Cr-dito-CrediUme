@@ -4,7 +4,11 @@ import grpc
 from PySide6.QtCore import QThread, Signal
 
 from cas_client.grpc_client import ApiError, AuthError
-from cas_client.session import SESSION_EXPIRED_MESSAGE, session_events
+from cas_client.session import (
+    CONNECTION_LOST_MESSAGE,
+    SESSION_EXPIRED_MESSAGE,
+    session_events,
+)
 
 # Every view keeps only a single `self._worker` attribute and reassigns it
 # per call (see e.g. loans_view.py) -- fine for one-off calls, but a success
@@ -69,9 +73,37 @@ class AsyncWorker(QThread):
                 session_events.expired.emit()
                 self.failed.emit(SESSION_EXPIRED_MESSAGE)
                 return
+            if _is_unreachable(exc):
+                # Mismo criterio que la expiración de sesión de arriba, y por
+                # el mismo motivo: DEADLINE_EXCEEDED sólo empezó a ser posible
+                # cuando las llamadas pasaron a tener un plazo (ver
+                # grpc_client._invoke), y ningún _friendly_message() de las
+                # vistas lo contempla -- todos lo dejarían caer en su
+                # "Ocurrió un error inesperado", que es justo lo que no hay
+                # que decirle a un operador cuyo problema es de red. Resolverlo
+                # acá cubre los ~30 call sites de una vez en lugar de sumar la
+                # misma rama a media docena de traductores que después se
+                # desincronizan.
+                self.failed.emit(CONNECTION_LOST_MESSAGE)
+                return
             self.failed.emit(self._error_translator(exc))
             return
         self.succeeded.emit(result)
+
+
+def _is_unreachable(exc: Exception) -> bool:
+    """True cuando la llamada no llegó a completarse por un problema de red.
+
+    `DEADLINE_EXCEEDED` es el caso nuevo: con el plazo por llamada que fija
+    grpc_client._invoke, un servidor inalcanzable ahora corta a los 20 s en
+    vez de colgar el worker para siempre. Se trata igual que `UNAVAILABLE`
+    porque para el operador son el mismo hecho -- el servidor no contestó --
+    y en ninguno de los dos casos la operación quedó registrada.
+    """
+    return isinstance(exc, (ApiError, AuthError)) and exc.code in (
+        grpc.StatusCode.DEADLINE_EXCEEDED,
+        grpc.StatusCode.UNAVAILABLE,
+    )
 
 
 def _is_expired_session(exc: Exception) -> bool:

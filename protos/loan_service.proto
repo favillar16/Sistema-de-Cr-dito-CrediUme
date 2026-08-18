@@ -47,6 +47,11 @@ service LoanService {
     // (Agente de Créditos o Administrador) -- no afecta la última cuota, que
     // siempre salda el remanente exacto.
     rpc UpdateInstallmentAmount (UpdateInstallmentAmountRequest) returns (UpdateInstallmentAmountResponse);
+
+    // Eliminación definitiva de un préstamo cargado por error -- BR-LOAN-012.
+    // Solo Gerente o Administrador, y solo mientras el préstamo no haya movido
+    // dinero (PENDING, APPROVED o EXPIRED, y sin ningún pago registrado).
+    rpc DeleteLoan (DeleteLoanRequest) returns (DeleteLoanResponse);
 }
 
 message CreateLoanRequest {
@@ -297,4 +302,21 @@ message UpdateInstallmentAmountRequest {
 message UpdateInstallmentAmountResponse {
     bool success = 1;
     string status = 2; // Estado del préstamo (sin cambios, siempre ACTIVE)
+}
+
+message DeleteLoanRequest {
+    string loan_id = 1;
+    // Motivo de la eliminación, obligatorio: la fila del préstamo desaparece,
+    // así que el AuditLog es lo único que queda para explicar por qué -- un
+    // campo libre vacío haría de la auditoría un registro inútil.
+    string reason = 2;
+}
+
+message DeleteLoanResponse {
+    bool success = 1;
+    // Cliente al que pertenecía el préstamo eliminado, para que el cliente
+    // gRPC pueda volver a listar su cartera sin recordarlo por su cuenta (el
+    // préstamo ya no existe para volver a consultarlo).
+    string client_id = 2;
+    string deleted_status = 3; // Estado que tenía el préstamo al eliminarlo
 }

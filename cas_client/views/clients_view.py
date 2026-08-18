@@ -26,7 +26,7 @@ from cas_client.widgets.currency_input import CurrencyInput
 from cas_client.widgets.form_input import FormInput
 from cas_client.widgets.responsive_grid import ResponsiveGrid
 from cas_client.widgets.scroll_area import wrap_scrollable
-from cas_client.widgets.table import size_columns, style_table
+from cas_client.widgets.table import set_empty_message, size_columns, style_table
 from cas_client.widgets.toast import Toast
 
 _PAGE_LIST, _PAGE_CREATE, _PAGE_DETAIL = range(3)
@@ -211,6 +211,9 @@ class ClientsView(BaseView):
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._table.cellDoubleClicked.connect(self._on_row_activated)
         style_table(self._table)
+        set_empty_message(
+            self._table, "No hay clientes para mostrar. Use el buscador de arriba."
+        )
         layout.addWidget(self._table, stretch=1)
 
         self._next_page_button = QPushButton("Siguiente página")

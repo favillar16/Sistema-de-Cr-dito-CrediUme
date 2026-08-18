@@ -44,6 +44,18 @@ CERO = Decimal("0.00")
 
 _ESTADOS_ACTIVOS = (LoanStatusEnum.APPROVED, LoanStatusEnum.ACTIVE)
 
+# BR-LOAN-012: estados desde los que un préstamo cargado por error se puede
+# eliminar. El criterio no es "todavía no terminó" sino "todavía no movió
+# dinero": ACTIVE/PAID/DEFAULTED implican un desembolso ya hecho, y borrarlos
+# haría desaparecer pagos que pueden estar imputados a un arqueo de caja ya
+# firmado (CashMovement.loan_payment_id -> loan_payments -> loans). Para esos
+# casos existen MarkDefaulted y el resto del ciclo de vida, no el borrado.
+_ESTADOS_ELIMINABLES = (
+    LoanStatusEnum.PENDING,
+    LoanStatusEnum.APPROVED,
+    LoanStatusEnum.EXPIRED,
+)
+
 
 def _tal_vez_vencer_prestamo(prestamo: Loan, ahora: datetime) -> bool:
     """BR-LOAN-003: vence perezosamente un préstamo APPROVED atrasado sin desembolsar.
@@ -495,7 +507,23 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     "creación del préstamo",
                 )
 
+            # Mismas dos verificaciones que CreateLoan hace antes de validar
+            # BR-LOAN-002. Faltaban acá: sin ellas, un cliente sin ingresos
+            # declarados hacía reventar la multiplicación de más abajo
+            # (None * Decimal) y la RPC respondía UNKNOWN -- que la vista
+            # traduce a "Ocurrió un error inesperado", sin decir qué falta.
             cliente = sesion.get(Client, prestamo.client_id)
+            if cliente is None:
+                context.abort(
+                    grpc.StatusCode.NOT_FOUND,
+                    "El cliente del préstamo no existe",
+                )
+            if cliente.declared_monthly_income is None:
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "El cliente no tiene ingresos declarados registrados (BR-LOAN-002)",
+                )
+
             cronograma = calcular_cronograma(
                 capital, prestamo.interest_rate, request.term_months
             )
@@ -1172,4 +1200,92 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
 
             return loan_service_pb2.UpdateInstallmentAmountResponse(
                 success=True, status=prestamo.status.value
+            )
+
+    def DeleteLoan(self, request, context):
+        """BR-LOAN-012: elimina definitivamente un préstamo cargado por error.
+
+        Es la única operación de este servicer que borra una fila en vez de
+        cambiarle el estado, así que está acotada por los dos lados: por rol
+        (MANAGER_AND_ABOVE en rbac.py) y por estado -- solo PENDING, APPROVED
+        o EXPIRED, y únicamente si no tiene ningún pago registrado. Un
+        préstamo que ya cobró plata no se borra: sus LoanPayment pueden estar
+        imputados a un movimiento de caja de un arqueo ya cerrado, y hacerlos
+        desaparecer cambiaría un arqueo firmado (ver BR-CAJA-003).
+
+        La comprobación de pagos es redundante con la de estado (solo un
+        préstamo ACTIVE puede recibir pagos), y es a propósito: es la que
+        expresa el invariante real -- si mañana se admitiera borrar algún
+        estado más, el dinero sigue siendo la línea que no se cruza.
+        """
+        loan_id = analizar_uuid(request.loan_id, "loan_id", context)
+        motivo = request.reason.strip()
+        if not motivo:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "reason es obligatorio: el préstamo se borra y el registro de "
+                "auditoría es lo único que queda para explicar por qué",
+            )
+        ahora = datetime.now(timezone.utc)
+
+        with SessionLocal() as sesion:
+            # Mismo bloqueo que ApproveLoan/RecordPayment y por el mismo
+            # motivo: sin él, un pago concurrente podría entrar entre la
+            # verificación de "no tiene pagos" y el DELETE.
+            prestamo = sesion.get(Loan, loan_id, with_for_update=True)
+            if prestamo is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Préstamo no encontrado")
+
+            if prestamo.status not in _ESTADOS_ELIMINABLES:
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "Solo se puede eliminar un préstamo que todavía no fue "
+                    "desembolsado (Pendiente, Aprobado o Rechazado); este está "
+                    f"en estado {prestamo.status.value} (BR-LOAN-012)",
+                )
+
+            if prestamo.payments:
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "El préstamo tiene pagos registrados y no puede eliminarse "
+                    "(BR-LOAN-012)",
+                )
+
+            # Datos del préstamo antes de borrarlo: una vez hecho el DELETE la
+            # fila no existe, así que el AuditLog tiene que ser autosuficiente
+            # para reconstruir qué se eliminó.
+            client_id = prestamo.client_id
+            estado_previo = prestamo.status.value
+            resumen = (
+                f"capital={prestamo.principal_amount} "
+                f"tasa={prestamo.interest_rate} cuotas={prestamo.term_months} "
+                f"primer_vencimiento={prestamo.first_due_date.isoformat()}"
+            )
+
+            # Los ajustes de cuota solo existen para préstamos ACTIVE, que no
+            # son eliminables -- se borran igual para que la FK no dependa de
+            # esa coincidencia si algún día cambia.
+            sesion.query(LoanInstallmentAdjustment).filter(
+                LoanInstallmentAdjustment.loan_id == prestamo.id
+            ).delete(synchronize_session=False)
+            sesion.delete(prestamo)
+
+            sesion.add(
+                AuditLog(
+                    user_id=id_actor_actual(get_current_claims()),
+                    action=(
+                        f"PRESTAMO_ELIMINADO loan_id={loan_id} "
+                        f"client_id={client_id} estado={estado_previo} "
+                        f"{resumen} motivo={motivo}"
+                    ),
+                    ip_address=ip_remota(context),
+                    timestamp=ahora,
+                )
+            )
+            sesion.commit()
+
+            return loan_service_pb2.DeleteLoanResponse(
+                success=True,
+                client_id=str(client_id),
+                deleted_status=estado_previo,
             )

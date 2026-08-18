@@ -99,6 +99,11 @@ class LoanServiceStub(object):
                 request_serializer=loan__service__pb2.UpdateInstallmentAmountRequest.SerializeToString,
                 response_deserializer=loan__service__pb2.UpdateInstallmentAmountResponse.FromString,
                 _registered_method=True)
+        self.DeleteLoan = channel.unary_unary(
+                '/loans.LoanService/DeleteLoan',
+                request_serializer=loan__service__pb2.DeleteLoanRequest.SerializeToString,
+                response_deserializer=loan__service__pb2.DeleteLoanResponse.FromString,
+                _registered_method=True)
 
 
 class LoanServiceServicer(object):
@@ -199,6 +204,15 @@ class LoanServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def DeleteLoan(self, request, context):
+        """Eliminación definitiva de un préstamo cargado por error -- BR-LOAN-012.
+        Solo Gerente o Administrador, y solo mientras el préstamo no haya movido
+        dinero (PENDING, APPROVED o EXPIRED, y sin ningún pago registrado).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LoanServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -266,6 +280,11 @@ def add_LoanServiceServicer_to_server(servicer, server):
                     servicer.UpdateInstallmentAmount,
                     request_deserializer=loan__service__pb2.UpdateInstallmentAmountRequest.FromString,
                     response_serializer=loan__service__pb2.UpdateInstallmentAmountResponse.SerializeToString,
+            ),
+            'DeleteLoan': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteLoan,
+                    request_deserializer=loan__service__pb2.DeleteLoanRequest.FromString,
+                    response_serializer=loan__service__pb2.DeleteLoanResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -619,6 +638,33 @@ class LoanService(object):
             '/loans.LoanService/UpdateInstallmentAmount',
             loan__service__pb2.UpdateInstallmentAmountRequest.SerializeToString,
             loan__service__pb2.UpdateInstallmentAmountResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteLoan(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loans.LoanService/DeleteLoan',
+            loan__service__pb2.DeleteLoanRequest.SerializeToString,
+            loan__service__pb2.DeleteLoanResponse.FromString,
             options,
             channel_credentials,
             insecure,

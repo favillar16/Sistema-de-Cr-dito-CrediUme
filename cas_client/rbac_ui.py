@@ -110,6 +110,16 @@ def can_supervise_cash_sessions(role: str | None) -> bool:
     return role_at_least(role, "MANAGER")
 
 
+def can_delete_loan(role: str | None) -> bool:
+    """BR-LOAN-012: eliminar un préstamo cargado por error -- mirrors rbac.py's
+    MANAGER_AND_ABOVE gate on DeleteLoan. Está un escalón por encima de
+    can_originate_credit() a propósito: deshacer la carga de otro es
+    supervisión, no originación. El servidor limita además *qué* préstamos son
+    eliminables (solo sin desembolsar y sin pagos), lo que esta función no
+    puede saber -- por eso la vista combina las dos condiciones."""
+    return role_at_least(role, "MANAGER")
+
+
 def can_edit_installment_amount(role: str | None) -> bool:
     """Only Agente de Créditos (MANAGER) and Administrador (ADMIN) can adjust
     an individual installment's amount (UpdateInstallmentAmount) -- mirrors

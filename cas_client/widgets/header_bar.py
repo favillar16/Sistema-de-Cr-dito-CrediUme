@@ -65,6 +65,20 @@ class HeaderBar(QWidget):
 
         layout.addStretch()
 
+        # Indicador de enlace con el servidor. Va acá, en la barra que está
+        # visible en todas las pantallas, porque el operador tiene que poder
+        # notar el corte *antes* de intentar cobrar -- no enterarse por un
+        # error después de haber tomado la plata en el mostrador.
+        self._connection_label = QLabel("")
+        self._connection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Centrado vertical y no estirado: sin esto el QLabel crece hasta los
+        # 64px de alto del header y el estado de alarma se dibuja como un
+        # bloque rojo macizo en vez de una píldora.
+        layout.addWidget(
+            self._connection_label, alignment=Qt.AlignmentFlag.AlignVCenter
+        )
+        self.set_connected(True)
+
         logout_button = QPushButton("Cerrar sesión")
         logout_button.setCursor(Qt.CursorShape.PointingHandCursor)
         logout_button.setStyleSheet(
@@ -76,6 +90,32 @@ class HeaderBar(QWidget):
         )
         logout_button.clicked.connect(self.logout_requested.emit)
         layout.addWidget(logout_button)
+
+    def set_connected(self, connected: bool) -> None:
+        """Verde discreto cuando hay línea, rojo declarado cuando no.
+
+        El estado normal no debe competir por atención -- es el de siempre --
+        así que "Conectado" va en un tono translúcido sobre el navy del
+        header. La caída sí se pinta con fondo rojo lleno: es una condición
+        que obliga a parar lo que se esté haciendo.
+        """
+        if connected:
+            self._connection_label.setText("● Conectado")
+            self._connection_label.setStyleSheet(
+                "color: rgba(255, 255, 255, 150); font-size: 11px; "
+                "font-weight: 600; padding: 4px 10px;"
+            )
+            self._connection_label.setToolTip("Hay conexión con el servidor.")
+            return
+        self._connection_label.setText("● Sin conexión")
+        self._connection_label.setStyleSheet(
+            f"background-color: {theme.ERROR}; color: white; border-radius: 10px; "
+            "font-size: 11px; font-weight: 700; padding: 4px 10px;"
+        )
+        self._connection_label.setToolTip(
+            "Se perdió el enlace con el servidor. Las operaciones no se van a "
+            "registrar hasta que se restablezca."
+        )
 
     def set_user(self, username: str, role: str) -> None:
         if not username:

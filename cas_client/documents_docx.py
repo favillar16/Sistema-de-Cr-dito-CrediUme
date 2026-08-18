@@ -17,7 +17,13 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 from cas_client import assets, documents, theme
-from cas_client.formatting import fecha, gs, rate_percent, rate_percent_mensual
+from cas_client.formatting import (
+    fecha,
+    fecha_hora,
+    gs,
+    rate_percent,
+    rate_percent_mensual,
+)
 
 
 def _rgb(hex_color: str) -> RGBColor:
@@ -209,10 +215,10 @@ def comprobante_pago_docx(loan, client, payment) -> Document:
                 payment.covered_installments, payment.total_installments
             ),
         ),
-        (
-            "Fecha y hora del pago",
-            payment.paid_at.ToDatetime().strftime("%d/%m/%Y %H:%M"),
-        ),
+        # Misma hora local que la versión HTML del comprobante -- ver la nota
+        # en documents.comprobante_pago_html sobre por qué no es un strftime
+        # directo sobre el naive UTC que devuelve ToDatetime().
+        ("Fecha y hora del pago", fecha_hora(payment.paid_at.ToDatetime())),
         *documents.filas_medio_de_pago(payment),  # BR-CAJA-004
         ("Total pagado del préstamo", gs(payment.total_paid)),
         ("Saldo restante", gs(payment.remaining_balance)),

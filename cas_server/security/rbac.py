@@ -58,6 +58,12 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     "/loans.LoanService/ApproveLoan": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/MarkDefaulted": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/DisburseLoan": MANAGER_AND_ABOVE,
+    # BR-LOAN-012: borrar un préstamo cargado por error es la única operación
+    # que elimina una fila en vez de moverle el estado, así que se gatea más
+    # arriba que la aprobación (CREDIT_ANALYST_AND_ABOVE) -- deshacer el
+    # trabajo de otro es supervisión, no originación. El servicer restringe
+    # además *qué* préstamos, no solo quién: ver _ESTADOS_ELIMINABLES.
+    "/loans.LoanService/DeleteLoan": MANAGER_AND_ABOVE,
     "/dashboard.DashboardService/GetDashboardStats": CASHIER_AND_ABOVE,
     # BR-DASH-002: el reporte de cierre de período es material de gestión
     # (resultados del mes/trimestre), no una consulta operativa -- se limita a

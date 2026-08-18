@@ -1,5 +1,6 @@
 from cas_client.rbac_ui import (
     FIXED_INTEREST_RATE,
+    can_delete_loan,
     can_edit_installment_amount,
     can_edit_interest_rate,
     can_manage_users,
@@ -150,3 +151,24 @@ def test_period_report_gate_matches_rbac_tables_exactly():
     for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
         esperado = any(permitido.value == role for permitido in permitidos)
         assert can_view_period_report(role) == esperado, role
+
+
+def test_delete_loan_gate_matches_rbac_tables_exactly():
+    """BR-LOAN-012. Misma guarda de sincronizacion que el reporte de periodo:
+    se compara contra la tabla METHOD_ROLES real en vez de repetir a mano la
+    expectativa, que es justamente lo que se desincroniza."""
+    from cas_server.security.rbac import allowed_roles
+
+    permitidos = allowed_roles("/loans.LoanService/DeleteLoan")
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+        esperado = any(permitido.value == role for permitido in permitidos)
+        assert can_delete_loan(role) == esperado, role
+
+
+def test_delete_loan_is_stricter_than_originating_credit():
+    """Borrar la carga de otro es supervision, no originacion: el Analista de
+    Credito puede crear y aprobar un prestamo pero no eliminarlo."""
+    assert can_originate_credit("CREDIT_ANALYST") is True
+    assert can_delete_loan("CREDIT_ANALYST") is False
+    assert can_delete_loan("MANAGER") is True
+    assert can_delete_loan(None) is False

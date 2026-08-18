@@ -76,7 +76,13 @@ def test_fecha_round_trips_through_fecha_a_iso():
 
 
 def test_fecha_hora_uses_the_same_date_format_plus_a_24h_clock():
-    assert fecha_hora(datetime(2026, 8, 13, 7, 5)) == "13/08/2026 07:05"
+    """El formato es DD/MM/AAAA HH:MM. El instante se toma ya en hora local
+    (una zona fija, no la de la máquina) para probar sólo el formateo -- la
+    conversión desde el UTC del servidor tiene sus propios tests más abajo."""
+    from datetime import datetime as _datetime
+
+    local = _datetime(2026, 8, 13, 7, 5).astimezone()
+    assert fecha_hora(local) == "13/08/2026 07:05"
 
 
 def test_placeholder_matches_the_format_actually_parsed():
@@ -87,3 +93,46 @@ def test_placeholder_matches_the_format_actually_parsed():
 def test_gs_and_rate_percent_are_unchanged_by_the_date_work():
     assert gs("1000000.00") == "1.000.000 Gs"
     assert rate_percent("0.24") == "24%"
+
+
+# ---- Hora local vs UTC (a_hora_local / fecha_hora) ------------------------
+
+
+def test_a_hora_local_reads_a_naive_datetime_as_utc():
+    """Todo datetime que llega del servidor sale de Timestamp.ToDatetime(),
+    que devuelve un naive **en UTC**. Interpretarlo como hora local mostraba
+    la hora equivocada en la caja y en el comprobante que se entrega al
+    deudor."""
+    from datetime import timezone
+
+    from cas_client.formatting import a_hora_local
+
+    local = a_hora_local(datetime(2026, 8, 13, 12, 0))
+    assert local.tzinfo is not None
+    assert local.astimezone(timezone.utc).replace(tzinfo=None) == datetime(
+        2026, 8, 13, 12, 0
+    )
+
+
+def test_a_hora_local_keeps_an_aware_datetime_at_the_same_instant():
+    from datetime import timedelta, timezone
+
+    from cas_client.formatting import a_hora_local
+
+    origen = datetime(2026, 8, 13, 12, 0, tzinfo=timezone(timedelta(hours=5)))
+    assert a_hora_local(origen) == origen
+
+
+def test_fecha_hora_renders_the_local_wall_clock_of_a_utc_instant():
+    """La conversion no se puede fijar contra una hora literal (el resultado
+    depende de la zona de la maquina que corre el test), asi que se compara
+    contra la misma conversion hecha a mano -- lo que si se fija es que ya no
+    imprime el naive UTC crudo."""
+    from datetime import timezone
+
+    from cas_client.formatting import a_hora_local
+
+    instante = datetime(2026, 8, 13, 12, 0)
+    esperado = a_hora_local(instante).strftime("%d/%m/%Y %H:%M")
+    assert fecha_hora(instante) == esperado
+    assert fecha_hora(instante.replace(tzinfo=timezone.utc)) == esperado

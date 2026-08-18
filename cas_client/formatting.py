@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 # Formato de fecha que ve el usuario en toda la app (campos de formulario,
@@ -117,7 +117,34 @@ def fecha_a_iso(value: str) -> str:
     return text
 
 
+def a_hora_local(value: datetime) -> datetime:
+    """Converts an instant that came off the wire into the operator's own
+    local time.
+
+    Every datetime this client displays arrives as a protobuf Timestamp and is
+    unwrapped with `.ToDatetime()`, which returns a **naive datetime in UTC**
+    (the server stores everything as `datetime.now(timezone.utc)`). Printing
+    that value straight out showed the wrong hour everywhere it mattered: a
+    cashier opening the till at 08:00 in Paraguay (UTC-3) read "Caja abierta
+    el ... 12:00", the arqueo history disagreed with the clock on the wall,
+    and the same shifted hour was printed onto the Comprobante de Pago handed
+    to the borrower.
+
+    A naive value is therefore read as UTC -- which is what it is -- and an
+    already-aware one is converted from whatever zone it carries, so this is
+    safe to apply to either.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone()
+
+
 def fecha_hora(value: datetime) -> str:
     """Same display format as fecha(), plus the 24h clock time -- for the
-    datetime columns (e.g. último acceso in users_view)."""
-    return value.strftime(f"{DISPLAY_DATE_FORMAT} %H:%M")
+    datetime columns (e.g. último acceso in users_view, the caja's opening
+    time and movements).
+
+    The instant is shown in the operator's local time, not UTC: see
+    a_hora_local() for why that distinction is not cosmetic here.
+    """
+    return a_hora_local(value).strftime(f"{DISPLAY_DATE_FORMAT} %H:%M")

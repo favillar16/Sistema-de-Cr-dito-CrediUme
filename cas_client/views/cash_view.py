@@ -19,7 +19,6 @@ from PySide6.QtGui import QColor, QTextDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -49,11 +48,17 @@ from cas_client.rbac_ui import can_supervise_cash_sessions
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
 from cas_client.widgets.base_view import BaseView
-from cas_client.widgets.card import card, labeled_field, section_label, stat_tile
+from cas_client.widgets.card import (
+    card,
+    labeled_combo,
+    labeled_field,
+    section_label,
+    stat_tile,
+)
 from cas_client.widgets.currency_input import CurrencyInput
 from cas_client.widgets.form_input import FormInput
 from cas_client.widgets.responsive_grid import ResponsiveGrid
-from cas_client.widgets.table import size_columns, style_table
+from cas_client.widgets.table import set_empty_message, size_columns, style_table
 from cas_client.widgets.toast import Toast
 
 _MOVEMENT_HEADERS = ("Hora", "Tipo", "Concepto", "Monto (Gs)", "Origen")
@@ -318,6 +323,10 @@ class CashView(BaseView):
         self._client_table.cellClicked.connect(self._on_client_selected)
         self._client_table.setMaximumHeight(160)
         style_table(self._client_table)
+        set_empty_message(
+            self._client_table,
+            "Busque al cliente que está abonando para ver sus préstamos.",
+        )
         self._client_table.setVisible(False)
         layout.addWidget(self._client_table)
 
@@ -335,17 +344,15 @@ class CashView(BaseView):
         detail_layout.addWidget(self._selected_client_label)
 
         selectors = ResponsiveGrid(min_cell_width=240)
-        selectors.add_widget(
-            self._combo_field("Préstamo", "_loan_combo", self._on_loan_changed)
-        )
-        selectors.add_widget(
-            self._combo_field(
-                "Cuota a cobrar", "_installment_combo", self._on_installment_changed
-            )
-        )
-        selectors.add_widget(
-            self._combo_field("Medio de pago", "_method_combo", self._on_method_changed)
-        )
+        for caption, attribute, handler in (
+            ("Préstamo", "_loan_combo", self._on_loan_changed),
+            ("Cuota a cobrar", "_installment_combo", self._on_installment_changed),
+            ("Medio de pago", "_method_combo", self._on_method_changed),
+        ):
+            wrapper, combo = labeled_combo(caption)
+            combo.currentIndexChanged.connect(handler)
+            setattr(self, attribute, combo)
+            selectors.add_widget(wrapper)
         amount_field, self._collection_amount = labeled_field(
             "Monto a cobrar (Gs)", input_cls=CurrencyInput
         )
@@ -408,44 +415,13 @@ class CashView(BaseView):
 
         return frame
 
-    def _combo_field(self, caption_text: str, attr: str, on_change) -> QWidget:
-        """Un QComboBox con la misma leyenda pequeña que labeled_field() pone
-        sobre un FormInput -- card.py solo cubre inputs de texto, y esta
-        tarjeta mezcla los dos tipos de campo."""
-        wrapper = QWidget()
-        column = QVBoxLayout(wrapper)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(4)
-        caption = QLabel(caption_text)
-        caption.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600;"
-        )
-        column.addWidget(caption)
-        combo = QComboBox()
-        combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        combo.currentIndexChanged.connect(on_change)
-        column.addWidget(combo)
-        setattr(self, attr, combo)
-        return wrapper
-
     def _build_movement_card(self) -> QWidget:
         frame, layout = card()
 
         grid = ResponsiveGrid(min_cell_width=200)
-        tipo_wrapper = QWidget()
-        tipo_layout = QVBoxLayout(tipo_wrapper)
-        tipo_layout.setContentsMargins(0, 0, 0, 0)
-        tipo_layout.setSpacing(4)
-        tipo_caption = QLabel("Tipo")
-        tipo_caption.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600;"
-        )
-        tipo_layout.addWidget(tipo_caption)
-        self._movement_type = QComboBox()
+        tipo_wrapper, self._movement_type = labeled_combo("Tipo")
         for label, value in _MOVEMENT_TYPES:
             self._movement_type.addItem(label, value)
-        self._movement_type.setCursor(Qt.CursorShape.PointingHandCursor)
-        tipo_layout.addWidget(self._movement_type)
         grid.add_widget(tipo_wrapper)
 
         monto_field, self._movement_amount = labeled_field(
@@ -567,6 +543,10 @@ class CashView(BaseView):
             QAbstractItemView.SelectionBehavior.SelectRows
         )
         style_table(self._history_table)
+        set_empty_message(
+            self._history_table,
+            "Elija un rango de fechas y presione «Buscar arqueos».",
+        )
         layout.addWidget(self._history_table)
 
         return frame

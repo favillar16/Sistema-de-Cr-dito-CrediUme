@@ -6,7 +6,6 @@ from PySide6.QtGui import QColor, QTextDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -32,6 +31,7 @@ from cas_client.formatting import (
 )
 from cas_client.grpc_client import ApiError, ClientServiceClient, LoanServiceClient
 from cas_client.rbac_ui import (
+    can_delete_loan,
     can_edit_installment_amount,
     can_edit_interest_rate,
     can_originate_credit,
@@ -41,12 +41,18 @@ from cas_client.rbac_ui import (
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
 from cas_client.widgets.base_view import BaseView
-from cas_client.widgets.card import card, labeled_field, section_label, stat_tile
+from cas_client.widgets.card import (
+    card,
+    labeled_combo,
+    labeled_field,
+    section_label,
+    stat_tile,
+)
 from cas_client.widgets.currency_input import CurrencyInput
 from cas_client.widgets.form_input import FormInput
 from cas_client.widgets.responsive_grid import ResponsiveGrid
 from cas_client.widgets.scroll_area import wrap_scrollable
-from cas_client.widgets.table import size_columns, style_table
+from cas_client.widgets.table import set_empty_message, size_columns, style_table
 from cas_client.widgets.toast import Toast
 
 (
@@ -129,6 +135,13 @@ _PAYMENT_STATUS_LABEL = {
     "AL_DIA": "Al día",
     "CUOTA_VENCIDA": "Cuota vencida",
 }
+
+# BR-LOAN-012: estados desde los que el servidor acepta eliminar un préstamo.
+# Copia literal de _ESTADOS_ELIMINABLES en loan_service.py -- se mantiene a
+# mano, igual que rbac_ui.py replica los niveles de rbac.py: el servidor
+# vuelve a verificarlo, esto solo evita ofrecer un botón que respondería
+# FAILED_PRECONDITION.
+_DELETABLE_STATUSES = ("PENDING", "APPROVED", "EXPIRED")
 
 
 def _cuotas_texto_y_color(loan) -> tuple[str, str]:
@@ -296,6 +309,10 @@ class LoansView(BaseView):
             self._update_picker_buttons
         )
         style_table(self._client_results_table)
+        set_empty_message(
+            self._client_results_table,
+            "Busque un cliente por nombre o documento para ver sus préstamos.",
+        )
         search_section_layout.addWidget(self._client_results_table, stretch=1)
 
         picker_toolbar = QHBoxLayout()
@@ -341,6 +358,7 @@ class LoansView(BaseView):
         )
         self._loans_table.cellDoubleClicked.connect(self._on_row_activated)
         style_table(self._loans_table)
+        set_empty_message(self._loans_table, "Este cliente todavía no tiene préstamos.")
         loans_section_layout.addWidget(self._loans_table, stretch=1)
 
         layout.addWidget(self._loans_section, stretch=1)
@@ -384,6 +402,9 @@ class LoansView(BaseView):
             self._on_active_loan_row_activated
         )
         style_table(self._active_loans_table)
+        set_empty_message(
+            self._active_loans_table, "No hay préstamos activos en este momento."
+        )
         layout.addWidget(self._active_loans_table, stretch=1)
 
         return page
@@ -927,34 +948,53 @@ class LoansView(BaseView):
         # -- Tarjeta de acciones: ciclo de vida + registro de pago --
         actions_frame, actions_card = card()
         actions_card.addWidget(section_label("Acciones y cobro"))
-        actions = QHBoxLayout()
-        self._edit_proposal_button = QPushButton("Editar propuesta")
-        self._edit_proposal_button.setStyleSheet(theme.secondary_button_style())
-        self._edit_proposal_button.clicked.connect(self._show_edit_proposal_page)
-        actions.addWidget(self._edit_proposal_button)
+        # ResponsiveGrid y no un QHBoxLayout: con 6 botones en una fila fija,
+        # el ancho mínimo de esta tarjeta era 744px contra un viewport de
+        # 604px en la ventana mínima de la app (900x560, ver main_window.py), y
+        # wrap_scrollable() tiene el scroll horizontal desactivado a
+        # propósito -- así que "Registrar pago" y "Eliminar préstamo" quedaban
+        # literalmente fuera de la pantalla, sin forma de llegar a ellos. El
+        # grid reflota a menos columnas en vez de recortar.
+        actions = ResponsiveGrid(min_cell_width=150, spacing=8)
+        for attribute, label, handler in (
+            (
+                "_edit_proposal_button",
+                "Editar propuesta",
+                self._show_edit_proposal_page,
+            ),
+            ("_approve_button", "Aprobar", self._on_approve),
+            ("_disburse_button", "Desembolsar", self._on_disburse),
+            ("_default_button", "Marcar incumplido", self._on_mark_defaulted),
+            ("_schedule_button", "Ver cronograma", self._on_view_schedule),
+        ):
+            button = QPushButton(label)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(theme.secondary_button_style())
+            button.clicked.connect(handler)
+            setattr(self, attribute, button)
+            actions.add_widget(button)
+        actions_card.addWidget(actions)
 
-        self._approve_button = QPushButton("Aprobar")
-        self._approve_button.setStyleSheet(theme.secondary_button_style())
-        self._approve_button.clicked.connect(self._on_approve)
-        actions.addWidget(self._approve_button)
+        # BR-LOAN-012 va en su propia fila, alineada a la derecha, y no como
+        # una celda más del grid de arriba: es la única acción de la tarjeta
+        # que no se puede deshacer, y mezclarla entre las otras cinco (que en
+        # el grid además cambian de posición al reflotar) invitaría a errarle
+        # de botón.
+        delete_row = QHBoxLayout()
+        delete_row.addStretch()
+        self._delete_button = QPushButton("Eliminar préstamo")
+        self._delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._delete_button.setStyleSheet(theme.danger_button_style())
+        self._delete_button.setToolTip(
+            "Elimina definitivamente un préstamo cargado por error. Solo es "
+            "posible mientras no haya sido desembolsado ni tenga pagos."
+        )
+        self._delete_button.clicked.connect(self._on_delete_loan)
+        delete_row.addWidget(self._delete_button)
+        actions_card.addLayout(delete_row)
 
-        self._disburse_button = QPushButton("Desembolsar")
-        self._disburse_button.setStyleSheet(theme.secondary_button_style())
-        self._disburse_button.clicked.connect(self._on_disburse)
-        actions.addWidget(self._disburse_button)
-
-        self._default_button = QPushButton("Marcar incumplido")
-        self._default_button.setStyleSheet(theme.secondary_button_style())
-        self._default_button.clicked.connect(self._on_mark_defaulted)
-        actions.addWidget(self._default_button)
-
-        self._schedule_button = QPushButton("Ver cronograma")
-        self._schedule_button.setStyleSheet(theme.secondary_button_style())
-        self._schedule_button.clicked.connect(self._on_view_schedule)
-        actions.addWidget(self._schedule_button)
-        actions_card.addLayout(actions)
-
-        payment_row = QHBoxLayout()
+        # Misma razón que la fila de acciones: 5 controles fijos no entraban.
+        payment_row = ResponsiveGrid(min_cell_width=190, spacing=10)
 
         # BR-LOAN-010: el monto ya no se tipea libremente -- se elige la
         # cuota puntual que se está saldando y el monto sale fijo de ahí
@@ -962,66 +1002,59 @@ class LoansView(BaseView):
         # que el usuario vea antes de confirmar). La modificación real del
         # monto de una cuota sigue siendo exclusivamente vía "Ajustar" en
         # el cronograma (UpdateInstallmentAmount), no acá.
-        installment_column = QVBoxLayout()
-        installment_column.setContentsMargins(0, 0, 0, 0)
-        installment_column.setSpacing(4)
-        installment_caption = QLabel("Cuota a pagar")
-        installment_caption.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600;"
+        installment_field, self._payment_installment_combo = labeled_combo(
+            "Cuota a pagar"
         )
-        installment_column.addWidget(installment_caption)
-        self._payment_installment_combo = QComboBox()
         self._payment_installment_combo.currentIndexChanged.connect(
             self._on_payment_installment_changed
         )
-        installment_column.addWidget(self._payment_installment_combo)
-        payment_row.addLayout(installment_column, stretch=1)
+        payment_row.add_widget(installment_field)
 
         amount_field, self._payment_amount_display = labeled_field(
             "Monto a registrar (Gs)", input_cls=CurrencyInput
         )
         self._payment_amount_display.setReadOnly(True)
-        payment_row.addWidget(amount_field, stretch=1)
+        payment_row.add_widget(amount_field)
 
         # BR-CAJA-004: el efectivo volvió a ser un medio de cobro válido, y se
         # imputa a la caja abierta del operador. El campo de referencia solo
         # aplica al resto de los medios -- se deshabilita al elegir Efectivo
         # en vez de ocultarse, para que el usuario vea que el campo existe y
         # entienda por qué no se lo pide.
-        method_column = QVBoxLayout()
-        method_column.setContentsMargins(0, 0, 0, 0)
-        method_column.setSpacing(4)
-        method_caption = QLabel("Medio de pago")
-        method_caption.setStyleSheet(
-            f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600;"
+        method_field, self._payment_method_combo = labeled_combo("Medio de pago")
+        payment_row.add_widget(method_field)
+
+        reference_field, self._payment_reference_input = labeled_field(
+            "Código/número de transferencia"
         )
-        method_column.addWidget(method_caption)
-        self._payment_method_combo = QComboBox()
+        payment_row.add_widget(reference_field)
+
+        # Empty caption-height spacer keeps the button's top edge aligned with
+        # the labeled inputs beside it rather than sitting a row too high.
+        button_wrapper = QWidget()
+        button_column = QVBoxLayout(button_wrapper)
+        button_column.setContentsMargins(0, 0, 0, 0)
+        button_column.setSpacing(4)
+        button_column.addWidget(QLabel(""))
+        self._record_payment_button = QPushButton("Registrar pago")
+        self._record_payment_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Es la acción principal de la pantalla para el cobrador: va en el
+        # estilo de llamada a la acción, no en el mismo gris que "Aprobar" o
+        # "Ver cronograma". Antes se perdía entre otros cinco botones iguales.
+        self._record_payment_button.setStyleSheet(theme.accent_button_style())
+        self._record_payment_button.clicked.connect(self._on_record_payment)
+        button_column.addWidget(self._record_payment_button)
+        payment_row.add_widget(button_wrapper)
+        actions_card.addWidget(payment_row)
+
+        # Se puebla DESPUÉS de que existe el campo de referencia: el primer
+        # addItem() mueve el índice de -1 a 0 y dispara _on_payment_method_
+        # changed, que lo toca. Mismo orden (y mismo motivo) que en cash_view.
         for label, value in _PAYMENT_METHODS:
             self._payment_method_combo.addItem(label, value)
         self._payment_method_combo.currentIndexChanged.connect(
             self._on_payment_method_changed
         )
-        method_column.addWidget(self._payment_method_combo)
-        payment_row.addLayout(method_column, stretch=1)
-
-        reference_field, self._payment_reference_input = labeled_field(
-            "Código/número de transferencia"
-        )
-        payment_row.addWidget(reference_field, stretch=1)
-
-        # Empty caption-height spacer keeps the button's top edge aligned with
-        # the two labeled inputs beside it rather than sitting a row too high.
-        button_column = QVBoxLayout()
-        button_column.setContentsMargins(0, 0, 0, 0)
-        button_column.setSpacing(4)
-        button_column.addWidget(QLabel(""))
-        self._record_payment_button = QPushButton("Registrar pago")
-        self._record_payment_button.setStyleSheet(theme.secondary_button_style())
-        self._record_payment_button.clicked.connect(self._on_record_payment)
-        button_column.addWidget(self._record_payment_button)
-        payment_row.addLayout(button_column)
-        actions_card.addLayout(payment_row)
 
         payment_hint = QLabel(
             "Efectivo se cobra en ventanilla y se imputa a la caja abierta del "
@@ -1168,6 +1201,13 @@ class LoansView(BaseView):
         self._default_button.setEnabled(
             loan.status == "ACTIVE" and role_at_least(role, "CREDIT_ANALYST")
         )
+        # BR-LOAN-012. Se oculta (no se deshabilita) para quien no tiene el
+        # rol, misma convención que el ítem "Usuarios" del sidebar; para quien
+        # sí lo tiene queda visible pero deshabilitado en los estados no
+        # eliminables, para que se entienda que la acción existe y por qué no
+        # aplica a ESTE préstamo.
+        self._delete_button.setVisible(can_delete_loan(role))
+        self._delete_button.setEnabled(loan.status in _DELETABLE_STATUSES)
         can_pay = loan.status == "ACTIVE" and role_at_least(role, "CASHIER")
         self._record_payment_button.setEnabled(can_pay)
         self._payment_installment_combo.setEnabled(can_pay)
@@ -1230,6 +1270,76 @@ class LoansView(BaseView):
                 "Préstamo marcado como incumplido."
             ),
         )
+
+    def _on_delete_loan(self) -> None:
+        """BR-LOAN-012: eliminar un préstamo cargado por error.
+
+        Dos pasos a propósito -- una confirmación que dice exactamente qué se
+        va a borrar y que no se puede deshacer, y recién después el motivo,
+        que el servidor exige y que queda en el AuditLog como único rastro del
+        préstamo. Cancelar en cualquiera de los dos aborta sin llamar al
+        servidor.
+        """
+        if self._selected_loan_id is None or self._detail_loan is None:
+            return
+        loan = self._detail_loan
+        estado = _ESTADOS_LABEL.get(loan.status, loan.status)
+        confirm = QMessageBox.question(
+            self,
+            "Eliminar préstamo",
+            f"¿Eliminar definitivamente el préstamo {loan.id[:8]}… "
+            f"({estado}, capital {gs(loan.principal_amount)})?\n\n"
+            "Esta acción no se puede deshacer: el préstamo desaparece del "
+            "sistema y solo queda el registro de auditoría.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        motivo, ok = QInputDialog.getText(
+            self,
+            "Motivo de la eliminación",
+            "Indique por qué se elimina este préstamo (queda auditado):",
+        )
+        if not ok:
+            return
+        motivo = motivo.strip()
+        if not motivo:
+            self._toast.show_message(
+                "Debe indicar el motivo de la eliminación para continuar."
+            )
+            return
+
+        self._run_loan_action(
+            self._client.delete_loan,
+            self._selected_loan_id,
+            motivo,
+            on_success=self._on_loan_deleted,
+        )
+
+    def _on_loan_deleted(self, response) -> None:
+        """El préstamo ya no existe, así que no se puede recargar el detalle
+        como hace _on_action_success -- se vuelve a la lista del cliente, que
+        es donde tiene sentido quedar parado después de borrar. Se limpia
+        además todo el estado que apuntaba al préstamo borrado (incluido el
+        comprobante en memoria), para que ningún botón siga operando sobre un
+        id que ya no resuelve."""
+        self._selected_loan_id = None
+        self._detail_loan = None
+        self._last_payment = None
+        self._last_payment_loan_id = None
+        self._pending_schedule_after_create = False
+        self._toast.show_message("Préstamo eliminado.")
+        client_id = response.client_id or self._current_client_id
+        if client_id:
+            # Un préstamo eliminable nunca es ACTIVE, así que sólo se llega
+            # acá desde la lista de préstamos de un cliente -- pero se fuerza
+            # ese sub-estado igual en vez de darlo por sentado.
+            self._client_search_section.hide()
+            self._loans_section.show()
+            self._run_list(client_id)
+        self._stack.setCurrentIndex(_PAGE_SEARCH)
 
     def _load_pending_installments(self) -> None:
         """Puebla "Cuota a pagar" con las cuotas todavía no cubiertas

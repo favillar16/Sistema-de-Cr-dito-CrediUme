@@ -17,14 +17,14 @@ from PySide6.QtWidgets import (
 from cas_client import theme
 from cas_client.formatting import fecha_hora
 from cas_client.grpc_client import AuthClient, AuthError
-from cas_client.rbac_ui import can_manage_users
+from cas_client.rbac_ui import can_manage_users, tier_label
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
 from cas_client.widgets.base_view import BaseView
 from cas_client.widgets.card import card, labeled_field, section_label
 from cas_client.widgets.form_input import FormInput
 from cas_client.widgets.responsive_grid import ResponsiveGrid
-from cas_client.widgets.table import size_columns, style_table
+from cas_client.widgets.table import set_empty_message, size_columns, style_table
 from cas_client.widgets.toast import Toast
 
 _ROLES = ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN")
@@ -54,25 +54,6 @@ def _friendly_message(exc: Exception) -> str:
             return "No se pudo conectar con el servidor."
         return "Ocurrió un error inesperado. Intente nuevamente."
     return f"No se pudo conectar con el servidor: {exc}"
-
-
-def _combo_style() -> str:
-    # Mirrors FormInput's visual language (cas_client/widgets/form_input.py) --
-    # no QComboBox existed anywhere in this app before, so there was no
-    # existing style to reuse.
-    return f"""
-        QComboBox {{
-            border: 1px solid {theme.BORDER};
-            border-radius: 6px;
-            padding: 8px 10px;
-            font-size: 14px;
-            background: #FFFFFF;
-            color: {theme.TEXT_PRIMARY};
-        }}
-        QComboBox:focus {{
-            border: 1px solid {theme.PRIMARY};
-        }}
-    """
 
 
 class UsersView(BaseView):
@@ -125,8 +106,12 @@ class UsersView(BaseView):
         )
         role_layout.addWidget(role_caption)
         self._new_role = QComboBox()
-        self._new_role.addItems(_ROLES)
-        self._new_role.setStyleSheet(_combo_style())
+        # Se muestra la etiqueta de nivel y viaja el valor del enum como
+        # itemData -- el administrador elige "Agente de Créditos", no
+        # "MANAGER", que es un identificador interno del servidor.
+        for role_value in _ROLES:
+            self._new_role.addItem(tier_label(role_value), role_value)
+        self._new_role.setStyleSheet(theme.combo_box_style())
         role_layout.addWidget(self._new_role)
         grid.add_widget(role_wrapper)
         create_layout.addWidget(grid)
@@ -168,6 +153,7 @@ class UsersView(BaseView):
         )
         self._table.setColumnWidth(_COL_ACTION, probe.sizeHint().width() + 32)
         style_table(self._table)
+        set_empty_message(self._table, "Todavía no hay usuarios registrados.")
         self.content_layout.addWidget(self._table)
 
         self._toast = Toast(self)
@@ -220,7 +206,12 @@ class UsersView(BaseView):
                 full_name,
                 user.national_id or "-",
                 user.username,
-                user.role,
+                # El nombre del enum ("CREDIT_ANALYST") era lo único en toda la
+                # app que se mostraba crudo: el dashboard, el header y el
+                # formulario de abajo hablan de "Estándar"/"Agente de
+                # Créditos", así que la tabla contradecía al resto de la UI
+                # justo donde el administrador decide qué nivel asignar.
+                tier_label(user.role),
                 "Bloqueado" if user.is_locked else "Activo",
                 last_login,
             )
@@ -246,7 +237,7 @@ class UsersView(BaseView):
     def _on_create_submit(self) -> None:
         username = self._new_username.text().strip()
         password = self._new_password.text()
-        role = self._new_role.currentText()
+        role = self._new_role.currentData()
         first_name = self._new_first_name.text().strip()
         last_name = self._new_last_name.text().strip()
         national_id = self._new_national_id.text().strip()

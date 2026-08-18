@@ -10,7 +10,13 @@ import sys
 # before QApplication is constructed). QStyleHints.setColorScheme() would be
 # the newer API for this but isn't available before Qt 6.8 (this project
 # pins PySide6 6.7).
-os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
+#
+# Condicionado a win32 y a que nadie lo haya fijado ya: forzar el plugin
+# "windows" en otra plataforma impide que Qt arranque, y pisar un valor
+# explícito rompe el renderizado sin ventana (QT_QPA_PLATFORM=offscreen) que
+# se usa para revisar las vistas. Antes se asignaba de forma incondicional.
+if sys.platform == "win32" and not os.environ.get("QT_QPA_PLATFORM"):
+    os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
 
 from PySide6.QtGui import QIcon  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402

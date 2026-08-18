@@ -54,6 +54,11 @@ def serve() -> None:
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=10),
         interceptors=[AuthInterceptor()],
+        # Keepalive HTTP/2: mantiene viva la conexión ociosa con los clientes
+        # de la LAN y, sobre todo, acepta los pings que ellos mandan. Sin
+        # esto el servidor cortaría por ENHANCE_YOUR_CALM al cliente que
+        # intenta mantener la conexión abierta -- ver config.py.
+        options=config.grpc_keepalive_options(),
     )
     auth_service_pb2_grpc.add_AuthServiceServicer_to_server(AuthServicer(), server)
     client_service_pb2_grpc.add_ClientServiceServicer_to_server(

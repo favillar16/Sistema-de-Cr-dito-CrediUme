@@ -6,6 +6,16 @@ from PySide6.QtCore import QObject, Signal
 # again on the login screen once the app returns to it.
 SESSION_EXPIRED_MESSAGE = "Su sesión expiró. Vuelva a iniciar sesión."
 
+# El servidor no contestó -- se cortó el enlace con el PC servidor, o está
+# apagado. Mensaje único (vía AsyncWorker) para UNAVAILABLE y
+# DEADLINE_EXCEEDED: son el mismo hecho para el operador. Dice explícitamente
+# que la operación NO quedó registrada, porque la duda real de un cajero al
+# que le falla un cobro es si tiene que volver a cobrarlo o si lo duplicaría.
+CONNECTION_LOST_MESSAGE = (
+    "Sin conexión con el servidor. La operación no se registró: "
+    "verifique la red e intente nuevamente."
+)
+
 
 class _SessionEvents(QObject):
     """App-wide notifier for "the token this client holds is no longer usable".

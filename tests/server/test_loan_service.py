@@ -1063,3 +1063,33 @@ def test_record_payment_without_credentials_leaves_operator_fields_empty(service
     )
     assert response.recorded_by_name == ""
     assert response.recorded_by_national_id == ""
+
+
+def test_update_loan_proposal_reports_a_client_without_declared_income(servicer):
+    """Antes de la verificación explícita esto reventaba con `None * Decimal`
+    al calcular el tope del 40%, y la RPC contestaba UNKNOWN -- que la vista
+    traduce a "Ocurrió un error inesperado", sin decirle al operador que lo
+    que falta es el ingreso declarado del cliente.
+
+    El ingreso se borra después de crear el préstamo porque CreateLoan ya
+    exige tenerlo: la propuesta sobrevive a que la ficha del cliente quede
+    incompleta, y es ahí donde la validación faltaba.
+    """
+    client_id = _create_client()
+    loan = _create_loan(servicer, client_id)
+    with SessionLocal() as session:
+        session.get(Client, client_id).declared_monthly_income = None
+        session.commit()
+
+    with pytest.raises(AbortCalled) as exc_info:
+        servicer.UpdateLoanProposal(
+            loan_service_pb2.UpdateLoanProposalRequest(
+                loan_id=loan.loan_id,
+                principal_amount="1500.00",
+                term_months=9,
+                first_due_date="2026-10-01",
+            ),
+            FakeContext(),
+        )
+    assert exc_info.value.code == grpc.StatusCode.FAILED_PRECONDITION
+    assert "ingresos declarados" in exc_info.value.message

@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
@@ -156,6 +157,46 @@ def stat_tile(
     value.setStyleSheet(f"color: {theme.PRIMARY}; font-size: 20px; font-weight: 700;")
     layout.addWidget(value)
     return frame, value
+
+
+def labeled_combo(label_text: str) -> tuple[QWidget, QComboBox]:
+    """labeled_field()'s counterpart for a picker instead of a text input.
+
+    Promoted from cash_view.py's private `_combo_field()` once loans_view.py's
+    detail page became a second caller needing the same caption-above-control
+    pairing (same promotion rule this module's own header describes). Applying
+    theme.combo_box_style() here is what makes it structural rather than a
+    convention: a combo built through this helper cannot be left unstyled.
+    """
+    wrapper = QWidget()
+    layout = QVBoxLayout(wrapper)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
+    caption = QLabel(label_text)
+    caption.setStyleSheet(
+        f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600;"
+    )
+    layout.addWidget(caption)
+    combo = QComboBox()
+    combo.setCursor(Qt.CursorShape.PointingHandCursor)
+    combo.setStyleSheet(theme.combo_box_style())
+    # Sin esto el combo crece hasta el ancho de su ítem más largo y arrastra
+    # toda la fila con él -- las etiquetas de cuota ("Cuota 3 · Vence
+    # 10/12/2026 · 950.000 Gs") son largas, y era parte de por qué la fila de
+    # cobro no entraba en la ventana. Con el texto elidido, el combo se adapta
+    # a la celda y el valor completo sigue estando en el desplegable.
+    combo.setSizeAdjustPolicy(
+        QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+    )
+    combo.setMinimumContentsLength(10)
+    # El texto elidido queda recuperable al pasar el mouse. Importa en la fila
+    # de cobro: la etiqueta de la cuota lleva el vencimiento y el monto, y el
+    # operador tiene que poder confirmar cuál eligió sin abrir el desplegable.
+    combo.currentIndexChanged.connect(
+        lambda _index, c=combo: c.setToolTip(c.currentText())
+    )
+    layout.addWidget(combo)
+    return wrapper, combo
 
 
 def labeled_field(

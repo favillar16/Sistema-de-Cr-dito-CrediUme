@@ -19,7 +19,7 @@ Sin dependencia de Qt: documents.py solo arma HTML como string.
 import re
 from html import unescape
 
-from cas_client import documents
+from cas_client import documents, formatting
 
 
 def test_company_identity_matches_the_dnit_registration():
@@ -262,7 +262,19 @@ def test_comprobante_shows_amount_installments_and_operator():
     assert "Cuota(s) 1,2 de 18" in html  # cuotas que corresponden
     assert "Ana Benítez (C.I. 4123456)" in html
     assert "TRF-99887" in html
-    assert "13/08/2026 14:30" in html  # fecha en DD/MM/AAAA
+
+
+def test_comprobante_prints_the_payment_hour_in_local_time_not_utc():
+    """`paid_at.ToDatetime()` devuelve un naive **en UTC**: el comprobante que
+    el deudor se lleva impreso tiene que decir la hora a la que pagó, no su
+    equivalente en UTC. La hora esperada se deriva con el mismo helper (el
+    resultado depende de la zona de la máquina que corre el test); lo que se
+    fija acá es que ya no se imprime el naive crudo, salvo que la máquina
+    justamente esté en UTC."""
+    html = documents.comprobante_pago_html(_FakeLoan, _FakeClient, _FakePayment)
+    esperado = formatting.fecha_hora(_FakePayment.paid_at.ToDatetime())
+    assert esperado in html
+    assert esperado.startswith("13/08/2026") or esperado.startswith("14/08/2026")
 
 
 def test_comprobante_has_no_draft_banner():

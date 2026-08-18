@@ -26,8 +26,19 @@ def _friendly_message(exc: AuthError) -> str:
         return "Usuario o contraseña incorrectos, o la cuenta está bloqueada."
     if exc.code == grpc.StatusCode.INVALID_ARGUMENT:
         return "Debe ingresar usuario y contraseña."
-    if exc.code == grpc.StatusCode.UNAVAILABLE:
-        return "No se pudo conectar con el servidor."
+    if exc.code in (
+        grpc.StatusCode.UNAVAILABLE,
+        # Posible desde que las llamadas llevan plazo (grpc_client._invoke).
+        # LoginView tiene su propio worker y no pasa por AsyncWorker, así que
+        # esta rama no la cubre el manejo centralizado de allá -- es la misma
+        # excepción deliberada que ya existe para UNAUTHENTICATED, que acá
+        # significa "credenciales incorrectas" y no "sesión vencida".
+        grpc.StatusCode.DEADLINE_EXCEEDED,
+    ):
+        return (
+            "No se pudo conectar con el servidor. Verifique que el equipo "
+            "servidor esté encendido y conectado a la red."
+        )
     return "Ocurrió un error al iniciar sesión. Intente nuevamente."
 
 

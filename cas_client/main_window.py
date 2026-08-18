@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from cas_client import assets, theme
+from cas_client.connection_status import ConnectionMonitor
 from cas_client.grpc_client import (
     AuthClient,
     AuthError,
@@ -197,6 +198,7 @@ class _AppShellView(QWidget):
 
         self._header_bar = HeaderBar()
         self._header_bar.logout_requested.connect(on_logout)
+        self.set_connected = self._header_bar.set_connected
 
         self._content_stack = QStackedWidget()
         self._content_stack.setStyleSheet(f"background-color: {theme.APP_BACKGROUND};")
@@ -299,6 +301,14 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentWidget(self._login_view)
 
         session_events.expired.connect(self._on_session_expired)
+
+        # Enlace con el servidor, observado en vivo sobre el canal de Auth
+        # (los cinco canales van al mismo host, así que comparten suerte --
+        # ver connection_status.py). Se guarda la referencia porque el monitor
+        # tiene que sobrevivir a este constructor: es quien mantiene viva la
+        # suscripción al canal.
+        self._connection_monitor = ConnectionMonitor(self._auth_client.channel)
+        self._connection_monitor.changed.connect(self._shell_view.set_connected)
 
     def _on_login_succeeded(
         self, username: str, token: str, role: str, expires_in: int

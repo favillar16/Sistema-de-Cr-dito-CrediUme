@@ -26,7 +26,13 @@ and tests/client/test_documents_identity.py guards them against a silent
 revert, the same way it guards the legal identity."""
 
 from cas_client import assets, theme
-from cas_client.formatting import fecha, gs, rate_percent, rate_percent_mensual
+from cas_client.formatting import (
+    fecha,
+    fecha_hora,
+    gs,
+    rate_percent,
+    rate_percent_mensual,
+)
 
 # Datos reales de la entidad, según su inscripción ante la DNIT. Estos ya no
 # son placeholders: reemplazan al nombre/RUC de relleno que traía el header de
@@ -433,7 +439,10 @@ def comprobante_pago_html(loan, client, payment) -> str:
     registrado_por = responsable(
         payment.recorded_by_name, payment.recorded_by_national_id
     )
-    fecha_pago = payment.paid_at.ToDatetime().strftime("%d/%m/%Y %H:%M")
+    # fecha_hora() y no un strftime propio: paid_at llega como un naive UTC
+    # (Timestamp.ToDatetime()), y un comprobante que el deudor se lleva impreso
+    # tiene que decir la hora a la que pagó, no su equivalente en UTC.
+    fecha_pago = fecha_hora(payment.paid_at.ToDatetime())
     medio_filas = "".join(
         f'<tr><td>{concepto}</td><td align="right">{detalle}</td></tr>'
         for concepto, detalle in filas_medio_de_pago(payment)

@@ -108,3 +108,64 @@ def accent_button_style(*, padding: str = "8px 14px") -> str:
         f"QPushButton:hover {{ background-color: {ACCENT_HOVER}; }}"
         f"QPushButton:pressed {{ background-color: {ACCENT_PRESSED}; }}"
     )
+
+
+def combo_box_style() -> str:
+    """Shared stylesheet for every QComboBox in the app.
+
+    Promoted out of users_view.py's private `_combo_style()` once loans_view
+    and cash_view turned out to be building bare, unstyled `QComboBox()`
+    widgets -- the "Cuota a pagar" / "Medio de pago" pickers on the loan
+    detail page and the three selectors on the caja's collection card. An
+    unstyled combo takes the *system* palette rather than this app's, which is
+    the same trap `flat_button_style()` documents: on a Windows machine set to
+    dark mode it renders light text on a dark field, sitting inside one of
+    this app's white cards. `main.py` disables Qt's dark adaptation globally,
+    so those combos are legible today -- but they were relying on that one
+    env-var workaround rather than on any styling of their own, which is a
+    thin thread for the most-used control on the cashier's screen.
+
+    Pinning the colors here also makes the drop-down list itself match: an
+    unstyled QAbstractItemView popup is the other half a user actually reads.
+    """
+    return (
+        "QComboBox { "
+        f"border: 1px solid {BORDER}; border-radius: 6px; padding: 8px 10px; "
+        f"font-size: 14px; background: #FFFFFF; color: {TEXT_PRIMARY}; "
+        f"font-family: {BODY_FONT_FAMILY}; "
+        "}"
+        f"QComboBox:focus {{ border: 1px solid {PRIMARY}; }}"
+        f"QComboBox:hover {{ border: 1px solid {PRIMARY}; }}"
+        f"QComboBox:disabled {{ background: {APP_BACKGROUND}; color: {TEXT_MUTED}; }}"
+        "QComboBox::drop-down { border: none; width: 22px; }"
+        # La lista desplegable es un widget aparte y no hereda lo de arriba --
+        # sin esto queda con la paleta del sistema aunque el campo cerrado se
+        # vea bien, que es justo el caso que confunde al usuario.
+        "QComboBox QAbstractItemView { "
+        f"background: #FFFFFF; color: {TEXT_PRIMARY}; "
+        f"border: 1px solid {BORDER}; outline: none; "
+        f"selection-background-color: {PRIMARY}; selection-color: white; "
+        "}"
+    )
+
+
+def danger_button_style(*, padding: str = "8px 14px") -> str:
+    """Shared stylesheet for destructive actions (hoy solo "Eliminar
+    préstamo", BR-LOAN-012). Deliberadamente NO es un tercer botón lleno de
+    color como accent_button_style(): un borde y un texto rojos sobre el mismo
+    fondo claro de secondary_button_style() lo distinguen sin competir con la
+    llamada a la acción principal de la pantalla, que es lo que el usuario
+    debería estar apretando casi siempre. Se rellena en rojo solo al pasar por
+    encima, cuando ya es una intención y no un accidente."""
+    return (
+        "QPushButton { "
+        f"background-color: {APP_BACKGROUND}; color: {ERROR}; "
+        f"border: 1px solid {ERROR}; border-radius: 6px; "
+        f"padding: {padding}; font-weight: 600; "
+        f"font-family: {BODY_FONT_FAMILY}; "
+        "}"
+        f"QPushButton:hover {{ background-color: {ERROR}; color: white; }}"
+        f"QPushButton:pressed {{ background-color: #962D21; color: white; }}"
+        f"QPushButton:disabled {{ color: {TEXT_MUTED}; background-color: {APP_BACKGROUND}; "
+        f"border: 1px solid {BORDER}; }}"
+    )
