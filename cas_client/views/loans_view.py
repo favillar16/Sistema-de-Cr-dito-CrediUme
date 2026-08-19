@@ -260,20 +260,39 @@ class LoansView(BaseView):
         self._search_title.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         layout.addWidget(self._search_title)
 
-        top_toolbar = QHBoxLayout()
+        # Dos filas de 2 controles y no una sola de 4: un QHBoxLayout fijo con
+        # 4 controles deja que el campo de búsqueda absorba toda la
+        # compresión (es el único con stretch), y wrap_scrollable() tiene el
+        # scroll horizontal desactivado a propósito. Con las fuentes de esta
+        # máquina todavía entraba, pero HEADING_FONT_FAMILY/BODY_FONT_FAMILY
+        # no se empaquetan con la app (ver theme.py): en un equipo sin
+        # Comfortaa/Inter las métricas del fallback son más anchas y el
+        # campo se angosta hasta quedar inservible.
+        #
+        # Tampoco es un ResponsiveGrid único de 4 celdas como en la página de
+        # detalle: ahí son todos botones y reparten el ancho por igual, pero
+        # acá eso le pondría un techo de ~1/4 del ancho al campo de búsqueda,
+        # que hoy se estira a todo lo que sobra.
+        search_row = QHBoxLayout()
         self._client_search_input = FormInput("Buscar cliente por nombre o documento")
         self._client_search_input.returnPressed.connect(self._on_client_search_submit)
-        top_toolbar.addWidget(self._client_search_input, stretch=1)
+        search_row.addWidget(self._client_search_input, stretch=1)
 
         client_search_button = QPushButton("Buscar cliente")
         client_search_button.setStyleSheet(theme.secondary_button_style())
         client_search_button.clicked.connect(self._on_client_search_submit)
-        top_toolbar.addWidget(client_search_button)
+        search_row.addWidget(client_search_button)
+        layout.addLayout(search_row)
+
+        # Misma idea que delete_row en la página de detalle: alineados a la
+        # derecha y a su tamaño natural, sin estirarse.
+        toolbar_row = QHBoxLayout()
+        toolbar_row.addStretch()
 
         active_loans_button = QPushButton("Ver préstamos activos")
         active_loans_button.setStyleSheet(theme.secondary_button_style())
         active_loans_button.clicked.connect(self._show_active_loans_page)
-        top_toolbar.addWidget(active_loans_button)
+        toolbar_row.addWidget(active_loans_button)
 
         # BR-CAJA-005: originar un crédito pasó a CREDIT_ANALYST_AND_ABOVE.
         # La visibilidad real la fija apply_role(), que MainWindow llama al
@@ -281,8 +300,8 @@ class LoansView(BaseView):
         self._new_button = QPushButton("Nuevo préstamo")
         self._new_button.setStyleSheet(theme.accent_button_style())
         self._new_button.clicked.connect(self._show_create_page)
-        top_toolbar.addWidget(self._new_button)
-        layout.addLayout(top_toolbar)
+        toolbar_row.addWidget(self._new_button)
+        layout.addLayout(toolbar_row)
 
         # ---- Sub-estado 1: elegir cliente -----------------------------
         self._client_search_section = QWidget()
