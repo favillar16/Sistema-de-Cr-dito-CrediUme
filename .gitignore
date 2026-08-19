@@ -40,3 +40,6 @@ Thumbs.db
 # as a structural reference for cas_client/documents.py, never published.
 docs/contrato.pdf
 docs/pagare credi ume.docx
+
+# Respaldos de base de datos (pg_dump) -- contienen datos reales de clientes
+backups/
