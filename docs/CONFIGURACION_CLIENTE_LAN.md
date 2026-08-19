@@ -57,8 +57,11 @@ GRPC_TLS_CA_FILE=C:\ruta\al\repo\certs\server.crt
 la ruta **absoluta** de esta PC (p. ej.
 `C:\Users\Usuario\CAS_client\certs\server.crt`): una ruta relativa se
 resolvería contra el directorio de trabajo, que no siempre es la raíz del
-repo. Si `GRPC_TLS_CA_FILE` queda vacío, el cliente conecta **sin TLS** y el
-servidor va a rechazar el handshake.
+repo. Si `GRPC_TLS_CA_FILE` queda vacío o apunta a un archivo que no existe
+en esta PC, la app **no arranca**: muestra un diálogo nombrando la variable o
+la ruta a corregir. Antes se conectaba **sin TLS** en silencio, el servidor
+rechazaba el handshake y el operador solo veía "No se pudo conectar con el
+servidor", indistinguible de un servidor apagado.
 
 Se usa el **nombre de red** del servidor (`DESKTOP-5H7BABS`) en vez de su
 IP: la IP LAN se asigna por DHCP y puede cambiar, mientras que el nombre no.
@@ -73,20 +76,29 @@ robusto que NetBIOS/LLMNR: no depende de que el perfil de red de Windows
 esté en "Privado" ni del descubrimiento de red, y se actualiza solo si la
 IP del servidor cambia.
 
-Antes de abrir la app, conviene confirmar que el cliente llega al servidor.
+Antes de abrir la app, correr el diagnóstico desde la raíz del repo con el
+venv activado:
+
+```bash
+python scripts/diagnostico_cliente.py
+```
+
+Revisa en orden la configuración, la resolución del nombre, el puerto TCP, el
+handshake TLS y un RPC real (`Login` con un usuario inexistente, que debe
+contestar `UNAUTHENTICATED` — eso prueba que además del socket responden el
+interceptor, el servicio y Postgres). Cada punto imprime `[OK]`/`[FALLA]` y,
+cuando falla, qué corregir. No pide credenciales ni escribe en la base.
+
 **No usar `ping` para esto**: en la PC cliente ya verificada, `ping
 DESKTOP-5H7BABS` agota el tiempo de espera (resuelve por mDNS a una
 dirección IPv6 de vínculo local, y el Firewall de Windows del servidor
 descarta ICMP) mientras la aplicación funciona perfectamente. El `ping` mide
-ICMP; lo que importa es TCP al puerto 50051. La comprobación correcta es:
+ICMP; lo que importa es TCP al puerto 50051, que es lo que mide el punto 3
+del diagnóstico.
 
-```bash
-python -c "import socket; s=socket.create_connection(('DESKTOP-5H7BABS',50051),timeout=8); print('OK ->', s.getpeername())"
-```
-
-Si eso devuelve `OK`, la app va a conectar. Si falla, revisar en este orden:
-el servidor está encendido y `cas_server` corriendo, la regla de Firewall
-para el puerto TCP 50051, y por último la resolución del nombre.
+Si el diagnóstico falla, revisar en este orden: el servidor está encendido y
+`cas_server` corriendo, la regla de Firewall para el puerto TCP 50051, y por
+último la resolución del nombre.
 
 Como respaldo, si el nombre no resuelve (red distinta, router sin DNS
 propio), se puede poner la IP LAN del servidor en `GRPC_SERVER_HOST` -- con

@@ -13,6 +13,17 @@ GRPC_PORT = int(os.environ.get("GRPC_PORT", "50051"))
 # server's own cert, if self-signed) to trust the server's identity over
 # TLS -- see cas_client/grpc_client.py's _create_channel().
 GRPC_TLS_CA_FILE = os.environ.get("GRPC_TLS_CA_FILE")
+# Escape hatch para desarrollo contra un servidor remoto SIN TLS. Por defecto
+# (sin definir) el cliente se niega a hablar en texto plano con un host que no
+# sea local, en vez de degradarse en silencio y fallar después como si fuera un
+# problema de red -- ver _create_channel() en grpc_client.py.
+GRPC_ALLOW_INSECURE = os.environ.get("GRPC_ALLOW_INSECURE", "").strip().lower() in {
+    "1",
+    "true",
+    "si",
+    "sí",
+    "yes",
+}
 # Optional, only needed if the server requires mutual TLS
 # (GRPC_TLS_CLIENT_CA_FILE set on the server) -- this client's own
 # certificate/key to present back to the server.

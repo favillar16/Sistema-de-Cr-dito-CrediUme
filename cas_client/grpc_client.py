@@ -16,6 +16,21 @@ import loan_service_pb2_grpc
 from cas_client import config
 
 
+class ConfigurationError(Exception):
+    """El cliente está mal configurado para hablar con este servidor -- se
+    detecta al construir el canal, antes de que salga ningún RPC.
+
+    Existe porque el modo de falla anterior era invisible: si GRPC_TLS_CA_FILE
+    quedaba vacío o con una ruta equivocada en cas_client/.env, _create_channel
+    abría un canal *inseguro* sin avisar, el servidor (que sí exige TLS)
+    rechazaba el handshake -- deja rastro en logs/server.log como
+    "SSL_ERROR_SSL: WRONG_VERSION_NUMBER" -- y al operador le llegaba el
+    genérico "No se pudo conectar con el servidor", indistinguible de un
+    servidor apagado o de un problema de red. main.py lo traduce a un diálogo
+    que nombra el archivo o la variable que hay que corregir.
+    """
+
+
 class AuthError(Exception):
     def __init__(self, code: grpc.StatusCode, message: str):
         super().__init__(message)
@@ -102,6 +117,10 @@ def _ssl_channel_credentials() -> grpc.ChannelCredentials:
     )
 
 
+def _es_host_local(host: str) -> bool:
+    return host.lower() in {"localhost", "127.0.0.1", "::1"}
+
+
 def _create_channel(target: str) -> grpc.Channel:
     """Secure channel when GRPC_TLS_CA_FILE is configured (trusting that CA
     -- or the server's own cert, if self-signed -- to verify the server's
@@ -109,10 +128,44 @@ def _create_channel(target: str) -> grpc.Channel:
     TLS; every *ServiceClient below goes through this instead of calling
     grpc.insecure_channel directly, so all five stay in sync automatically --
     including the keepalive options, which only work if every channel gets
-    them. See cas_client/.env.example for the GRPC_TLS_* variables."""
+    them. See cas_client/.env.example for the GRPC_TLS_* variables.
+
+    Las dos comprobaciones de abajo convierten en error de configuración
+    explícito lo que antes era una degradación silenciosa a texto plano
+    (ver ConfigurationError): un certificado mal apuntado, o un
+    GRPC_TLS_CA_FILE vacío contra un servidor remoto, terminaban siempre en
+    el mismo "No se pudo conectar con el servidor" del lado del operador.
+    """
+    host = target.rsplit(":", 1)[0]
     options = _channel_options()
+
     if not config.GRPC_TLS_CA_FILE:
+        if not _es_host_local(host) and not config.GRPC_ALLOW_INSECURE:
+            raise ConfigurationError(
+                f"Falta GRPC_TLS_CA_FILE en cas_client/.env: sin esa variable "
+                f"el cliente intentaría conectarse a {host} sin cifrado y el "
+                f"servidor rechaza el handshake. Copie el archivo "
+                f"certs\\server.crt de la PC servidor a esta PC y apunte "
+                f"GRPC_TLS_CA_FILE a esa copia."
+            )
         return grpc.insecure_channel(target, options=options)
+
+    if not Path(config.GRPC_TLS_CA_FILE).is_file():
+        raise ConfigurationError(
+            f"GRPC_TLS_CA_FILE apunta a un archivo que no existe en esta PC: "
+            f"{config.GRPC_TLS_CA_FILE}. Copie certs\\server.crt de la PC "
+            f"servidor y corrija la ruta en cas_client/.env."
+        )
+
+    for variable, ruta in (
+        ("GRPC_TLS_CLIENT_CERT_FILE", config.GRPC_TLS_CLIENT_CERT_FILE),
+        ("GRPC_TLS_CLIENT_KEY_FILE", config.GRPC_TLS_CLIENT_KEY_FILE),
+    ):
+        if ruta and not Path(ruta).is_file():
+            raise ConfigurationError(
+                f"{variable} apunta a un archivo que no existe en esta PC: "
+                f"{ruta}. Corrija la ruta en cas_client/.env."
+            )
 
     return grpc.secure_channel(target, _ssl_channel_credentials(), options=options)
 

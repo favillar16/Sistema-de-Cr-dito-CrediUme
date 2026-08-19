@@ -19,9 +19,10 @@ if sys.platform == "win32" and not os.environ.get("QT_QPA_PLATFORM"):
     os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
 
 from PySide6.QtGui import QIcon  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
-from cas_client import assets, theme  # noqa: E402
+from cas_client import assets, config, theme  # noqa: E402
+from cas_client.grpc_client import ConfigurationError  # noqa: E402
 from cas_client.main_window import MainWindow  # noqa: E402
 
 # Launched via `python -m cas_client.main` (ES-004's bare-metal deployment
@@ -58,7 +59,21 @@ def main() -> None:
         f"QMessageBox QPushButton:hover {{ background-color: white; "
         f"border: 1px solid {theme.PRIMARY}; color: {theme.PRIMARY}; }}"
     )
-    window = MainWindow()
+    try:
+        window = MainWindow()
+    except ConfigurationError as exc:
+        # MainWindow construye los cuatro *ServiceClient (y por lo tanto los
+        # canales) antes de mostrar nada, así que un error de configuración
+        # aparece acá, no dentro de una vista con su Toast. Sin este diálogo
+        # el operador vería un traceback en una consola que el .vbs de
+        # arranque ni siquiera abre.
+        QMessageBox.critical(
+            None,
+            "Configuración del cliente",
+            f"{exc}\n\nArchivo de configuración: cas_client\\.env\n"
+            f"Servidor configurado: {config.GRPC_SERVER_HOST}:{config.GRPC_PORT}",
+        )
+        sys.exit(1)
     window.show()
     sys.exit(app.exec())
 
