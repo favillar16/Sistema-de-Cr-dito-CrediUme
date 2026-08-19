@@ -58,9 +58,16 @@ Regenerate gRPC stubs after editing any `protos/*.proto` file (writes into both 
 python scripts/generate_protos.py
 ```
 
-Run the server (binds `GRPC_HOST:GRPC_PORT` from `cas_server/.env`, insecure port — TLS is deferred):
+Run the server **in development** (binds `GRPC_HOST:GRPC_PORT` from `cas_server/.env`; TLS is active whenever `GRPC_TLS_CERT_FILE`/`GRPC_TLS_KEY_FILE` are set, which they are on the deployment machine — the "TLS is deferred" note that used to sit here is obsolete):
 ```bash
 python -m cas_server.server
+```
+
+**On the deployment machine, do not run that command.** `cas_server` is a Windows service there (`CASServer`, see "Deployment model" below); a second process would lose the race for port 50051 and die. Operate it from an elevated PowerShell instead:
+```powershell
+Get-Service CASServer
+Stop-Service CASServer
+Start-Service CASServer
 ```
 
 Run the client:
@@ -174,7 +181,7 @@ Domain rules live in `specs/` and are authoritative for business logic — read 
 
 ## Deployment model (docs/ES-004)
 
-Bare-metal LAN deployment, no containers: one machine runs both `cas_server` and a client; others connect over the local subnet. PostgreSQL and `cas_server` run as native OS services (e.g. NSSM on Windows). Config is via `.env` files — `cas_server/.env` (`POSTGRES_*`, `GRPC_HOST`, `GRPC_PORT`, `JWT_SECRET_KEY`, all required except host/port which default) and `cas_client/.env` (`GRPC_SERVER_HOST`, `GRPC_PORT`). `.env.example` at repo root documents the full var set; per-package `.env.example` files show what each side actually reads.
+Bare-metal LAN deployment, no containers: one machine runs both `cas_server` and a client; others connect over the local subnet. PostgreSQL and `cas_server` run as native OS services — as of 2026-08-19 this is no longer aspirational, `cas_server` really is an NSSM-wrapped Windows service (see the `CASServer` bullet below). Config is via `.env` files — `cas_server/.env` (`POSTGRES_*`, `GRPC_HOST`, `GRPC_PORT`, `JWT_SECRET_KEY`, all required except host/port which default) and `cas_client/.env` (`GRPC_SERVER_HOST`, `GRPC_PORT`). `.env.example` at repo root documents the full var set; per-package `.env.example` files show what each side actually reads.
 
 **This session stood up the first real LAN deployment** (server machine hostname `DESKTOP-5H7BABS`) and confirmed a second PC could connect end-to-end, closing out item 2 from "Recommendations for the next session" below (TLS was previously opt-in/off by default; it's now actually turned on for this deployment):
 - `cas_server/.env` has `GRPC_HOST=0.0.0.0` and `GRPC_TLS_CERT_FILE`/`GRPC_TLS_KEY_FILE` pointing at `certs/server.crt`/`certs/server.key` (self-signed via `certs/openssl.cnf`, valid until 2036) — the server binds the secure port, not the insecure fallback.
@@ -182,7 +189,8 @@ Bare-metal LAN deployment, no containers: one machine runs both `cas_server` and
 - **Client PCs connect by the server's hostname (`DESKTOP-5H7BABS`), not its LAN IP.** The IP is DHCP-assigned with a 24h lease and isn't reserved on the router, so it can change and would break both the TLS certificate's Subject Alternative Name and every client's `GRPC_SERVER_HOST` at once. The hostname resolves without any DNS server of our own — **and the mechanism is the router's DNS, not NetBIOS/LLMNR as originally assumed here**: `192.168.100.1` registers the hostnames it hands out over DHCP, verified this session with `Resolve-DnsName DESKTOP-5H7BABS -Server 192.168.100.1`. That is why resolution keeps working with Windows' network profile set to "Público" (which disables LLMNR/NetBIOS discovery) and why it self-heals when the server's lease changes its IP. `certs/openssl.cnf`'s `alt_names` now includes `DNS.2 = DESKTOP-5H7BABS` alongside the pre-existing `localhost`/IP entries so TLS hostname verification passes; `cas_client/.env.example`'s default `GRPC_SERVER_HOST` was changed from `127.0.0.1` to this hostname pattern to match.
 - The first `ADMIN` user (`Crediume1`) was seeded via `seed_admin.py` — a fresh clone/install otherwise has zero users and nobody can log in from any PC.
 - `docs/CONFIGURACION_CLIENTE_LAN.md` (new) is the step-by-step for setting up an additional client PC: clone/pull, venv, copy `certs/server.crt` **out-of-band** (never `server.key`; `certs/` stays gitignored as a whole — it was force-committed just once as a one-off transfer method for the first client PC, then removed again in a follow-up commit once that PC had it), fill in `cas_client/.env`, run `start_client.vbs`.
-- `start_client.vbs` is now the one deployment launcher that *is* checked in — it was rewritten to resolve `.venv`/the repo root from its own script location (`WScript.ScriptFullName`) instead of a hardcoded absolute path, so the same file works regardless of where a client PC clones the repo to. `start_server.bat` and `scripts/setup_server_admin.ps1` are still not committed, since they hardcode this specific server machine's path/hostname.
+- **`cas_server` runs as the Windows service `CASServer` (added 2026-08-19), so it survives the operator logging off.** Until then it was started by hand from an elevated console and lived in the interactive session, so closing that session killed the server for every client PC at once. Installed and reconfigured by `scripts/install_service_admin.ps1` — committed, and unlike the other deployment scripts it derives every path from its own location (`$PSScriptRoot`), so it works on any clone; it needs an elevated PowerShell plus `nssm.exe`, whose location is the script's `-Nssm` parameter (kept outside the repo on this machine). The service wraps `.venv/Scripts/python.exe -m cas_server.server` through NSSM, starts automatically at boot, and **declares a dependency on `postgresql-x64-16`** — without it the server wins the boot race, cannot open the database and dies before Postgres has finished starting. It also restarts itself 5s after a crash and rotates `logs/server.log` at 10MB (that log grew unbounded before, which mattered less when the process was only up while someone was logged in). The script is idempotent: run it again to reconfigure instead of uninstalling first.
+- `start_client.vbs` is now the one deployment launcher that *is* checked in — it was rewritten to resolve `.venv`/the repo root from its own script location (`WScript.ScriptFullName`) instead of a hardcoded absolute path, so the same file works regardless of where a client PC clones the repo to. `scripts/setup_server_admin.ps1` is still not committed, since it hardcodes this specific server machine's path/hostname. **`start_server.bat` is obsolete** — it predates the `CASServer` service, and if anyone runs it while the service is up its `python` loses the race for port 50051 and dies, appending a traceback to the very `logs/server.log` the service writes to, which reads like a server crash but isn't one.
 
 ## Client UI conventions (docs/ES-003)
 
