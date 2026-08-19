@@ -59,11 +59,17 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     "/loans.LoanService/MarkDefaulted": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/DisburseLoan": MANAGER_AND_ABOVE,
     # BR-LOAN-012: borrar un préstamo cargado por error es la única operación
-    # que elimina una fila en vez de moverle el estado, así que se gatea más
-    # arriba que la aprobación (CREDIT_ANALYST_AND_ABOVE) -- deshacer el
-    # trabajo de otro es supervisión, no originación. El servicer restringe
-    # además *qué* préstamos, no solo quién: ver _ESTADOS_ELIMINABLES.
-    "/loans.LoanService/DeleteLoan": MANAGER_AND_ABOVE,
+    # que elimina una fila en vez de moverle el estado. Estuvo en
+    # MANAGER_AND_ABOVE por considerarse supervisión; por decisión del negocio
+    # ahora acompaña a la originación (CREDIT_ANALYST_AND_ABOVE): quien carga
+    # un préstamo equivocado es quien lo detecta, y obligarlo a escalar cada
+    # error de tipeo no agregaba control real. El único rol excluido es el
+    # cajero, coherente con BR-CAJA-005: ventanilla consulta y cobra, no
+    # origina ni deshace originación. Lo que sigue conteniendo el riesgo no es
+    # el rol sino el estado: el servicer restringe *qué* préstamos se pueden
+    # borrar (solo los que nunca movieron dinero, y sin pagos registrados),
+    # ver _ESTADOS_ELIMINABLES.
+    "/loans.LoanService/DeleteLoan": CREDIT_ANALYST_AND_ABOVE,
     "/dashboard.DashboardService/GetDashboardStats": CASHIER_AND_ABOVE,
     # BR-DASH-002: el reporte de cierre de período es material de gestión
     # (resultados del mes/trimestre), no una consulta operativa -- se limita a

@@ -165,10 +165,19 @@ def test_delete_loan_gate_matches_rbac_tables_exactly():
         assert can_delete_loan(role) == esperado, role
 
 
-def test_delete_loan_is_stricter_than_originating_credit():
-    """Borrar la carga de otro es supervision, no originacion: el Analista de
-    Credito puede crear y aprobar un prestamo pero no eliminarlo."""
-    assert can_originate_credit("CREDIT_ANALYST") is True
-    assert can_delete_loan("CREDIT_ANALYST") is False
+def test_delete_loan_excludes_only_the_teller():
+    """El borrado acompana a la originacion: quien puede cargar un prestamo
+    puede deshacer su propia carga. El unico rol sin el permiso es el cajero
+    (BR-CAJA-005), que ni origina ni deshace originacion."""
+    assert can_delete_loan("CASHIER") is False
+    assert can_delete_loan("CREDIT_ANALYST") is True
     assert can_delete_loan("MANAGER") is True
+    assert can_delete_loan("ADMIN") is True
     assert can_delete_loan(None) is False
+
+
+def test_delete_loan_matches_originating_credit():
+    """Las dos puertas coinciden a proposito desde este cambio -- si alguna
+    vuelve a moverse sin la otra, esto lo marca."""
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+        assert can_delete_loan(role) == can_originate_credit(role), role

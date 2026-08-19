@@ -126,30 +126,40 @@ def _delete(loan_id, reason="Cargado por error"):
     return loan_service_pb2.DeleteLoanRequest(loan_id=str(loan_id), reason=reason)
 
 
-def test_delete_loan_requires_manager_or_above(stubs):
-    """El gate está un escalón por encima del de originación: un Analista de
-    Crédito puede crear y aprobar, pero deshacer la carga de otro operador es
-    una intervención de supervisión."""
+def test_delete_loan_is_denied_to_the_teller(stubs):
+    """El único rol sin el permiso es el cajero (BR-CAJA-005): ventanilla
+    consulta y cobra, no origina ni deshace originación."""
     auth_stub, loan_stub = stubs
-    _create_user("analyst_del", RoleEnum.CREDIT_ANALYST)
-    _create_user("manager_del", RoleEnum.MANAGER)
-    client_id = _create_client_row("7100001", "del1@example.com")
+    _create_user("cashier_del", RoleEnum.CASHIER)
+    client_id = _create_client_row("7100000", "del0@example.com")
     loan_id = _create_loan_row(client_id, LoanStatusEnum.PENDING)
 
     with pytest.raises(grpc.RpcError) as exc_info:
         loan_stub.DeleteLoan(
-            _delete(loan_id), metadata=_login(auth_stub, "analyst_del")
+            _delete(loan_id), metadata=_login(auth_stub, "cashier_del")
         )
     assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
     assert _loan_exists(loan_id)
 
-    response = loan_stub.DeleteLoan(
-        _delete(loan_id), metadata=_login(auth_stub, "manager_del")
-    )
-    assert response.success is True
-    assert response.client_id == str(client_id)
-    assert response.deleted_status == "PENDING"
-    assert not _loan_exists(loan_id)
+
+def test_delete_loan_is_allowed_from_credit_analyst_up(stubs):
+    """El gate acompaña al de originación: quien puede cargar un préstamo
+    puede deshacer su propia carga. Lo que contiene el riesgo no es el rol
+    sino el estado -- ver los tests de _ESTADOS_ELIMINABLES más abajo."""
+    auth_stub, loan_stub = stubs
+    _create_user("analyst_del", RoleEnum.CREDIT_ANALYST)
+    _create_user("manager_del", RoleEnum.MANAGER)
+    client_id = _create_client_row("7100001", "del1@example.com")
+
+    for username in ("analyst_del", "manager_del"):
+        loan_id = _create_loan_row(client_id, LoanStatusEnum.PENDING)
+        response = loan_stub.DeleteLoan(
+            _delete(loan_id), metadata=_login(auth_stub, username)
+        )
+        assert response.success is True, username
+        assert response.client_id == str(client_id)
+        assert response.deleted_status == "PENDING"
+        assert not _loan_exists(loan_id)
 
 
 def test_delete_loan_requires_a_reason(stubs):
