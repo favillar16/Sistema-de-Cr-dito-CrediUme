@@ -10,7 +10,6 @@ from cas_server.db.models import AuditLog, Client, Loan, LoanStatusEnum
 from cas_server.security.current_user import get_current_claims
 from cas_server.services.common import (
     analizar_decimal,
-    analizar_fecha,
     analizar_uuid,
     confirmar_o_duplicado,
     id_actor_actual,
@@ -26,25 +25,6 @@ def _edad_anios(fecha_nacimiento: date, hoy: date) -> int:
     if (hoy.month, hoy.day) < (fecha_nacimiento.month, fecha_nacimiento.day):
         anios -= 1
     return anios
-
-
-def _perfil_extendido_kwargs(request, context) -> dict:
-    """BR-CLI-007: parsea los 7 campos opcionales de perfil extendido, comunes a
-    CreateClient y UpdateClient. Vacío ("") equivale a no informado (None)."""
-    vencimiento_cedula = None
-    if request.national_id_expiry_date:
-        vencimiento_cedula = analizar_fecha(
-            request.national_id_expiry_date, "national_id_expiry_date", context
-        )
-    return dict(
-        national_id_expiry_date=vencimiento_cedula,
-        marital_status=request.marital_status.strip() or None,
-        education_level=request.education_level.strip() or None,
-        occupation=request.occupation.strip() or None,
-        neighborhood=request.neighborhood.strip() or None,
-        risk_rating=request.risk_rating.strip() or None,
-        economic_sector=request.economic_sector.strip() or None,
-    )
 
 
 def _cliente_a_respuesta(cliente: Client) -> client_service_pb2.GetClientByIdResponse:
@@ -79,17 +59,6 @@ def _cliente_a_respuesta(cliente: Client) -> client_service_pb2.GetClientByIdRes
         employment_reference_phone=cliente.employment_reference_phone or "",
         employment_reference_seniority=cliente.employment_reference_seniority or "",
         source_of_funds=cliente.source_of_funds or "",
-        national_id_expiry_date=(
-            cliente.national_id_expiry_date.isoformat()
-            if cliente.national_id_expiry_date
-            else ""
-        ),
-        marital_status=cliente.marital_status or "",
-        education_level=cliente.education_level or "",
-        occupation=cliente.occupation or "",
-        neighborhood=cliente.neighborhood or "",
-        risk_rating=cliente.risk_rating or "",
-        economic_sector=cliente.economic_sector or "",
     )
 
 
@@ -158,8 +127,6 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                 request.declared_monthly_income, "declared_monthly_income", context
             )
 
-        perfil_extendido = _perfil_extendido_kwargs(request, context)
-
         with SessionLocal() as sesion:
             existente = (
                 sesion.query(Client)
@@ -204,7 +171,6 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                 employment_reference_phone=request.employment_reference_phone,
                 employment_reference_seniority=request.employment_reference_seniority,
                 source_of_funds=request.source_of_funds,
-                **perfil_extendido,
             )
             sesion.add(cliente)
             # El INSERT (y su posible violación de unicidad concurrente) se
@@ -318,8 +284,6 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                 request.declared_monthly_income, "declared_monthly_income", context
             )
 
-        perfil_extendido = _perfil_extendido_kwargs(request, context)
-
         with SessionLocal() as sesion:
             cliente = sesion.get(Client, client_id)
             if cliente is None:
@@ -362,8 +326,6 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                 request.employment_reference_seniority
             )
             cliente.source_of_funds = request.source_of_funds
-            for campo, valor in perfil_extendido.items():
-                setattr(cliente, campo, valor)
             cliente.updated_at = datetime.now(timezone.utc)
 
             sesion.add(

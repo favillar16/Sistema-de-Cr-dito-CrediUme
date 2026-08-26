@@ -1,4 +1,4 @@
-"""Cálculo del cronograma de amortización de préstamos (sistema francés).
+"""Cálculo del cronograma de amortización de préstamos (sistema alemán).
 
 Funciones puras, sin I/O -- el cronograma se calcula bajo demanda a partir de
 capital/tasa/plazo en lugar de persistirse (el modelo de datos de
@@ -43,47 +43,65 @@ def calcular_cronograma(
     fecha_primer_vencimiento: date | None = None,
     ajustes: dict[int, Decimal] | None = None,
 ) -> list[Cuota]:
-    """Sistema francés: cronograma de amortización con cuota fija (anualidad).
+    """Sistema alemán (BR-LOAN-013): capital constante e interés fijo.
 
-    `tasa_anual` es una tasa nominal anual (p. ej. Decimal("0.24") = 24%/año,
-    capitalizable mensualmente); la tasa aplicada por período es
-    tasa_anual / 12. Todos los montos se redondean a centavos. La porción de
-    capital de la última cuota se ajusta al saldo restante exacto para que la
-    suma acumulada de capital sea exactamente igual a `capital`, pese al
-    redondeo de cada período.
+    Las dos componentes de la cuota son constantes:
+
+    -   **Capital:** `capital / plazo_meses` en cada cuota.
+    -   **Interés:** `capital * tasa_anual / 12` en cada cuota, calculado
+        **siempre sobre el monto original del préstamo** y no sobre el saldo
+        que va quedando.
+
+    Por lo tanto la cuota total es la misma todos los meses (salvo la última,
+    que absorbe los centavos del redondeo del capital), y el interés total del
+    préstamo es `capital * tasa_mensual * plazo_meses`.
+
+    **Esto es lo que la entidad llama "sistema alemán" y es una decisión
+    comercial, no un descuido.** Difiere del sistema alemán de manual, que
+    amortiza capital constante pero cobra el interés sobre el *saldo deudor*
+    (cuota decreciente); acá el interés no varía. No "corregirlo" a saldos
+    deudores: cambiaría lo que paga cada deudor y contradiría el Pagaré y el
+    Contrato, que declaran el interés sobre el monto original (ver
+    `cas_client/documents.py`). Tampoco es el sistema francés, que este módulo
+    implementó hasta 2026-08-26: ahí lo constante era la cuota y lo que
+    variaba era el reparto interno entre capital e interés.
+
+    Todos los montos se redondean a centavos. La porción de capital de la
+    última cuota se ajusta al saldo restante exacto para que la suma acumulada
+    de capital sea exactamente igual a `capital`, pese al redondeo de cada
+    período -- por eso esa última cuota puede diferir de las demás en algunos
+    centavos.
 
     `ajustes` (opcional) mapea número de cuota -> monto de cuota manualmente
-    fijado (ver BR-LOAN-008/UpdateInstallmentAmount): reemplaza la cuota fija
-    calculada para ese número únicamente. El principal del préstamo
-    (`capital`) nunca cambia por un ajuste -- lo único que se recalcula es
-    cómo se reparte entre las cuotas restantes. Inmediatamente después de una
-    cuota ajustada, las cuotas siguientes (aún no ajustadas ni la última) se
-    re-amortizan con una nueva cuota fija calculada sobre el saldo resultante
-    y la cantidad de períodos que quedan -- misma fórmula de anualidad que la
-    cuota original, solo que arrancando desde el nuevo saldo -- para que el
-    cambio se absorba de forma pareja entre las cuotas que quedan en vez de
-    acumularse entero en la última. La última cuota nunca es directamente
-    ajustable: sigue forzada a saldar el remanente exacto (así el capital
-    total pagado siempre coincide con `capital`, centavo a centavo, pese al
-    redondeo de cada período). Esta función es pura y no valida los ajustes
-    (p. ej. que dejen saldo negativo) -- eso es responsabilidad de quien
-    llama (loan_service.py).
+    fijado (ver BR-LOAN-008/UpdateInstallmentAmount): reemplaza la cuota
+    calculada para ese número únicamente, y la porción de capital de esa cuota
+    pasa a ser lo que sobra después de cubrir su interés. El interés **no** se
+    recalcula por un ajuste: depende del capital original, que no cambia. El
+    principal del préstamo tampoco cambia -- lo único que se recalcula es cómo
+    se reparte entre las cuotas restantes: inmediatamente después de una cuota
+    ajustada, las cuotas siguientes (aún no ajustadas ni la última) vuelven a
+    amortizar una porción constante calculada sobre el saldo resultante y la
+    cantidad de períodos que quedan, para que el cambio se absorba de forma
+    pareja en vez de acumularse entero en la última. La última cuota nunca es
+    directamente ajustable: sigue forzada a saldar el remanente exacto. Esta
+    función es pura y no valida los ajustes (p. ej. que dejen saldo negativo)
+    -- eso es responsabilidad de quien llama (loan_service.py).
     """
     ajustes = ajustes or {}
     tasa_mensual = tasa_anual / Decimal(12)
 
-    def _cuota_fija(saldo_base: Decimal, periodos: int) -> Decimal:
-        if tasa_mensual == 0:
-            return _centavos(saldo_base / periodos)
-        factor = (1 + tasa_mensual) ** periodos
-        return _centavos(saldo_base * tasa_mensual * factor / (factor - 1))
+    # Interés del período, idéntico en todas las cuotas: se calcula una sola
+    # vez sobre el capital original y no vuelve a mirar el saldo.
+    interes = _centavos(capital * tasa_mensual)
 
-    cuota = _cuota_fija(capital, plazo_meses)
+    def _amortizacion_constante(saldo_base: Decimal, periodos: int) -> Decimal:
+        return _centavos(saldo_base / periodos)
+
+    amortizacion = _amortizacion_constante(capital, plazo_meses)
 
     filas: list[Cuota] = []
     saldo = capital
     for numero in range(1, plazo_meses + 1):
-        interes = _centavos(saldo * tasa_mensual)
         ajustada = numero != plazo_meses and numero in ajustes
         if numero == plazo_meses:
             capital_cuota = saldo
@@ -92,16 +110,16 @@ def calcular_cronograma(
             monto_cuota = ajustes[numero]
             capital_cuota = monto_cuota - interes
         else:
-            capital_cuota = cuota - interes
-            monto_cuota = cuota
+            capital_cuota = amortizacion
+            monto_cuota = capital_cuota + interes
         saldo = saldo - capital_cuota
         if ajustada:
-            # Re-amortiza el saldo restante sobre los períodos que faltan
-            # (incluyendo la última, igual que el cálculo inicial de `cuota`
-            # sobre plazo_meses) para que las próximas cuotas no ajustadas
-            # absorban el cambio de a poco en vez de todo de golpe en la
-            # última.
-            cuota = _cuota_fija(saldo, plazo_meses - numero)
+            # Vuelve a repartir el saldo restante en partes iguales sobre los
+            # períodos que faltan (incluyendo la última, igual que el cálculo
+            # inicial de `amortizacion` sobre plazo_meses) para que las
+            # próximas cuotas no ajustadas absorban el cambio de a poco en vez
+            # de todo de golpe en la última.
+            amortizacion = _amortizacion_constante(saldo, plazo_meses - numero)
         fecha_vencimiento = (
             _sumar_meses(fecha_primer_vencimiento, numero - 1)
             if fecha_primer_vencimiento is not None

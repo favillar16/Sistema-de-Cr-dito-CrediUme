@@ -4,15 +4,52 @@ from decimal import Decimal
 from cas_server.services.amortization import _sumar_meses, calcular_cronograma
 
 
-def test_fixed_payment_invariant_and_exact_principal_sum():
+def test_constant_principal_invariant_and_exact_principal_sum():
+    """BR-LOAN-013 (sistema alemán): lo constante es la porción de CAPITAL de
+    cada cuota, no el importe de la cuota -- que es justo al revés del sistema
+    francés que este módulo implementaba antes."""
     filas = calcular_cronograma(Decimal("15000.00"), Decimal("0.24"), 12)
 
     assert len(filas) == 12
-    cuotas_no_finales = {fila.monto_cuota for fila in filas[:-1]}
-    assert len(cuotas_no_finales) == 1  # toda cuota no final es idéntica
+    capitales_no_finales = {fila.capital for fila in filas[:-1]}
+    assert capitales_no_finales == {Decimal("1250.00")}  # 15000 / 12
 
     assert sum(fila.capital for fila in filas) == Decimal("15000.00")
     assert filas[-1].saldo == Decimal("0.00")
+
+
+def test_interest_is_flat_on_the_original_principal_not_on_the_balance():
+    """BR-LOAN-013: el interés NO varía. Se calcula una sola vez sobre el
+    capital original, así que no baja aunque el saldo baje -- que es
+    exactamente lo que lo distingue del sistema alemán de manual (y del
+    francés, donde el interés también decrece)."""
+    filas = calcular_cronograma(Decimal("15000.00"), Decimal("0.24"), 12)
+
+    assert {fila.interes for fila in filas} == {Decimal("300.00")}  # 15000 * 2%
+    # Interés total = capital * tasa mensual * plazo, no menos.
+    assert sum(fila.interes for fila in filas) == Decimal("3600.00")
+
+
+def test_every_installment_is_equal_except_the_rounding_on_the_last():
+    """Capital constante + interés constante => cuota constante. La última
+    difiere a lo sumo en centavos porque absorbe el redondeo del capital."""
+    filas = calcular_cronograma(Decimal("15000.00"), Decimal("0.24"), 12)
+
+    assert {fila.monto_cuota for fila in filas[:-1]} == {Decimal("1550.00")}
+    assert abs(filas[-1].monto_cuota - filas[0].monto_cuota) < Decimal("0.10")
+
+
+def test_reference_case_with_the_standard_rate():
+    """Caso de referencia con la tasa fija vigente (BR-LOAN-007, 45% anual =
+    3,75% mensual), para que un cambio silencioso de la fórmula o de la tasa
+    no pase inadvertido. Es el mismo préstamo de los documentos de muestra."""
+    filas = calcular_cronograma(Decimal("7000000.00"), Decimal("0.45"), 12)
+
+    assert filas[0].capital == Decimal("583333.33")  # 7.000.000 / 12
+    assert filas[0].interes == Decimal("262500.00")  # 7.000.000 * 3,75%
+    assert filas[0].monto_cuota == Decimal("845833.33")
+    assert sum(fila.monto_cuota for fila in filas) == Decimal("10150000.00")
+    assert sum(fila.interes for fila in filas) == Decimal("3150000.00")
 
 
 def test_zero_interest_splits_principal_evenly():
@@ -80,9 +117,15 @@ def test_ajustes_overrides_installment_amount_and_cascades_balance():
     assert fila_ajustada.monto_cuota == Decimal("2000.00")
     assert fila_ajustada.capital == Decimal("2000.00") - fila_ajustada.interes
 
-    # El interés de la cuota ajustada no cambia (depende del saldo previo,
-    # que es el mismo hasta ese punto), pero el saldo posterior a partir de
-    # ahí sí diverge del cronograma sin ajustar.
+    # Tras el ajuste, las cuotas que quedan vuelven a amortizar una porción
+    # constante -- del saldo NUEVO, no del original (BR-LOAN-013).
+    capitales_posteriores = {fila.capital for fila in con_ajustes[3:-1]}
+    assert len(capitales_posteriores) == 1
+    assert capitales_posteriores != {sin_ajustes[3].capital}
+
+    # El interés de la cuota ajustada no cambia -- depende del capital
+    # original, que un ajuste nunca toca (BR-LOAN-013) -- pero el saldo
+    # posterior a partir de ahí sí diverge del cronograma sin ajustar.
     assert fila_ajustada.interes == sin_ajustes[2].interes
     assert con_ajustes[3].saldo != sin_ajustes[3].saldo
 

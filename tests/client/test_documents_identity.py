@@ -101,7 +101,7 @@ class _FakeLoanCompleto:
     id = "91cc3960-1111-2222-3333-444455556666"
     status = "ACTIVE"
     principal_amount = "18000000.00"
-    interest_rate = "0.18"  # tasa fija vigente: 18% anual = 1,5% mensual
+    interest_rate = "0.45"  # tasa fija vigente: 45% anual = 3,75% mensual
     term_months = 18
     first_due_date = "2026-09-15"
     total_paid = "0.00"
@@ -138,16 +138,16 @@ def test_authorised_commercial_terms():
 
 
 def test_compensatory_interest_is_quoted_monthly_not_annually():
-    """El sistema guarda la tasa nominal anual (0.18) pero la cláusula la
-    declara mensual (1,5%), que es lo que amortization.py cobra por período.
-    Imprimir "18%" ahí prometería una tasa distinta de la cuota calculada."""
+    """El sistema guarda la tasa nominal anual (0.45) pero la cláusula la
+    declara mensual (3,75%), que es lo que amortization.py cobra por período.
+    Imprimir "45%" ahí prometería una tasa distinta de la cuota calculada."""
     for documento in (
         documents.pagare_html(_FakeLoanCompleto, _FakeClient),
         documents.contrato_html(_FakeLoanCompleto, _FakeClient),
     ):
         texto = _texto_plano(documento)
-        assert "compensatorio del 1,5% mensual sobre saldos deudores" in texto
-        assert "18% mensual" not in texto
+        assert "compensatorio del 3,75% mensual" in texto
+        assert "45% mensual" not in texto
 
 
 def test_pagare_and_contrato_print_the_mora_terms():
@@ -293,3 +293,47 @@ def test_comprobante_announces_a_fully_repaid_loan():
     assert "totalmente cancelado" not in documents.comprobante_pago_html(
         _FakeLoan, _FakeClient, _FakePayment
     )
+
+
+def test_signed_instruments_state_the_interest_is_on_the_original_principal():
+    """BR-LOAN-013, y es la guarda más importante de este archivo: el interés
+    se cobra sobre el **monto original**, no sobre el saldo deudor. Un
+    instrumento que dijera "sobre saldos deudores" prometería un cálculo
+    distinto -- y bastante más barato -- del que hace el cronograma que el
+    mismo cliente firma."""
+    for documento in (
+        documents.pagare_html(_FakeLoanCompleto, _FakeClient),
+        documents.contrato_html(_FakeLoanCompleto, _FakeClient),
+    ):
+        texto = _texto_plano(documento)
+        assert "sobre saldos deudores" not in texto
+        assert "sobre el monto original del préstamo" in texto
+
+
+def test_signed_instruments_promise_equal_installments():
+    """Capital constante + interés fijo => cuotas iguales. Si el cálculo
+    volviera a producir cuotas decrecientes, este texto quedaría mintiendo."""
+    for documento in (
+        documents.pagare_html(_FakeLoanCompleto, _FakeClient),
+        documents.contrato_html(_FakeLoanCompleto, _FakeClient),
+    ):
+        texto = _texto_plano(documento)
+        assert "cuotas iguales" in texto
+        assert "decreciente" not in texto
+        assert "francés" not in texto
+
+
+def test_the_clause_matches_what_amortization_actually_computes():
+    """Cierra el círculo entre la cláusula y la matemática: las cuotas que
+    promete el instrumento son las que calcula el servidor."""
+    from decimal import Decimal
+
+    from cas_server.services.amortization import calcular_cronograma
+
+    filas = calcular_cronograma(
+        Decimal(_FakeLoanCompleto.principal_amount),
+        Decimal(_FakeLoanCompleto.interest_rate),
+        _FakeLoanCompleto.term_months,
+    )
+    assert len({fila.monto_cuota for fila in filas[:-1]}) == 1  # cuotas iguales
+    assert len({fila.interes for fila in filas}) == 1  # interés que no varía

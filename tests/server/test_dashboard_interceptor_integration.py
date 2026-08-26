@@ -114,3 +114,47 @@ def test_get_period_report_without_token_is_unauthenticated(stubs):
     with pytest.raises(grpc.RpcError) as exc_info:
         dashboard_stub.GetPeriodReport(_period_request())
     assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+
+def _payment_status_request(only_overdue=False):
+    return dashboard_service_pb2.GetClientPaymentStatusReportRequest(
+        only_overdue=only_overdue
+    )
+
+
+@pytest.mark.parametrize(
+    "role", [RoleEnum.CREDIT_ANALYST, RoleEnum.MANAGER, RoleEnum.ADMIN]
+)
+def test_payment_status_report_allows_credit_analyst_and_above(stubs, role):
+    auth_stub, dashboard_stub = stubs
+    username = f"payst_ok_{role.value.lower()}"
+    _create_user(username, "Passw0rd!", role)
+    metadata = _login(auth_stub, username, "Passw0rd!")
+
+    response = dashboard_stub.GetClientPaymentStatusReport(
+        _payment_status_request(), metadata=metadata
+    )
+    assert response.clients_count == 0
+    assert response.only_overdue is False
+
+
+def test_payment_status_report_denies_the_cashier(stubs):
+    """BR-DASH-003 sigue el criterio de BR-CAJA-005: el cajero consulta y cobra
+    el préstamo que tiene delante, no gestiona la cartera. Va un escalón por
+    debajo del cierre de período, que sí es MANAGER+."""
+    auth_stub, dashboard_stub = stubs
+    _create_user("payst_no_cashier", "Passw0rd!", RoleEnum.CASHIER)
+    metadata = _login(auth_stub, "payst_no_cashier", "Passw0rd!")
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        dashboard_stub.GetClientPaymentStatusReport(
+            _payment_status_request(), metadata=metadata
+        )
+    assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+
+
+def test_payment_status_report_without_token_is_unauthenticated(stubs):
+    _, dashboard_stub = stubs
+    with pytest.raises(grpc.RpcError) as exc_info:
+        dashboard_stub.GetClientPaymentStatusReport(_payment_status_request())
+    assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED

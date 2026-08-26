@@ -170,16 +170,11 @@ class Client(Base):
     # nullable a nivel de esquema -- la obligatoriedad (BR-CLI-006) se aplica
     # en client_service.py, no acá.
     source_of_funds: Mapped[str | None] = mapped_column(String, nullable=True)
-    # Perfil extendido -- BR-CLI-007. Todos opcionales (a diferencia de las
-    # referencias/origen de fondos de arriba): enriquecen el perfil sin bloquear
-    # el alta ni UpdateClient.
-    national_id_expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    marital_status: Mapped[str | None] = mapped_column(String, nullable=True)
-    education_level: Mapped[str | None] = mapped_column(String, nullable=True)
-    occupation: Mapped[str | None] = mapped_column(String, nullable=True)
-    neighborhood: Mapped[str | None] = mapped_column(String, nullable=True)
-    risk_rating: Mapped[str | None] = mapped_column(String, nullable=True)
-    economic_sector: Mapped[str | None] = mapped_column(String, nullable=True)
+    # El perfil extendido (BR-CLI-007: vencimiento de cédula, estado civil,
+    # nivel de estudios, ocupación, barrio, calificación de riesgo, sector
+    # económico) se eliminó del sistema -- migración
+    # c7a1d4e5f6b2_drop_extended_profile_fields_from_clients.py. Los números de
+    # campo que ocupaba quedaron reservados en client_service.proto.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -19,9 +19,10 @@ from cas_server.db.models import Client, Loan, LoanPayment, LoanStatusEnum
 # (BR-LOAN-009) se reutiliza por la misma razón: el monto de mora por préstamo
 # ya se calcula ahí para GetLoanByIdResponse.overdue_amount, y el total del
 # dashboard (BR-DASH-001) tiene que dar exactamente lo mismo sumado.
-from cas_server.services.common import analizar_fecha
+from cas_server.services.common import a_marca_tiempo, analizar_fecha
 from cas_server.services.loan_service import (
     _auditar_vencidos,
+    _cronograma_con_pendientes,
     _estado_pago_prestamo,
     _totales_prestamo,
     _vencer_atrasados_y_contar_activos,
@@ -53,6 +54,21 @@ def _en_rango(momento: datetime | None, desde: datetime, hasta: datetime) -> boo
     if momento.tzinfo is None:
         momento = momento.replace(tzinfo=timezone.utc)
     return desde <= momento < hasta
+
+
+def _proxima_cuota_impaga(prestamo: Loan) -> tuple[date, Decimal] | None:
+    """(fecha de vencimiento, monto todavía pendiente) de la primera cuota que
+    sigue sin cubrirse, o None si el cronograma ya está saldado.
+
+    Se apoya en el mismo recorrido FIFO que BR-LOAN-009/BR-LOAN-010
+    (_cronograma_con_pendientes) en vez de recalcular la imputación: el
+    "próximo vencimiento" que ve el gestor de cobranza tiene que ser el mismo
+    que muestra la pantalla del préstamo.
+    """
+    for fila, pendiente, pagada in _cronograma_con_pendientes(prestamo):
+        if not pagada and fila.fecha_vencimiento is not None:
+            return fila.fecha_vencimiento, pendiente
+    return None
 
 
 class DashboardServicer(dashboard_service_pb2_grpc.DashboardServiceServicer):
@@ -197,4 +213,121 @@ class DashboardServicer(dashboard_service_pb2_grpc.DashboardServiceServicer):
                 outstanding_at_close=str(saldo_al_cierre),
                 overdue_at_close=str(mora_al_cierre),
                 overdue_loans_at_close=prestamos_en_mora,
+            )
+
+    def GetClientPaymentStatusReport(self, request, context):
+        """BR-DASH-003: listado nominal del estado de pago de los clientes.
+
+        Es el complemento de GetDashboardStats, que da los mismos números
+        pero sumados: acá el saldo y la mora se abren por cliente, que es lo
+        que hace falta para gestionar la cobranza (a quién llamar, por cuánto
+        y desde cuándo).
+
+        Solo aparecen los clientes con **cartera viva** -- al menos un
+        préstamo ACTIVE o DEFAULTED. Un cliente sin préstamos, o con todos
+        pagados, no tiene estado de pago que informar y solo alargaría el
+        listado. `only_overdue` lo recorta además a los que efectivamente
+        deben algo.
+
+        Los totales que devuelve son los de las filas devueltas, no los de
+        toda la cartera: con `only_overdue` activo describen el subconjunto en
+        mora, y por eso no tienen por qué coincidir con los de
+        GetDashboardStats (que siempre mira todo).
+        """
+        ahora = datetime.now(timezone.utc)
+        hoy = ahora.date()
+
+        with SessionLocal() as sesion:
+            prestamos = sesion.query(Loan).all()
+            _, vencidos = _vencer_atrasados_y_contar_activos(prestamos, ahora)
+            if vencidos:
+                _auditar_vencidos(sesion, vencidos, context, ahora)
+                sesion.commit()
+
+            por_cliente: dict = {}
+            for prestamo in prestamos:
+                if prestamo.status in (
+                    LoanStatusEnum.ACTIVE,
+                    LoanStatusEnum.DEFAULTED,
+                ):
+                    por_cliente.setdefault(prestamo.client_id, []).append(prestamo)
+
+            filas = []
+            total_saldo = CERO
+            total_mora = CERO
+            clientes_en_mora = 0
+
+            for cliente in sesion.query(Client).all():
+                cartera = por_cliente.get(cliente.id)
+                if not cartera:
+                    continue
+
+                activos = [p for p in cartera if p.status == LoanStatusEnum.ACTIVE]
+                incumplidos = [
+                    p for p in cartera if p.status == LoanStatusEnum.DEFAULTED
+                ]
+
+                saldo = CERO
+                mora = CERO
+                cuotas_vencidas = 0
+                proxima = None  # (fecha, monto) de la cuota impaga más temprana
+                for prestamo in activos:
+                    total_programado, total_pagado = _totales_prestamo(prestamo)
+                    saldo += max(total_programado - total_pagado, CERO)
+                    _, monto_vencido, cantidad = _estado_pago_prestamo(prestamo, hoy)
+                    mora += monto_vencido
+                    cuotas_vencidas += cantidad
+                    candidata = _proxima_cuota_impaga(prestamo)
+                    if candidata is not None and (
+                        proxima is None or candidata[0] < proxima[0]
+                    ):
+                        proxima = candidata
+
+                # INCUMPLIDO tiene prioridad sobre la mora corriente: es un
+                # estado del préstamo ya declarado por un operador
+                # (MarkDefaulted), no una deducción del cronograma.
+                if incumplidos:
+                    estado = "INCUMPLIDO"
+                elif mora > CERO:
+                    estado = "CUOTA_VENCIDA"
+                else:
+                    estado = "AL_DIA"
+
+                if request.only_overdue and estado == "AL_DIA":
+                    continue
+
+                if estado != "AL_DIA":
+                    clientes_en_mora += 1
+                total_saldo += saldo
+                total_mora += mora
+
+                filas.append(
+                    dashboard_service_pb2.ClientPaymentStatusRow(
+                        client_id=str(cliente.id),
+                        client_name=f"{cliente.first_name} {cliente.last_name}",
+                        national_id=cliente.national_id,
+                        phone_number=cliente.phone_number,
+                        active_loans_count=len(activos),
+                        defaulted_loans_count=len(incumplidos),
+                        outstanding_balance=str(saldo),
+                        overdue_amount=str(mora),
+                        overdue_installments_count=cuotas_vencidas,
+                        next_due_date="" if proxima is None else proxima[0].isoformat(),
+                        next_due_amount="" if proxima is None else str(proxima[1]),
+                        payment_status=estado,
+                    )
+                )
+
+            # Lo más urgente primero: mora descendente y, a igual mora, por
+            # nombre, para que dos ejecuciones seguidas den el mismo orden.
+            filas.sort(key=lambda f: (-Decimal(f.overdue_amount), f.client_name))
+
+            return dashboard_service_pb2.GetClientPaymentStatusReportResponse(
+                generated_at=a_marca_tiempo(ahora),
+                only_overdue=request.only_overdue,
+                rows=filas,
+                clients_count=len(filas),
+                overdue_clients_count=clientes_en_mora,
+                total_outstanding=str(total_saldo),
+                total_overdue=str(total_mora),
             )

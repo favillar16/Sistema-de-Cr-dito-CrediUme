@@ -1,8 +1,13 @@
-"""HTML templates for the four loan documents (Liquidación de Préstamo,
-Pagaré, Contrato, Cronograma de Pago), rendered client-side from data already
-available via existing RPCs (GetLoanById/GetClientById/GetAmortizationSchedule)
--- no server changes needed for the first three; the fourth needed
-Loan.created_by_username (see loan_service.proto).
+"""HTML templates for the loan documents (Liquidación de Préstamo, Pagaré,
+Contrato, Cronograma de Pago, Comprobante de Pago), rendered client-side from
+data already available via existing RPCs
+(GetLoanById/GetClientById/GetAmortizationSchedule) -- no server changes
+needed for the first three; the fourth needed Loan.created_by_username (see
+loan_service.proto).
+
+Also holds the two dashboard reports, which are not loan documents but share
+the same header/footer and export path: reporte_periodo_html (BR-DASH-002) and
+reporte_estado_pagos_html (BR-DASH-003).
 
 The Pagaré/Contrato clause structure was adapted from a real, signed loan
 pagaré/contrato pair provided as a reference (docs/pagare credi ume.docx,
@@ -48,7 +53,7 @@ _COMPANY_PHONE = "(0984) 319243"
 # cambiarlas cambia el instrumento legal -- no tocar sin autorización expresa.
 #
 # La mora se cobra como UN solo interés, moratorio con carácter punitorio, sobre
-# cada cuota vencida (no hay un segundo interés separado sobre saldos deudores:
+# cada cuota vencida (no hay un segundo interés separado sobre el capital:
 # la entidad definió una sola tasa). Por eso hay un único _TERM_MORATORY_RATE
 # donde antes había un par moratoria/punitoria.
 _TERM_MORATORY_RATE = "0,38% mensual"
@@ -56,10 +61,16 @@ _TERM_MORATORY_GRACE_DAYS = 11
 _TERM_ACCELERATION_INSTALLMENTS = 4
 _TERM_JURISDICTION_CITY = "Coronel Oviedo"
 
-# El interés compensatorio NO es constante acá: sale de loan.interest_rate, para
-# que el documento no pueda contradecir la cuota que el sistema realmente
-# calculó. Con la tasa fija vigente (config.LOAN_FIXED_INTEREST_RATE = 0.18)
-# rate_percent_mensual() imprime "1,5%", la tasa mensual autorizada.
+# El interés compensatorio NO se escribe fijo acá: sale de loan.interest_rate,
+# para que el documento no pueda contradecir la cuota que el sistema realmente
+# calculó. Con la tasa fija vigente (config.LOAN_FIXED_INTEREST_RATE = 0.45)
+# rate_percent_mensual() imprime "3,75%", la tasa mensual autorizada.
+#
+# BR-LOAN-013: ese porcentaje se aplica al **monto original del préstamo**, no
+# al saldo deudor -- por eso el interés de cada cuota es el mismo y las cuotas
+# son iguales. Las cláusulas de abajo tienen que decirlo así: "sobre saldos
+# deudores" describiría un cálculo distinto (y más barato) del que el
+# cronograma adjunto realmente hace.
 
 _NUMEROS_EN_LETRAS = {
     1: "uno",
@@ -231,7 +242,8 @@ def liquidacion_html(loan, client, schedule) -> str:
     <b>Estado:</b> {estado}<br/>
     <b>Capital:</b> {gs(loan.principal_amount)}<br/>
     <b>Tasa de inter&eacute;s:</b> {rate_percent(loan.interest_rate)} anual
-    ({rate_percent_mensual(loan.interest_rate)} mensual sobre saldos deudores)<br/>
+    ({rate_percent_mensual(loan.interest_rate)} mensual sobre el monto
+    original)<br/>
     <b>Plazo:</b> {loan.term_months} meses<br/>
     <b>Total pagado:</b> {gs(loan.total_paid)}<br/>
     <b>Saldo restante:</b> {gs(loan.remaining_balance)}</p>
@@ -277,14 +289,15 @@ def pagare_html(loan, client) -> str:
     <b>Guaran&iacute;es {gs(loan.principal_amount)}</b>, que PAGAR&Eacute;(MOS)
     solidariamente, a su orden, libre de gastos y sin protesto, en
     <b>{loan.term_months}</b> cuotas iguales, mensuales y consecutivas, con
-    vencimiento la primera de ellas el d&iacute;a <b>{fecha(loan.first_due_date)}</b>,
+    vencimiento la primera de ellas el d&iacute;a
+    <b>{fecha(loan.first_due_date)}</b>,
     y las siguientes cuotas en esas mismas fechas de los meses subsiguientes
     hasta su total cancelaci&oacute;n, en el domicilio de {_COMPANY_NAME},
     sito en {_COMPANY_ADDRESS}.</p>
     <p>Queda expresamente pactado que los importes de las cuotas
     documentadas en este instrumento devengar&aacute;n un inter&eacute;s
     compensatorio del <b>{rate_percent_mensual(loan.interest_rate)}
-    mensual</b> sobre saldos deudores.</p>
+    mensual</b>, calculado sobre el monto original del pr&eacute;stamo.</p>
     <p>En caso de mora se aplicar&aacute;, sobre cada cuota vencida e impaga,
     un inter&eacute;s moratorio en car&aacute;cter punitorio del
     <b>{_TERM_MORATORY_RATE}</b>, que se devengar&aacute; a partir de los
@@ -566,6 +579,127 @@ def reporte_periodo_html(report, generated_by: str = "") -> str:
     """
 
 
+# BR-DASH-003. El servidor devuelve el estado como enum de cable
+# ("AL_DIA"/"CUOTA_VENCIDA"/"INCUMPLIDO"); la etiqueta que ve el usuario vive
+# acá, igual que _ESTADOS_LABEL para LoanStatusEnum.
+_ESTADO_PAGO_LABEL = {
+    "AL_DIA": "Al día",
+    "CUOTA_VENCIDA": "Cuota vencida",
+    "INCUMPLIDO": "Incumplido",
+}
+
+# Columnas del reporte de estado de pago, compartidas por el PDF, el DOCX y la
+# tabla de dashboard_view.py -- una sola definición para que los tres no se
+# desincronicen, mismo criterio que _filas_reporte().
+ESTADO_PAGOS_COLUMNAS = (
+    "Cliente",
+    "Documento",
+    "Teléfono",
+    "Préstamos",
+    "Próximo vencimiento",
+    "Saldo pendiente (Gs)",
+    "Monto vencido (Gs)",
+    "Estado",
+)
+
+# Índices de ESTADO_PAGOS_COLUMNAS que llevan un importe y por lo tanto se
+# alinean a la derecha (en la tabla de la vista y en el PDF).
+ESTADO_PAGOS_COLUMNAS_NUMERICAS = (5, 6)
+
+
+def estado_pago_label(estado: str) -> str:
+    return _ESTADO_PAGO_LABEL.get(estado, estado)
+
+
+def _filas_estado_pagos(report) -> list[tuple[str, ...]]:
+    """Una tupla por cliente, en el mismo orden que ESTADO_PAGOS_COLUMNAS.
+
+    report: dashboard_service_pb2.GetClientPaymentStatusReportResponse"""
+    filas = []
+    for fila in report.rows:
+        prestamos = str(fila.active_loans_count)
+        if fila.defaulted_loans_count:
+            prestamos += f" + {fila.defaulted_loans_count} incumplido(s)"
+        proximo = "—"
+        if fila.next_due_date:
+            proximo = f"{fecha(fila.next_due_date)} · {gs(fila.next_due_amount)}"
+        vencido = gs(fila.overdue_amount)
+        if fila.overdue_installments_count:
+            vencido += f" ({fila.overdue_installments_count} cuota/s)"
+        filas.append(
+            (
+                fila.client_name,
+                fila.national_id,
+                fila.phone_number,
+                prestamos,
+                proximo,
+                gs(fila.outstanding_balance),
+                vencido,
+                estado_pago_label(fila.payment_status),
+            )
+        )
+    return filas
+
+
+def reporte_estado_pagos_html(report, generated_by: str = "") -> str:
+    """BR-DASH-003: estado de pago de los clientes, para imprimir y trabajar la
+    cobranza.
+
+    Sin banner de borrador, igual que el Cronograma y el Reporte de cierre de
+    período: no tiene texto legal, solo cifras calculadas sobre datos ya
+    registrados.
+
+    report: dashboard_service_pb2.GetClientPaymentStatusReportResponse"""
+    encabezados = "".join(
+        f'<th align="{"right" if i in ESTADO_PAGOS_COLUMNAS_NUMERICAS else "left"}">'
+        f"{columna}</th>"
+        for i, columna in enumerate(ESTADO_PAGOS_COLUMNAS)
+    )
+    filas = "".join(
+        "<tr>"
+        + "".join(
+            f'<td align="{"right" if i in ESTADO_PAGOS_COLUMNAS_NUMERICAS else "left"}">'
+            f"{celda}</td>"
+            for i, celda in enumerate(tupla)
+        )
+        + "</tr>"
+        for tupla in _filas_estado_pagos(report)
+    )
+    if not filas:
+        filas = (
+            f'<tr><td colspan="{len(ESTADO_PAGOS_COLUMNAS)}">'
+            "Sin clientes que informar con el filtro aplicado.</td></tr>"
+        )
+
+    alcance = (
+        "Solo clientes con cuotas vencidas o pr&eacute;stamos incumplidos"
+        if report.only_overdue
+        else "Todos los clientes con cartera viva (pr&eacute;stamos activos o "
+        "incumplidos)"
+    )
+    generado_por = f"<br/><b>Generado por:</b> {generated_by}" if generated_by else ""
+    return f"""
+    <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
+    {_header("Estado de Pago de Clientes")}
+    <p><b>Fecha del reporte:</b> {fecha_hora(report.generated_at.ToDatetime())}<br/>
+    <b>Alcance:</b> {alcance}{generado_por}</p>
+    <p><b>Clientes informados:</b> {report.clients_count} &nbsp;&nbsp;
+    <b>Con atraso:</b> {report.overdue_clients_count} &nbsp;&nbsp;
+    <b>Saldo pendiente:</b> {gs(report.total_outstanding)} &nbsp;&nbsp;
+    <b>Monto vencido:</b> {gs(report.total_overdue)}</p>
+    <table border="1" cellspacing="0" cellpadding="5" width="100%">
+      <tr style="background-color:{theme.PRIMARY}; color:white;">{encabezados}</tr>
+      {filas}
+    </table>
+    <p style="font-size:12px; color:{theme.TEXT_MUTED}; margin-top:16px;">
+    El "monto vencido" es lo ya exigible e impago; el "saldo pendiente"
+    incluye adem&aacute;s las cuotas futuras todav&iacute;a no vencidas. Los
+    totales corresponden a los clientes listados, no a toda la cartera.</p>
+    {_footer("Documento generado por el sistema de CREDIMED UME. Uso interno.")}
+    </body></html>
+    """
+
+
 def contrato_html(loan, client) -> str:
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
@@ -587,16 +721,18 @@ def contrato_html(loan, client) -> str:
     cr&eacute;dito.</p>
     <p><b>Segunda (Reembolso):</b> El(Los) Prestatario(s) se compromete(n) a
     reembolsar el pr&eacute;stamo otorgado en <b>{loan.term_months}</b>
-    cuotas iguales, mensuales y consecutivas, bajo el sistema de
-    amortizaci&oacute;n franc&eacute;s (cuota fija), venciendo la primera de
-    ellas el d&iacute;a <b>{fecha(loan.first_due_date)}</b>, mediante transferencia
+    cuotas <b>iguales</b>, mensuales y consecutivas: cada cuota amortiza una
+    porci&oacute;n constante del capital e incluye un inter&eacute;s fijo
+    calculado sobre el monto original del pr&eacute;stamo, de modo que todas
+    las cuotas son del mismo importe. La primera de ellas vence el d&iacute;a
+    <b>{fecha(loan.first_due_date)}</b>, mediante transferencia
     bancaria, d&eacute;bito directo o descuento en cuenta, seg&uacute;n lo
     acordado.</p>
     <p><b>Tercera (Intereses):</b> Se acuerda el pago de un inter&eacute;s
     compensatorio del <b>{rate_percent_mensual(loan.interest_rate)}
-    mensual</b> sobre saldos deudores, abonado junto con las cuotas de
-    amortizaci&oacute;n del capital. Para el caso de falta de pago en la
-    fecha convenida, se aplicar&aacute; adem&aacute;s, sobre cada cuota
+    mensual</b>, calculado sobre el monto original del pr&eacute;stamo y
+    abonado junto con las cuotas de amortizaci&oacute;n del capital. Para el
+    caso de falta de pago en la fecha convenida, se aplicar&aacute; adem&aacute;s, sobre cada cuota
     vencida e impaga, un inter&eacute;s moratorio en car&aacute;cter
     punitorio del <b>{_TERM_MORATORY_RATE}</b>, que se devengar&aacute; a
     partir de los <b>{_TERM_MORATORY_GRACE_DAYS}

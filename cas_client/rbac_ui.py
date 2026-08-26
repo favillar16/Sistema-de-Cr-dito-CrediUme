@@ -40,9 +40,11 @@ def tier_label(role: str | None) -> str:
 # BR-LOAN-002's 40%-of-income cap is still enforced server-side regardless of
 # who sets the rate -- this only controls whether the rate *field* is
 # editable in the "Nuevo préstamo" form.
-FIXED_INTEREST_RATE = "0.18"  # decimal fraction, sistema francés -- ver loans_view.py
-# 18% nominal anual = 1,5% mensual sobre saldos deudores (la tasa compensatoria
-# que declaran el Pagaré y el Contrato). El servidor divide por 12 por período.
+FIXED_INTEREST_RATE = "0.45"  # decimal fraction, sistema alemán -- ver loans_view.py
+# 45% nominal anual = 3,75% mensual sobre el monto original del préstamo (la
+# tasa compensatoria que declaran el Pagaré y el Contrato; BR-LOAN-013 -- el
+# interés no se calcula sobre el saldo deudor). El servidor divide por 12 por
+# período.
 # Guarded by tests/client/test_rbac_ui.py's test_fixed_interest_rate_matches_
 # server_side_constant -- must stay the exact decimal-fraction string
 # cas_server/config.py's LOAN_FIXED_INTEREST_RATE compares against.
@@ -51,8 +53,8 @@ FIXED_INTEREST_RATE = "0.18"  # decimal fraction, sistema francés -- ver loans_
 def fixed_interest_rate_percent() -> str:
     """Percent-entry equivalent of FIXED_INTEREST_RATE for the "Nuevo
     préstamo" form -- the field now takes the rate as a plain percentage
-    (the user types 24, not 0.24), so the Estándar-tier prefill needs to
-    match that convention: "0.24" -> "24"."""
+    (the user types 45, not 0.45), so the Estándar-tier prefill needs to
+    match that convention: "0.45" -> "45"."""
     percent = Decimal(FIXED_INTEREST_RATE) * 100
     text = f"{percent:f}"
     if "." in text:
@@ -84,6 +86,14 @@ def can_view_period_report(role: str | None) -> bool:
     GetPeriodReport. Las tarjetas del dashboard (GetDashboardStats) siguen
     siendo visibles para todos los roles."""
     return role_at_least(role, "MANAGER")
+
+
+def can_view_payment_status_report(role: str | None) -> bool:
+    """BR-DASH-003: el listado de estado de pago de los clientes es material de
+    gestión de cobranza -- mirrors rbac.py's CREDIT_ANALYST_AND_ABOVE gate on
+    GetClientPaymentStatusReport. Un escalón más abajo que el cierre de
+    período (can_view_period_report), que sí es material de gerencia."""
+    return role_at_least(role, "CREDIT_ANALYST")
 
 
 def is_teller(role: str | None) -> bool:

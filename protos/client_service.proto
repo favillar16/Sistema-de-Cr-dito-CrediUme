@@ -49,14 +49,14 @@ message CreateClientRequest {
     string employment_reference_seniority = 18; // Texto libre, ej. "3 años"
     // Origen de fondos -- obligatorio (BR-CLI-006), ej. "Salario", "Negocio propio".
     string source_of_funds = 19;
-    // Perfil extendido -- opcional (BR-CLI-007). "" = no informado.
-    string national_id_expiry_date = 20; // Formato YYYY-MM-DD
-    string marital_status = 21;
-    string education_level = 22;
-    string occupation = 23;
-    string neighborhood = 24;
-    string risk_rating = 25;
-    string economic_sector = 26;
+    // 20-26 fueron el perfil extendido (BR-CLI-007: vencimiento de cédula,
+    // estado civil, nivel de estudios, ocupación, barrio, calificación de
+    // riesgo, sector económico), eliminado del sistema. Quedan reservados
+    // para que un cliente viejo que todavía los mande no se los vea
+    // reinterpretados como un campo nuevo.
+    reserved 20, 21, 22, 23, 24, 25, 26;
+    reserved "national_id_expiry_date", "marital_status", "education_level";
+    reserved "occupation", "neighborhood", "risk_rating", "economic_sector";
 }
 
 message CreateClientResponse {
@@ -92,13 +92,10 @@ message GetClientByIdResponse {
     string employment_reference_phone = 21;
     string employment_reference_seniority = 22;
     string source_of_funds = 23;
-    string national_id_expiry_date = 24; // "" = no informado (BR-CLI-007)
-    string marital_status = 25;
-    string education_level = 26;
-    string occupation = 27;
-    string neighborhood = 28;
-    string risk_rating = 29;
-    string economic_sector = 30;
+    // 24-30: perfil extendido eliminado (ver CreateClientRequest).
+    reserved 24, 25, 26, 27, 28, 29, 30;
+    reserved "national_id_expiry_date", "marital_status", "education_level";
+    reserved "occupation", "neighborhood", "risk_rating", "economic_sector";
 }
 
 message SearchClientsRequest {
@@ -131,14 +128,10 @@ message UpdateClientRequest {
     string employment_reference_seniority = 15;
     // Origen de fondos -- obligatorio (BR-CLI-006), ej. "Salario", "Negocio propio".
     string source_of_funds = 16;
-    // Perfil extendido -- opcional (BR-CLI-007). "" = no informado.
-    string national_id_expiry_date = 17; // Formato YYYY-MM-DD
-    string marital_status = 18;
-    string education_level = 19;
-    string occupation = 20;
-    string neighborhood = 21;
-    string risk_rating = 22;
-    string economic_sector = 23;
+    // 17-23: perfil extendido eliminado (ver CreateClientRequest).
+    reserved 17, 18, 19, 20, 21, 22, 23;
+    reserved "national_id_expiry_date", "marital_status", "education_level";
+    reserved "occupation", "neighborhood", "risk_rating", "economic_sector";
 }
 
 message UpdateClientResponse {

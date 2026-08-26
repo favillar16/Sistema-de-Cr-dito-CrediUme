@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package dashboard;
 
+import "google/protobuf/timestamp.proto";
+
 service DashboardService {
     // Estadísticas agregadas de solo lectura para la pantalla de inicio.
     rpc GetDashboardStats (GetDashboardStatsRequest) returns (GetDashboardStatsResponse);
@@ -11,6 +13,14 @@ service DashboardService {
     // trimestre / año. A diferencia de GetDashboardStats (una foto del estado
     // actual), esto mide lo que *ocurrió* dentro del período.
     rpc GetPeriodReport (GetPeriodReportRequest) returns (GetPeriodReportResponse);
+
+    // BR-DASH-003: estado de pago de los clientes, una fila por cliente con
+    // cartera viva (al menos un préstamo ACTIVE o DEFAULTED). A diferencia de
+    // GetDashboardStats (totales agregados) y de GetPeriodReport (lo ocurrido
+    // en un rango), esto es un listado nominal: quién está al día y quién
+    // debe, para llamar/gestionar la cobranza.
+    rpc GetClientPaymentStatusReport (GetClientPaymentStatusReportRequest)
+        returns (GetClientPaymentStatusReportResponse);
 }
 
 message GetDashboardStatsRequest {
@@ -73,4 +83,51 @@ message GetPeriodReportResponse {
     string outstanding_at_close = 12;  // Saldo pendiente total de los ACTIVE
     string overdue_at_close = 13;      // Monto total de mora (BR-DASH-001)
     int32 overdue_loans_at_close = 14;
+}
+
+// BR-DASH-003.
+message GetClientPaymentStatusReportRequest {
+    // true = devolver únicamente los clientes con al menos una cuota vencida
+    // impaga o un préstamo incumplido (la lista de gestión de cobranza).
+    // false = todos los clientes con cartera viva.
+    bool only_overdue = 1;
+}
+
+// Una fila por cliente. Los montos son strings decimales, igual que en el
+// resto del contrato.
+message ClientPaymentStatusRow {
+    string client_id = 1;
+    string client_name = 2;      // "Nombre Apellido"
+    string national_id = 3;
+    string phone_number = 4;
+    int32 active_loans_count = 5;
+    int32 defaulted_loans_count = 6;
+    // Saldo pendiente sumado de sus préstamos ACTIVE (mismo cálculo que
+    // GetLoanByIdResponse.remaining_balance).
+    string outstanding_balance = 7;
+    // Vencido e impago (BR-LOAN-009), sumado sobre sus préstamos ACTIVE.
+    string overdue_amount = 8;
+    int32 overdue_installments_count = 9;
+    // Próxima cuota todavía impaga de toda su cartera activa: la más
+    // temprana. "" cuando no queda ninguna (p. ej. solo tiene incumplidos).
+    string next_due_date = 10;   // YYYY-MM-DD
+    string next_due_amount = 11;
+    // "AL_DIA" | "CUOTA_VENCIDA" | "INCUMPLIDO". INCUMPLIDO tiene prioridad:
+    // un cliente con un préstamo DEFAULTED se informa así aunque el resto de
+    // su cartera esté al día.
+    string payment_status = 12;
+}
+
+message GetClientPaymentStatusReportResponse {
+    // Momento en que se midió el estado -- el reporte es una foto de "ahora",
+    // no de un período; el documento generado imprime esta fecha.
+    google.protobuf.Timestamp generated_at = 1;
+    bool only_overdue = 2;       // eco del filtro efectivamente aplicado
+    repeated ClientPaymentStatusRow rows = 3;
+    // Totales de las filas devueltas (no de toda la cartera): con only_overdue
+    // activo describen únicamente el subconjunto en mora.
+    int32 clients_count = 4;
+    int32 overdue_clients_count = 5;
+    string total_outstanding = 6;
+    string total_overdue = 7;
 }

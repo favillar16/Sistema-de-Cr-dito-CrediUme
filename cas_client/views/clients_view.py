@@ -15,7 +15,11 @@ from PySide6.QtWidgets import (
 )
 
 from cas_client import theme
-from cas_client.formatting import DISPLAY_DATE_PLACEHOLDER, fecha, fecha_a_iso
+from cas_client.formatting import (
+    DISPLAY_DATE_PLACEHOLDER,
+    es_fecha_valida,
+    fecha_a_iso,
+)
 from cas_client.grpc_client import ApiError, ClientServiceClient
 from cas_client.rbac_ui import can_originate_credit, role_at_least
 from cas_client.session import Session
@@ -105,32 +109,6 @@ def _reference_cards() -> tuple[
         (ref2_frame, ref2_name, ref2_relationship, ref2_phone),
         (job_frame, job_employer, job_position, job_phone, job_seniority),
     )
-
-
-def _extended_profile_card() -> tuple:
-    """Builds the "Perfil extendido" card (BR-CLI-007, todos los campos
-    opcionales), compartida por el formulario de alta y el de detalle."""
-    frame, layout = card()
-    layout.addWidget(section_label("Perfil extendido (opcional)"))
-    grid = ResponsiveGrid(min_cell_width=220)
-    expiry_field, expiry = labeled_field(
-        "Vencimiento de cédula", DISPLAY_DATE_PLACEHOLDER
-    )
-    grid.add_widget(expiry_field)
-    marital_field, marital = labeled_field("Estado civil")
-    grid.add_widget(marital_field)
-    education_field, education = labeled_field("Nivel de estudios")
-    grid.add_widget(education_field)
-    occupation_field, occupation = labeled_field("Ocupación")
-    grid.add_widget(occupation_field)
-    neighborhood_field, neighborhood = labeled_field("Barrio")
-    grid.add_widget(neighborhood_field)
-    risk_field, risk = labeled_field("Calificación de riesgo", "Ej. Muy bajo")
-    grid.add_widget(risk_field)
-    layout.addWidget(grid)
-    sector_field, sector = labeled_field("Sector económico")
-    layout.addWidget(sector_field)
-    return frame, expiry, marital, education, occupation, neighborhood, risk, sector
 
 
 class ClientsView(BaseView):
@@ -330,18 +308,6 @@ class ClientsView(BaseView):
         layout.addWidget(personal_frame)
 
         (
-            extended_frame,
-            self._new_national_id_expiry_date,
-            self._new_marital_status,
-            self._new_education_level,
-            self._new_occupation,
-            self._new_neighborhood,
-            self._new_risk_rating,
-            self._new_economic_sector,
-        ) = _extended_profile_card()
-        layout.addWidget(extended_frame)
-
-        (
             (
                 ref1_frame,
                 self._new_ref1_name,
@@ -385,13 +351,6 @@ class ClientsView(BaseView):
             self._new_address,
             self._new_income,
             self._new_source_of_funds,
-            self._new_national_id_expiry_date,
-            self._new_marital_status,
-            self._new_education_level,
-            self._new_occupation,
-            self._new_neighborhood,
-            self._new_risk_rating,
-            self._new_economic_sector,
             self._new_ref1_name,
             self._new_ref1_relationship,
             self._new_ref1_phone,
@@ -438,24 +397,22 @@ class ClientsView(BaseView):
         if has_blank:
             self._toast.show_message("Complete los campos marcados en rojo.")
             return
-        # El usuario tipea DD/MM/AAAA; el contrato gRPC es ISO (ver formatting.py).
+        # El usuario tipea DD/MM/AAAA; el contrato gRPC es ISO (ver
+        # formatting.py). Se valida acá y no solo en el servidor porque su
+        # mensaje nombra el formato de cable ("AAAA-MM-DD"), que es justo el
+        # que el formulario NO pide.
+        if not es_fecha_valida(fields["date_of_birth"]):
+            self._new_dob.set_error(True)
+            self._toast.show_message(
+                "Revise la fecha de nacimiento: use el formato "
+                f"{DISPLAY_DATE_PLACEHOLDER}."
+            )
+            return
         fields["date_of_birth"] = fecha_a_iso(fields["date_of_birth"])
 
         income = self._new_income.raw_value()
         if income:
             fields["declared_monthly_income"] = income
-
-        fields.update(
-            national_id_expiry_date=fecha_a_iso(
-                self._new_national_id_expiry_date.text()
-            ),
-            marital_status=self._new_marital_status.text().strip(),
-            education_level=self._new_education_level.text().strip(),
-            occupation=self._new_occupation.text().strip(),
-            neighborhood=self._new_neighborhood.text().strip(),
-            risk_rating=self._new_risk_rating.text().strip(),
-            economic_sector=self._new_economic_sector.text().strip(),
-        )
 
         self._set_loading(True)
         self._worker = AsyncWorker(
@@ -519,18 +476,6 @@ class ClientsView(BaseView):
         )
         contact.addWidget(source_of_funds_field)
         layout.addWidget(contact_frame)
-
-        (
-            extended_frame,
-            self._detail_national_id_expiry_date,
-            self._detail_marital_status,
-            self._detail_education_level,
-            self._detail_occupation,
-            self._detail_neighborhood,
-            self._detail_risk_rating,
-            self._detail_economic_sector,
-        ) = _extended_profile_card()
-        layout.addWidget(extended_frame)
 
         (
             (
@@ -637,15 +582,6 @@ class ClientsView(BaseView):
         self._detail_address.setText(client.address)
         self._detail_income.set_amount(client.declared_monthly_income)
         self._detail_source_of_funds.setText(client.source_of_funds)
-        self._detail_national_id_expiry_date.setText(
-            fecha(client.national_id_expiry_date)
-        )
-        self._detail_marital_status.setText(client.marital_status)
-        self._detail_education_level.setText(client.education_level)
-        self._detail_occupation.setText(client.occupation)
-        self._detail_neighborhood.setText(client.neighborhood)
-        self._detail_risk_rating.setText(client.risk_rating)
-        self._detail_economic_sector.setText(client.economic_sector)
         self._detail_ref1_name.setText(client.personal_reference_1_name)
         self._detail_ref1_relationship.setText(client.personal_reference_1_relationship)
         self._detail_ref1_phone.setText(client.personal_reference_1_phone)
@@ -717,18 +653,6 @@ class ClientsView(BaseView):
         income = self._detail_income.raw_value()
         if income:
             fields["declared_monthly_income"] = income
-
-        fields.update(
-            national_id_expiry_date=fecha_a_iso(
-                self._detail_national_id_expiry_date.text()
-            ),
-            marital_status=self._detail_marital_status.text().strip(),
-            education_level=self._detail_education_level.text().strip(),
-            occupation=self._detail_occupation.text().strip(),
-            neighborhood=self._detail_neighborhood.text().strip(),
-            risk_rating=self._detail_risk_rating.text().strip(),
-            economic_sector=self._detail_economic_sector.text().strip(),
-        )
 
         self._set_loading(True)
         self._worker = AsyncWorker(

@@ -5,11 +5,14 @@ Agregados de solo lectura sobre `clients` y `loans`. No tiene tablas propias ni
 escribe estado de negocio: todo se calcula al vuelo sobre los datos que ya
 registran los módulos de Clientes y Préstamos.
 
-Cubre dos cosas distintas, que deliberadamente no se mezclan:
+Cubre tres cosas distintas, que deliberadamente no se mezclan:
 *   **Panel (`GetDashboardStats`):** una foto del estado *actual* de la cartera,
     para la pantalla de inicio.
 *   **Reporte de cierre de período (`GetPeriodReport`):** qué *ocurrió* dentro de
     un rango de fechas, para presentar una vez cerrado el mes / trimestre / año.
+*   **Estado de pago de los clientes (`GetClientPaymentStatusReport`):** los
+    mismos números del panel pero **abiertos por cliente**, para trabajar la
+    cobranza: quién está al día, quién debe, cuánto y desde cuándo.
 
 ## 2. Reglas de Negocio
 *   **BR-DASH-001 (Monto total de mora):** El panel expone la suma de todo lo
@@ -39,12 +42,38 @@ Cubre dos cosas distintas, que deliberadamente no se mezclan:
         aclara explícitamente para que no se lea como un corte histórico.
     Un `end_date` anterior a `start_date` se rechaza con `INVALID_ARGUMENT`.
 
+*   **BR-DASH-003 (Estado de pago de los clientes):**
+    `GetClientPaymentStatusReport` devuelve una fila por cliente con **cartera
+    viva** -- al menos un préstamo `ACTIVE` o `DEFAULTED`. Un cliente sin
+    préstamos, o con todos pagados, no tiene estado de pago que informar y no
+    aparece. Cada fila lleva: cantidad de préstamos activos e incumplidos, saldo
+    pendiente sumado, monto vencido y cantidad de cuotas vencidas impagas, la
+    próxima cuota todavía impaga (fecha y monto) de toda su cartera activa, y un
+    `payment_status`.
+    `payment_status` es `AL_DIA` | `CUOTA_VENCIDA` | `INCUMPLIDO`, con esa
+    precedencia: **INCUMPLIDO gana** aunque el resto de la cartera esté al día,
+    porque es un estado que un operador declaró explícitamente (`MarkDefaulted`)
+    y no una deducción del cronograma.
+    El saldo, la mora y el próximo vencimiento se calculan con los mismos
+    helpers de BR-LOAN-009/BR-LOAN-010 que usan `GetLoanById` y el panel, no con
+    una segunda implementación: el "próximo vencimiento" que ve quien gestiona
+    la cobranza tiene que ser el mismo que muestra la pantalla del préstamo, y
+    la mora sumada de este reporte (sin filtro) tiene que dar el
+    `total_overdue_amount` de BR-DASH-001.
+    `only_overdue = true` recorta el listado a los clientes que efectivamente
+    deben algo (`CUOTA_VENCIDA` o `INCUMPLIDO`). **Los totales de la respuesta
+    son los de las filas devueltas, no los de toda la cartera**: con el filtro
+    activo describen únicamente ese subconjunto, y por eso no tienen por qué
+    coincidir con los del panel.
+    Es una foto de *ahora* (`generated_at`), no de un período: no recibe rango
+    de fechas.
+
 ## 3. Modelo de Datos (PostgreSQL)
 Ninguno propio. Lee `clients`, `loans`, `loan_payments` y
 `loan_installment_adjustments` (estos últimos vía el cálculo de cronograma
 compartido con el módulo de Préstamos).
 
-Como todo lectura de préstamos, ambas RPCs aplican de paso el vencimiento
+Como toda lectura de préstamos, las tres RPCs aplican de paso el vencimiento
 perezoso de BR-LOAN-003: una aprobación no desembolsada en 30 días pasa a
 EXPIRED al consultarse el panel, y queda auditada igual que en
 `ListClientLoans`.
@@ -52,8 +81,10 @@ EXPIRED al consultarse el panel, y queda auditada igual que en
 ## 4. Contratos gRPC Relacionados
 *   `GetDashboardStatsRequest` / `GetDashboardStatsResponse`
 *   `GetPeriodReportRequest` / `GetPeriodReportResponse`
+*   `GetClientPaymentStatusReportRequest` / `GetClientPaymentStatusReportResponse`
+    (+ `ClientPaymentStatusRow`, una por cliente) — BR-DASH-003
 
-Ambos definidos en `protos/dashboard_service.proto`.
+Todos definidos en `protos/dashboard_service.proto`.
 
 ## 5. Autorización
 *   `GetDashboardStats` — todos los roles autenticados (`CASHIER_AND_ABOVE`). Son
@@ -61,6 +92,12 @@ Ambos definidos en `protos/dashboard_service.proto`.
 *   `GetPeriodReport` — **Agente de Créditos (MANAGER) o Administrador (ADMIN)**
     (`MANAGER_AND_ABOVE`). El cierre de período es material de gestión, no una
     consulta operativa, así que se gatea más arriba que el panel.
+*   `GetClientPaymentStatusReport` — **Analista de Crédito o superior**
+    (`CREDIT_ANALYST_AND_ABOVE`), un escalón por debajo del cierre de período:
+    la gestión de cobranza es trabajo del analista, no solo de la gerencia. El
+    **Cajero** queda afuera por el mismo criterio que BR-CAJA-005 (consulta y
+    cobra el préstamo que tiene delante, no gestiona la cartera). Reflejado en
+    la interfaz por `rbac_ui.can_view_payment_status_report()`.
 
 ## 6. Terminología en la interfaz
 El estado `EXPIRED` de `LoanStatusEnum` se presenta al usuario como

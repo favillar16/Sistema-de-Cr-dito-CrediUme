@@ -2,7 +2,7 @@ from datetime import date, datetime, timedelta
 
 import grpc
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QTextDocument
+from PySide6.QtGui import QPageLayout, QTextDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -19,15 +19,32 @@ from PySide6.QtWidgets import (
 )
 
 from cas_client import documents, documents_docx, theme
-from cas_client.formatting import DISPLAY_DATE_PLACEHOLDER, fecha, fecha_a_iso, gs
+from cas_client.formatting import (
+    DISPLAY_DATE_FORMAT,
+    DISPLAY_DATE_PLACEHOLDER,
+    es_fecha_valida,
+    fecha,
+    fecha_a_iso,
+    gs,
+)
 from cas_client.grpc_client import ApiError, DashboardServiceClient
-from cas_client.rbac_ui import can_view_period_report, tier_label
+from cas_client.rbac_ui import (
+    can_view_payment_status_report,
+    can_view_period_report,
+    tier_label,
+)
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
 from cas_client.widgets.base_view import BaseView
-from cas_client.widgets.card import card, labeled_field, section_label, stat_tile
+from cas_client.widgets.card import (
+    card,
+    labeled_combo,
+    labeled_field,
+    section_label,
+    stat_tile,
+)
 from cas_client.widgets.responsive_grid import ResponsiveGrid
-from cas_client.widgets.table import size_columns, style_table
+from cas_client.widgets.table import set_empty_message, size_columns, style_table
 from cas_client.widgets.toast import Toast
 
 _LOAN_STATUS_TILES = (
@@ -45,6 +62,14 @@ _LOAN_STATUS_TILES = (
 _UN_DIA = timedelta(days=1)
 
 _REPORT_TABLE_HEADERS = ("Sección", "Concepto", "Valor")
+
+# BR-DASH-003. El valor que viaja es el bool `only_overdue` de la request; la
+# etiqueta es lo único que ve el operador. Se guarda como itemData para no
+# depender del texto, misma convención que el combo de roles de users_view.py.
+_PAYMENT_STATUS_FILTERS = (
+    ("Todos los clientes con cartera viva", False),
+    ("Solo clientes con atraso", True),
+)
 
 
 def _greeting() -> str:
@@ -85,6 +110,16 @@ def _friendly_report_message(exc: Exception) -> str:
         if exc.code == grpc.StatusCode.UNAVAILABLE:
             return "No se pudo conectar con el servidor."
         return "No se pudo generar el reporte. Intente nuevamente."
+    return f"No se pudo conectar con el servidor: {exc}"
+
+
+def _friendly_payment_status_message(exc: Exception) -> str:
+    if isinstance(exc, ApiError):
+        if exc.code == grpc.StatusCode.PERMISSION_DENIED:
+            return "No tiene permisos para ver el estado de pago de los clientes."
+        if exc.code == grpc.StatusCode.UNAVAILABLE:
+            return "No se pudo conectar con el servidor."
+        return "No se pudo generar el reporte de estado de pago. Intente nuevamente."
     return f"No se pudo conectar con el servidor: {exc}"
 
 
@@ -141,6 +176,9 @@ class DashboardView(BaseView):
         self._worker: AsyncWorker | None = None
         self._report_worker: AsyncWorker | None = None
         self._report = None  # último GetPeriodReportResponse recibido
+        self._payment_status_worker: AsyncWorker | None = None
+        # último GetClientPaymentStatusReportResponse recibido (BR-DASH-003)
+        self._payment_status = None
         # Bumped on every _refresh_stats() call so a stale worker's callbacks
         # (a previous refresh still in flight when the user tabs back in,
         # see showEvent()) can tell they've been superseded and no-op instead
@@ -229,6 +267,17 @@ class DashboardView(BaseView):
         # solo produciría un PERMISSION_DENIED. Misma convención de
         # ocultar-en-vez-de-deshabilitar que el ítem "Usuarios" del sidebar.
         self._set_reports_visible(False)
+
+        self._payment_status_section_label = section_label(
+            "Estado de pago de los clientes"
+        )
+        self.content_layout.addWidget(self._payment_status_section_label)
+        self._payment_status_card = self._build_payment_status_card()
+        self.content_layout.addWidget(self._payment_status_card)
+        # Oculto hasta que set_user() sepa el rol, igual que la tarjeta de
+        # cierre de período -- GetClientPaymentStatusReport es
+        # CREDIT_ANALYST_AND_ABOVE server-side (rbac.py).
+        self._set_payment_status_visible(False)
 
         self.content_layout.addStretch()
 
@@ -341,8 +390,12 @@ class DashboardView(BaseView):
 
     def _apply_preset(self, resolver) -> None:
         inicio, fin = resolver()
-        self._report_start.setText(inicio.strftime("%d/%m/%Y"))
-        self._report_end.setText(fin.strftime("%d/%m/%Y"))
+        # DISPLAY_DATE_FORMAT y no un "%d/%m/%Y" literal: el formato de
+        # presentación lo define formatting.py, y un atajo que escribiera en
+        # otro formato le entregaría al campo algo que el propio placeholder
+        # no pide.
+        self._report_start.setText(inicio.strftime(DISPLAY_DATE_FORMAT))
+        self._report_end.setText(fin.strftime(DISPLAY_DATE_FORMAT))
 
     def _on_generate_report(self) -> None:
         if not self._session.access_token:
@@ -354,6 +407,20 @@ class DashboardView(BaseView):
         if not (inicio and fin):
             self._toast.show_message(
                 "Indique el rango del período (desde y hasta), o use un atajo."
+            )
+            return
+
+        # El servidor también valida, pero su mensaje nombra el formato de
+        # cable ("AAAA-MM-DD"); acá se avisa en el formato que el campo pide.
+        malas = False
+        for campo, valor in ((self._report_start, inicio), (self._report_end, fin)):
+            malo = not es_fecha_valida(valor)
+            campo.set_error(malo)
+            malas = malas or malo
+        if malas:
+            self._toast.show_message(
+                "Revise las fechas del período: use el formato "
+                f"{DISPLAY_DATE_PLACEHOLDER}."
             )
             return
 
@@ -476,6 +543,243 @@ class DashboardView(BaseView):
             except OSError as exc:
                 self._toast.show_message(documents.friendly_file_error(exc))
 
+    # ---- Estado de pago de los clientes (BR-DASH-003) -------------------
+
+    def _build_payment_status_card(self) -> QWidget:
+        frame, layout = card()
+
+        intro = QLabel(
+            "Consulte quién está al día y quién debe: una fila por cliente con "
+            "cartera viva, con su saldo, lo vencido y su próximo vencimiento."
+        )
+        intro.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        filter_grid = ResponsiveGrid(min_cell_width=260)
+        filter_field, self._payment_status_filter = labeled_combo("Alcance")
+        for label, only_overdue in _PAYMENT_STATUS_FILTERS:
+            self._payment_status_filter.addItem(label, only_overdue)
+        filter_grid.add_widget(filter_field)
+        layout.addWidget(filter_grid)
+
+        actions_row = ResponsiveGrid(min_cell_width=150)
+        generate_button = QPushButton("Generar reporte")
+        generate_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        generate_button.setStyleSheet(theme.accent_button_style())
+        generate_button.clicked.connect(self._on_generate_payment_status)
+        actions_row.add_widget(generate_button)
+
+        self._payment_status_export_buttons: list[QPushButton] = []
+        for label, handler in (
+            ("Descargar PDF", self._on_payment_status_download_pdf),
+            ("Descargar DOCX", self._on_payment_status_download_docx),
+            ("Imprimir", self._on_payment_status_print),
+        ):
+            button = QPushButton(label)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(theme.secondary_button_style())
+            button.clicked.connect(handler)
+            button.setEnabled(False)  # hasta que haya un reporte cargado
+            actions_row.add_widget(button)
+            self._payment_status_export_buttons.append(button)
+        layout.addWidget(actions_row)
+
+        self._payment_status_progress = QProgressBar()
+        self._payment_status_progress.setRange(0, 0)
+        self._payment_status_progress.setTextVisible(False)
+        self._payment_status_progress.setFixedHeight(4)
+        self._payment_status_progress.hide()
+        layout.addWidget(self._payment_status_progress)
+
+        self._payment_status_caption = QLabel("")
+        self._payment_status_caption.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 12px;"
+        )
+        self._payment_status_caption.setWordWrap(True)
+        layout.addWidget(self._payment_status_caption)
+
+        self._payment_status_table = QTableWidget(
+            0, len(documents.ESTADO_PAGOS_COLUMNAS)
+        )
+        self._payment_status_table.setHorizontalHeaderLabels(
+            list(documents.ESTADO_PAGOS_COLUMNAS)
+        )
+        # "Cliente" absorbe el sobrante: es la columna de ancho más variable
+        # (nombre + apellido) y la que el operador lee primero.
+        size_columns(self._payment_status_table, stretch_column=0)
+        self._payment_status_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._payment_status_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self._payment_status_table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        style_table(self._payment_status_table)
+        set_empty_message(
+            self._payment_status_table,
+            'Sin datos todavía. Elija el alcance y pulse "Generar reporte".',
+        )
+        layout.addWidget(self._payment_status_table)
+
+        return frame
+
+    def _set_payment_status_visible(self, visible: bool) -> None:
+        self._payment_status_section_label.setVisible(visible)
+        self._payment_status_card.setVisible(visible)
+
+    def _on_generate_payment_status(self) -> None:
+        if not self._session.access_token:
+            return
+        only_overdue = bool(self._payment_status_filter.currentData())
+        self._payment_status_progress.setRange(0, 0)
+        self._payment_status_progress.show()
+        self._payment_status_worker = AsyncWorker(
+            self._client.get_client_payment_status_report,
+            self._session.access_token,
+            only_overdue,
+            error_translator=_friendly_payment_status_message,
+        )
+        self._payment_status_worker.succeeded.connect(self._on_payment_status_loaded)
+        self._payment_status_worker.failed.connect(self._on_payment_status_failed)
+        self._payment_status_worker.finished.connect(self._hide_payment_status_progress)
+        self._payment_status_worker.start()
+
+    def _hide_payment_status_progress(self) -> None:
+        # Mismo motivo que _hide_progress(): parkear el rango detiene el timer
+        # de la animación indeterminada mientras está oculta.
+        self._payment_status_progress.hide()
+        self._payment_status_progress.setRange(0, 1)
+        self._payment_status_progress.setValue(0)
+
+    def _on_payment_status_loaded(self, report) -> None:
+        self._payment_status = report
+        alcance = (
+            "solo clientes con atraso"
+            if report.only_overdue
+            else "todos los clientes con cartera viva"
+        )
+        self._payment_status_caption.setText(
+            f"{report.clients_count} cliente(s) informado(s) ({alcance}), "
+            f"{report.overdue_clients_count} con atraso · Saldo pendiente "
+            f"{gs(report.total_outstanding)} · Vencido {gs(report.total_overdue)}."
+        )
+        # Mismas filas que el PDF/DOCX -- ver documents._filas_estado_pagos.
+        filas = documents._filas_estado_pagos(report)
+        self._payment_status_table.setRowCount(0)
+        for tupla in filas:
+            row = self._payment_status_table.rowCount()
+            self._payment_status_table.insertRow(row)
+            for col, texto in enumerate(tupla):
+                item = QTableWidgetItem(texto)
+                if col in documents.ESTADO_PAGOS_COLUMNAS_NUMERICAS:
+                    item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+                self._payment_status_table.setItem(row, col, item)
+        if not filas:
+            set_empty_message(
+                self._payment_status_table,
+                "Ningún cliente cumple el alcance elegido.",
+            )
+        self._fit_payment_status_table_height()
+        for button in self._payment_status_export_buttons:
+            button.setEnabled(True)
+
+    def _fit_payment_status_table_height(self) -> None:
+        """Misma razón que _fit_report_table_height(): la tabla vive dentro del
+        scroll de la página, así que se le fija la altura real de sus filas en
+        vez de dejar que scrollee por su cuenta."""
+        alto = self._payment_status_table.horizontalHeader().height()
+        for row in range(self._payment_status_table.rowCount()):
+            alto += self._payment_status_table.rowHeight(row)
+        alto += 2 * self._payment_status_table.frameWidth()
+        # Una tabla sin filas quedaría en la altura del encabezado y taparía el
+        # mensaje de vacío que set_empty_message() dibuja encima.
+        self._payment_status_table.setFixedHeight(max(alto, 120))
+
+    def _on_payment_status_failed(self, message: str) -> None:
+        self._toast.show_message(message)
+
+    def _payment_status_printer(self) -> QPrinter:
+        """Impresora en horizontal: la tabla del reporte tiene 8 columnas y en
+        vertical cada celda se parte en varias líneas. Es el único documento
+        de la app que lo necesita -- el resto son tablas de 2 o 3 columnas.
+        El .docx hace lo mismo por su lado (documents_docx._apaisar)."""
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        return printer
+
+    def _payment_status_default_name(self, extension: str) -> str:
+        dia = self._payment_status.generated_at.ToDatetime().date().isoformat()
+        return f"estado_de_pago_{dia}.{extension}"
+
+    def _on_payment_status_download_pdf(self) -> None:
+        if self._payment_status is None:
+            return
+        document = QTextDocument()
+        document.setHtml(
+            documents.reporte_estado_pagos_html(
+                self._payment_status, self._session.username or ""
+            )
+        )
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Guardar reporte",
+            self._payment_status_default_name("pdf"),
+            "PDF (*.pdf)",
+        )
+        if not path:
+            return
+        printer = self._payment_status_printer()
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+        try:
+            document.print_(printer)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Reporte guardado.")
+
+    def _on_payment_status_download_docx(self) -> None:
+        if self._payment_status is None:
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Guardar reporte",
+            self._payment_status_default_name("docx"),
+            "Word (*.docx)",
+        )
+        if not path:
+            return
+        try:
+            documents_docx.reporte_estado_pagos_docx(
+                self._payment_status, self._session.username or ""
+            ).save(path)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Reporte guardado.")
+
+    def _on_payment_status_print(self) -> None:
+        if self._payment_status is None:
+            return
+        document = QTextDocument()
+        document.setHtml(
+            documents.reporte_estado_pagos_html(
+                self._payment_status, self._session.username or ""
+            )
+        )
+        printer = self._payment_status_printer()
+        dialog = QPrintDialog(printer, self)
+        if dialog.exec() == QPrintDialog.DialogCode.Accepted:
+            try:
+                document.print_(printer)
+            except OSError as exc:
+                self._toast.show_message(documents.friendly_file_error(exc))
+
     # ---- Estado de sesión ----------------------------------------------
 
     def set_user(self, username: str, role: str) -> None:
@@ -483,6 +787,7 @@ class DashboardView(BaseView):
             f"Sesión iniciada como {username} · Nivel: {tier_label(role)}"
         )
         self._set_reports_visible(can_view_period_report(role))
+        self._set_payment_status_visible(can_view_payment_status_report(role))
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from cas_client import documents, documents_docx, theme
 from cas_client.formatting import (
     DISPLAY_DATE_PLACEHOLDER,
+    es_fecha_valida,
     fecha,
     fecha_a_iso,
     gs,
@@ -187,7 +188,7 @@ _friendly_file_error = documents.friendly_file_error
 
 
 class LoansView(BaseView):
-    """Ciclo de vida de préstamos -- sistema francés (cuota fija), specs/loans/README."""
+    """Ciclo de vida de préstamos -- sistema alemán (cuota fija), specs/loans/README."""
 
     view_client_requested = Signal(str)  # client_id
 
@@ -637,9 +638,11 @@ class LoansView(BaseView):
         card_layout.addWidget(self._rate_hint)
 
         hint = QLabel(
-            "La cuota se calcula con el sistema francés (cuota fija mensual), "
-            "dividiendo el capital + interés en la cantidad de cuotas elegida. "
-            "No debe exceder el 40% del ingreso declarado del cliente (BR-LOAN-002)."
+            "La cuota se calcula con el sistema alemán: cada mes se amortiza "
+            "la misma porción de capital (capital ÷ cuotas) y se cobra un "
+            "interés fijo sobre el monto original del préstamo, por lo que "
+            "todas las cuotas son iguales. Esa cuota no debe exceder el 40% "
+            "del ingreso declarado del cliente (BR-LOAN-002)."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
@@ -860,6 +863,14 @@ class LoansView(BaseView):
         if not (principal and term and first_due_date):
             self._toast.show_message("Complete capital, plazo y primer vencimiento.")
             return
+        if not es_fecha_valida(first_due_date):
+            self._edit_first_due_date.set_error(True)
+            self._toast.show_message(
+                "Revise el primer vencimiento: use el formato "
+                f"{DISPLAY_DATE_PLACEHOLDER}."
+            )
+            return
+        self._edit_first_due_date.set_error(False)
         try:
             term_months = int(term)
         except ValueError:
@@ -1464,7 +1475,7 @@ class LoansView(BaseView):
         self._toast.show_message(message)
         self._load_detail(self._selected_loan_id)
 
-    # ---- Página de cronograma (sistema francés) ---------------------------
+    # ---- Página de cronograma (sistema alemán) ----------------------------
 
     def _build_schedule_page(self) -> QWidget:
         page = QWidget()
@@ -1478,7 +1489,7 @@ class LoansView(BaseView):
         back_button.clicked.connect(lambda: self._stack.setCurrentIndex(_PAGE_DETAIL))
         layout.addWidget(back_button)
 
-        title = QLabel("Cronograma de amortización (sistema francés)")
+        title = QLabel("Cronograma de amortización (sistema alemán)")
         title.setStyleSheet(
             f"font-size: 16px; font-weight: 600; font-family: {theme.HEADING_FONT_FAMILY};"
         )

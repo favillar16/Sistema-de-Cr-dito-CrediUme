@@ -415,6 +415,10 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     "El cliente no tiene ingresos declarados registrados (BR-LOAN-002)",
                 )
 
+            # BR-LOAN-002 contra cronograma[0]: bajo el sistema alemán
+            # (BR-LOAN-013) todas las cuotas son iguales salvo la última, que
+            # difiere en centavos por el redondeo del capital, así que la
+            # primera es la cuota representativa del préstamo.
             cronograma = calcular_cronograma(capital, tasa_interes, request.term_months)
             cuota_mensual = cronograma[0].monto_cuota
             cuota_maxima = (
@@ -424,7 +428,8 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
             if cuota_mensual > cuota_maxima:
                 context.abort(
                     grpc.StatusCode.FAILED_PRECONDITION,
-                    "La cuota mensual excede el 40% del ingreso declarado (BR-LOAN-002)",
+                    "La cuota mensual excede el 40% del ingreso declarado "
+                    "(BR-LOAN-002)",
                 )
 
             prestamos_existentes = (
@@ -524,6 +529,8 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     "El cliente no tiene ingresos declarados registrados (BR-LOAN-002)",
                 )
 
+            # Primera cuota, por el mismo motivo que en CreateLoan: es la
+            # cuota representativa del cronograma alemán.
             cronograma = calcular_cronograma(
                 capital, prestamo.interest_rate, request.term_months
             )
@@ -535,7 +542,8 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
             if cuota_mensual > cuota_maxima:
                 context.abort(
                     grpc.StatusCode.FAILED_PRECONDITION,
-                    "La cuota mensual excede el 40% del ingreso declarado (BR-LOAN-002)",
+                    "La cuota mensual excede el 40% del ingreso declarado "
+                    "(BR-LOAN-002)",
                 )
 
             monto_anterior = prestamo.principal_amount

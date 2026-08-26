@@ -6,6 +6,7 @@ from cas_client.rbac_ui import (
     can_manage_users,
     can_originate_credit,
     can_supervise_cash_sessions,
+    can_view_payment_status_report,
     can_view_period_report,
     is_teller,
     role_at_least,
@@ -79,7 +80,7 @@ def test_fixed_interest_rate_matches_server_side_constant():
     # two processes, same as rbac_ui.py's own module docstring notes for
     # role_at_least/rbac.py). This test exists so a drift is caught here
     # instead of silently rejecting loans in the UI's "Estándar" flow.
-    assert FIXED_INTEREST_RATE == "0.18"  # 18% anual = 1,5% mensual
+    assert FIXED_INTEREST_RATE == "0.45"  # 45% anual = 3,75% mensual
 
 
 def test_is_teller_only_matches_the_cashier_role():
@@ -181,3 +182,26 @@ def test_delete_loan_matches_originating_credit():
     vuelve a moverse sin la otra, esto lo marca."""
     for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
         assert can_delete_loan(role) == can_originate_credit(role), role
+
+
+def test_payment_status_report_gate_matches_rbac_tables_exactly():
+    """BR-DASH-003. Misma guarda de sincronización que el reporte de período:
+    se compara contra la tabla METHOD_ROLES real en vez de repetir a mano la
+    expectativa."""
+    from cas_server.security.rbac import allowed_roles
+
+    permitidos = allowed_roles(
+        "/dashboard.DashboardService/GetClientPaymentStatusReport"
+    )
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+        esperado = any(permitido.value == role for permitido in permitidos)
+        assert can_view_payment_status_report(role) == esperado, role
+
+
+def test_payment_status_report_is_gated_lower_than_the_period_report():
+    """La cobranza la trabaja el Analista de Crédito; el cierre de período es
+    material de gerencia. Si los dos gates se igualaran, uno de los dos
+    estaría mal."""
+    assert can_view_payment_status_report("CREDIT_ANALYST")
+    assert not can_view_period_report("CREDIT_ANALYST")
+    assert not can_view_payment_status_report("CASHIER")

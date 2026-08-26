@@ -111,6 +111,16 @@ def confirmar_o_duplicado(
 def analizar_fecha(
     valor: str, nombre_campo: str, contexto: grpc.ServicerContext
 ) -> date:
+    """Fecha en formato de cable (ISO, AAAA-MM-DD), que es lo que declaran los
+    .proto.
+
+    El mensaje de error nombra ese formato a propósito, aunque el operador
+    escriba DD/MM/AAAA: quien llegue acá con un valor inválido es un cliente
+    que no tradujo, no una persona tipeando. La interfaz valida antes de
+    enviar (cas_client/formatting.py's es_fecha_valida) y avisa en DD/MM/AAAA,
+    justamente para que este mensaje no le llegue a un operador diciéndole que
+    use un formato que el formulario nunca le pidió.
+    """
     try:
         return date.fromisoformat(valor)
     except (ValueError, TypeError):

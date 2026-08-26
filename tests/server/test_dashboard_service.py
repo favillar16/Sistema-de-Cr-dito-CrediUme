@@ -80,10 +80,16 @@ def _record_payment(loan_id, amount, *, paid_at=None):
         session.commit()
 
 
-def _cuota(principal="1000.00", rate="0.12", term=6):
-    """Monto de una cuota del cronograma francés, para no hardcodear en los
-    asserts el resultado de la misma matemática que el servidor usa."""
-    return calcular_cronograma(Decimal(principal), Decimal(rate), term)[0].monto_cuota
+def _primeras_cuotas(cantidad, principal="1000.00", rate="0.12", term=6):
+    """Suma de las primeras `cantidad` cuotas del cronograma, para no
+    hardcodear en los asserts el resultado de la misma matemática que el
+    servidor usa.
+
+    Bajo el sistema alemán (BR-LOAN-013) las cuotas **no** son iguales entre
+    sí, así que dos cuotas no son "la primera por 2": hay que sumarlas.
+    """
+    cronograma = calcular_cronograma(Decimal(principal), Decimal(rate), term)
+    return sum(fila.monto_cuota for fila in cronograma[:cantidad])
 
 
 def test_empty_database_returns_zeroed_stats(servicer):
@@ -135,7 +141,7 @@ def test_overdue_total_sums_only_unpaid_past_due_installments(servicer):
         dashboard_service_pb2.GetDashboardStatsRequest(), FakeContext()
     )
     assert response.overdue_loans_count == 1
-    assert Decimal(response.total_overdue_amount) == _cuota() * 2
+    assert Decimal(response.total_overdue_amount) == _primeras_cuotas(2)
     # La mora es estrictamente menor que el saldo total: el saldo incluye
     # además las 4 cuotas que todavía no vencieron.
     assert Decimal(response.total_overdue_amount) < Decimal(
@@ -149,7 +155,7 @@ def test_overdue_total_is_zero_for_a_loan_paid_up_to_date(servicer):
     loan_id = _create_loan(
         client_id, LoanStatusEnum.ACTIVE, first_due_date=primer_vencimiento
     )
-    _record_payment(loan_id, str(_cuota() * 2))
+    _record_payment(loan_id, str(_primeras_cuotas(2)))
 
     response = servicer.GetDashboardStats(
         dashboard_service_pb2.GetDashboardStatsRequest(), FakeContext()
@@ -275,3 +281,199 @@ def test_expires_stale_approved_loans_lazily_like_other_reads(servicer):
     with SessionLocal() as session:
         loan = session.query(Loan).filter(Loan.client_id == client_id).one()
         assert loan.status == LoanStatusEnum.EXPIRED
+
+
+# ---- BR-DASH-003: estado de pago de los clientes -------------------------
+
+
+def _estado_pago(servicer, only_overdue=False):
+    return servicer.GetClientPaymentStatusReport(
+        dashboard_service_pb2.GetClientPaymentStatusReportRequest(
+            only_overdue=only_overdue
+        ),
+        FakeContext(),
+    )
+
+
+def test_payment_status_lists_only_clients_with_a_live_portfolio(servicer):
+    """Un cliente sin préstamos, o con todos pagados, no tiene estado de pago
+    que informar: aparecería como una fila en cero que solo alarga la lista de
+    cobranza."""
+    con_activo = _create_client("8100001", "ps_active@example.com")
+    _create_loan(con_activo, LoanStatusEnum.ACTIVE)
+    con_pagado = _create_client("8100002", "ps_paid@example.com")
+    _create_loan(con_pagado, LoanStatusEnum.PAID)
+    _create_client("8100003", "ps_none@example.com")  # sin préstamos
+
+    response = _estado_pago(servicer)
+
+    assert [fila.client_id for fila in response.rows] == [str(con_activo)]
+    assert response.clients_count == 1
+
+
+def test_payment_status_marks_a_client_up_to_date_as_al_dia(servicer):
+    client_id = _create_client("8100004", "ps_aldia@example.com")
+    # Primer vencimiento en el futuro: todavía no venció ninguna cuota.
+    futuro = datetime.now(timezone.utc).date() + timedelta(days=10)
+    _create_loan(client_id, LoanStatusEnum.ACTIVE, first_due_date=futuro)
+
+    (fila,) = _estado_pago(servicer).rows
+
+    assert fila.payment_status == "AL_DIA"
+    assert Decimal(fila.overdue_amount) == Decimal("0.00")
+    assert fila.overdue_installments_count == 0
+    # Sigue debiendo el préstamo entero: "al día" no es "sin saldo".
+    assert Decimal(fila.outstanding_balance) > Decimal("0.00")
+
+
+def test_payment_status_reports_overdue_amount_and_installment_count(servicer):
+    client_id = _create_client("8100005", "ps_mora@example.com")
+    primer_vencimiento = datetime.now(timezone.utc).date() - timedelta(days=40)
+    _create_loan(client_id, LoanStatusEnum.ACTIVE, first_due_date=primer_vencimiento)
+
+    (fila,) = _estado_pago(servicer).rows
+
+    assert fila.payment_status == "CUOTA_VENCIDA"
+    assert Decimal(fila.overdue_amount) == _primeras_cuotas(2)
+    assert fila.overdue_installments_count == 2
+    # La mora es un subconjunto del saldo, nunca al revés (BR-DASH-001).
+    assert Decimal(fila.overdue_amount) < Decimal(fila.outstanding_balance)
+
+
+def test_payment_status_next_due_is_the_earliest_unpaid_installment(servicer):
+    """Lo que necesita quien llama al cliente: cuál es la próxima cuota que
+    tiene que cobrar, no la primera del cronograma."""
+    client_id = _create_client("8100006", "ps_proxima@example.com")
+    primer_vencimiento = datetime.now(timezone.utc).date() - timedelta(days=40)
+    loan_id = _create_loan(
+        client_id, LoanStatusEnum.ACTIVE, first_due_date=primer_vencimiento
+    )
+    # Paga exactamente la cuota 1: la próxima impaga pasa a ser la 2.
+    _record_payment(loan_id, str(_primeras_cuotas(1)))
+
+    (fila,) = _estado_pago(servicer).rows
+
+    cronograma = calcular_cronograma(
+        Decimal("1000.00"),
+        Decimal("0.12"),
+        6,
+        fecha_primer_vencimiento=primer_vencimiento,
+    )
+    assert fila.next_due_date == cronograma[1].fecha_vencimiento.isoformat()
+    assert Decimal(fila.next_due_amount) == cronograma[1].monto_cuota
+    assert fila.overdue_installments_count == 1
+
+
+def test_payment_status_defaulted_takes_precedence_over_the_schedule(servicer):
+    """INCUMPLIDO lo declaró un operador (MarkDefaulted); "al día" es una
+    deducción del cronograma. Informar "al día" a alguien con un préstamo
+    incumplido sería el peor de los dos errores posibles."""
+    client_id = _create_client("8100007", "ps_default@example.com")
+    futuro = datetime.now(timezone.utc).date() + timedelta(days=10)
+    _create_loan(client_id, LoanStatusEnum.ACTIVE, first_due_date=futuro)
+    _create_loan(client_id, LoanStatusEnum.DEFAULTED)
+
+    (fila,) = _estado_pago(servicer).rows
+
+    assert fila.payment_status == "INCUMPLIDO"
+    assert fila.active_loans_count == 1
+    assert fila.defaulted_loans_count == 1
+
+
+def test_payment_status_only_overdue_filter_drops_the_clients_up_to_date(servicer):
+    al_dia = _create_client("8100008", "ps_filtro_aldia@example.com")
+    futuro = datetime.now(timezone.utc).date() + timedelta(days=10)
+    _create_loan(al_dia, LoanStatusEnum.ACTIVE, first_due_date=futuro)
+    en_mora = _create_client("8100009", "ps_filtro_mora@example.com")
+    _create_loan(
+        en_mora,
+        LoanStatusEnum.ACTIVE,
+        first_due_date=datetime.now(timezone.utc).date() - timedelta(days=40),
+    )
+
+    completo = _estado_pago(servicer, only_overdue=False)
+    filtrado = _estado_pago(servicer, only_overdue=True)
+
+    assert {fila.client_id for fila in completo.rows} == {str(al_dia), str(en_mora)}
+    assert [fila.client_id for fila in filtrado.rows] == [str(en_mora)]
+    assert filtrado.only_overdue is True
+
+
+def test_payment_status_totals_describe_the_rows_returned_not_the_portfolio(servicer):
+    """Con el filtro puesto, los totales son los del subconjunto -- por eso no
+    tienen por qué coincidir con los del panel, y el documento lo aclara."""
+    al_dia = _create_client("8100010", "ps_tot_aldia@example.com")
+    futuro = datetime.now(timezone.utc).date() + timedelta(days=10)
+    _create_loan(al_dia, LoanStatusEnum.ACTIVE, first_due_date=futuro)
+    en_mora = _create_client("8100011", "ps_tot_mora@example.com")
+    _create_loan(
+        en_mora,
+        LoanStatusEnum.ACTIVE,
+        first_due_date=datetime.now(timezone.utc).date() - timedelta(days=40),
+    )
+
+    completo = _estado_pago(servicer, only_overdue=False)
+    filtrado = _estado_pago(servicer, only_overdue=True)
+
+    assert completo.clients_count == 2
+    assert filtrado.clients_count == 1
+    assert Decimal(filtrado.total_outstanding) < Decimal(completo.total_outstanding)
+    # La mora, en cambio, es la misma: el cliente al día no aportaba nada.
+    assert Decimal(filtrado.total_overdue) == Decimal(completo.total_overdue)
+
+
+def test_payment_status_overdue_total_matches_the_dashboard(servicer):
+    """La misma cifra abierta por cliente y sumada tiene que dar el
+    total_overdue_amount de BR-DASH-001 -- si divergieran, una de las dos
+    pantallas estaría mintiendo."""
+    primero = _create_client("8100012", "ps_match_a@example.com")
+    segundo = _create_client("8100013", "ps_match_b@example.com")
+    atrasado = datetime.now(timezone.utc).date() - timedelta(days=40)
+    _create_loan(primero, LoanStatusEnum.ACTIVE, first_due_date=atrasado)
+    _create_loan(segundo, LoanStatusEnum.ACTIVE, first_due_date=atrasado)
+
+    reporte = _estado_pago(servicer)
+    panel = servicer.GetDashboardStats(
+        dashboard_service_pb2.GetDashboardStatsRequest(), FakeContext()
+    )
+
+    assert Decimal(reporte.total_overdue) == Decimal(panel.total_overdue_amount)
+    assert Decimal(reporte.total_outstanding) == Decimal(
+        panel.total_outstanding_balance
+    )
+
+
+def test_payment_status_orders_the_worst_debtors_first(servicer):
+    poco = _create_client("8100014", "ps_orden_poco@example.com")
+    mucho = _create_client("8100015", "ps_orden_mucho@example.com")
+    _create_loan(
+        poco,
+        LoanStatusEnum.ACTIVE,
+        first_due_date=datetime.now(timezone.utc).date() - timedelta(days=5),
+    )
+    _create_loan(
+        mucho,
+        LoanStatusEnum.ACTIVE,
+        first_due_date=datetime.now(timezone.utc).date() - timedelta(days=100),
+    )
+
+    filas = _estado_pago(servicer).rows
+
+    montos = [Decimal(fila.overdue_amount) for fila in filas]
+    assert montos == sorted(montos, reverse=True)
+    assert filas[0].client_id == str(mucho)
+
+
+def test_payment_status_expires_stale_approved_loans_lazily(servicer):
+    """Igual que el resto de las lecturas de préstamos (BR-LOAN-003)."""
+    client_id = _create_client("8100016", "ps_expira@example.com")
+    loan_id = _create_loan(
+        client_id,
+        LoanStatusEnum.APPROVED,
+        approved_at=datetime.now(timezone.utc) - timedelta(days=31),
+    )
+
+    _estado_pago(servicer)
+
+    with SessionLocal() as session:
+        assert session.get(Loan, loan_id).status == LoanStatusEnum.EXPIRED

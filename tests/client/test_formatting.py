@@ -5,10 +5,11 @@ tests/client/test_rbac_ui.py -- ver la nota de CLAUDE.md sobre el fixture
 autouse `clean_db`, que igual corre para estos tests aunque no toquen la base.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 
 from cas_client.formatting import (
     DISPLAY_DATE_PLACEHOLDER,
+    es_fecha_valida,
     fecha,
     fecha_a_iso,
     fecha_hora,
@@ -19,18 +20,18 @@ from cas_client.formatting import (
 
 
 def test_rate_percent_mensual_converts_the_nominal_annual_rate():
-    """La tasa fija vigente (18% anual) es el 1,5% mensual que declaran el
+    """La tasa fija vigente (45% anual) es el 3,75% mensual que declaran el
     Pagaré y el Contrato -- amortization.py cobra tasa_anual / 12 por
     período."""
-    assert rate_percent_mensual("0.18") == "1,5%"
+    assert rate_percent_mensual("0.45") == "3,75%"
     assert rate_percent_mensual("0.24") == "2%"
 
 
 def test_rate_percent_mensual_uses_a_decimal_comma():
-    """Se imprime en documentos legales en español, donde "1.5%" se lee como
+    """Se imprime en documentos legales en español, donde "3.75%" se lee como
     separador de miles."""
-    assert "," in rate_percent_mensual("0.18")
-    assert "." not in rate_percent_mensual("0.18")
+    assert "," in rate_percent_mensual("0.45")
+    assert "." not in rate_percent_mensual("0.45")
 
 
 def test_rate_percent_mensual_rounds_rates_that_do_not_divide_evenly():
@@ -136,3 +137,48 @@ def test_fecha_hora_renders_the_local_wall_clock_of_a_utc_instant():
     esperado = a_hora_local(instante).strftime("%d/%m/%Y %H:%M")
     assert fecha_hora(instante) == esperado
     assert fecha_hora(instante.replace(tzinfo=timezone.utc)) == esperado
+
+
+def test_fecha_a_iso_accepts_the_display_format_with_other_separators():
+    """El placeholder pide DD/MM/AAAA, pero el guion y el punto son igual de
+    habituales al tipear (y el teclado numérico no tiene la barra a mano).
+    Es la misma fecha, escrita distinto -- no un formato nuevo."""
+    assert fecha_a_iso("09-10-2026") == "2026-10-09"
+    assert fecha_a_iso("09.10.2026") == "2026-10-09"
+
+
+def test_fecha_a_iso_never_reads_an_iso_value_as_day_first():
+    """La guarda que hace segura la tolerancia de separadores de arriba: si
+    "2026-10-09" se normalizara antes de probar ISO, se leería como día 2026 y
+    se rompería."""
+    assert fecha_a_iso("2026-10-09") == "2026-10-09"
+    assert fecha_a_iso("2026/10/09") == "2026-10-09"
+
+
+def test_es_fecha_valida_accepts_what_fecha_a_iso_can_convert():
+    for valor in ("09/10/2026", "9/10/2026", "09-10-2026", "2026-10-09"):
+        assert es_fecha_valida(valor), valor
+
+
+def test_es_fecha_valida_rejects_what_the_server_would_reject():
+    """Existe para avisar en DD/MM/AAAA antes de la llamada: el mensaje del
+    servidor nombra el formato de cable (AAAA-MM-DD), que no es el que el
+    formulario pide."""
+    assert not es_fecha_valida("")
+    assert not es_fecha_valida("   ")
+    assert not es_fecha_valida("31/02/2026")  # día inexistente
+    assert not es_fecha_valida("31/31/2026")
+    assert not es_fecha_valida("mañana")
+
+
+def test_es_fecha_valida_agrees_with_fecha_a_iso():
+    """Invariante que sostiene el patrón de las vistas (validar y recién
+    después convertir): es_fecha_valida() es exactamente "fecha_a_iso()
+    produjo una fecha ISO real"."""
+    for valor in ("09/10/2026", "09-10-2026", "2026-10-09", "31/02/2026", "mañana", ""):
+        try:
+            date.fromisoformat(fecha_a_iso(valor))
+            convertible = True
+        except ValueError:
+            convertible = False
+        assert es_fecha_valida(valor) is convertible, valor

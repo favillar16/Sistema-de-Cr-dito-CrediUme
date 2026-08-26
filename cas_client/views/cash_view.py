@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from cas_client import documents, documents_docx, theme
 from cas_client.formatting import (
     DISPLAY_DATE_PLACEHOLDER,
+    es_fecha_valida,
     fecha,
     fecha_a_iso,
     fecha_hora,
@@ -1115,6 +1116,24 @@ class CashView(BaseView):
             return
         desde = self._history_start.text().strip()
         hasta = self._history_end.text().strip()
+        # Ambas son opcionales (vacío = sin límite por ese lado), pero si el
+        # operador escribió algo tiene que ser una fecha: el servidor rechaza
+        # lo demás con un mensaje que nombra el formato de cable
+        # ("AAAA-MM-DD"), que no es el que este formulario pide.
+        invalidas = False
+        for campo, valor in (
+            (self._history_start, desde),
+            (self._history_end, hasta),
+        ):
+            malo = bool(valor) and not es_fecha_valida(valor)
+            campo.set_error(malo)
+            invalidas = invalidas or malo
+        if invalidas:
+            self._toast.show_message(
+                "Revise las fechas del historial: use el formato "
+                f"{DISPLAY_DATE_PLACEHOLDER}."
+            )
+            return
         self._history_progress.setRange(0, 0)
         self._history_progress.show()
         self._history_worker = AsyncWorker(

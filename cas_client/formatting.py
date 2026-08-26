@@ -50,11 +50,12 @@ def rate_percent_mensual(value: str) -> str:
     monthly percentage: "0.18" -> "1,5%".
 
     The loan's interest_rate is a nominal annual rate and amortization.py
-    charges tasa_anual / 12 per period, so the monthly figure is what the
-    borrower is actually charged each month -- and it's how the Pagaré and
-    Contrato clauses express the interés compensatorio ("1,5% mensual sobre
-    saldos deudores"). Quoting the annual number in that clause would state a
-    different rate than the one the contract text promises.
+    charges tasa_anual / 12 per period **on the loan's original principal**
+    (BR-LOAN-013), so the monthly figure is what the borrower is actually
+    charged each month -- and it's how the Pagaré and Contrato clauses express
+    the interés compensatorio ("3,75% mensual, calculado sobre el monto
+    original del préstamo"). Quoting the annual number in that clause would
+    state a different rate than the one the contract text promises.
 
     Uses a decimal comma, unlike rate_percent() above: these render into legal
     documents written in Spanish, where "1.5%" reads as a thousands separator.
@@ -95,26 +96,71 @@ def fecha(value: str) -> str:
         return value
 
 
+# Separadores que un operador escribe indistintamente al tipear una fecha en
+# el formato DD/MM/AAAA que le pide el formulario: la barra es la que muestra
+# el placeholder, pero el guion y el punto son igual de habituales (y el
+# teclado numérico tiene el punto a mano, no la barra). Se normalizan a "/"
+# antes de interpretar -- nunca al revés, para no tocar una fecha ISO.
+_SEPARADORES_DE_FECHA = ("-", ".", " ")
+
+
+def _normalizar_separadores(text: str) -> str:
+    for separador in _SEPARADORES_DE_FECHA:
+        text = text.replace(separador, "/")
+    return text
+
+
 def fecha_a_iso(value: str) -> str:
     """Inverse of fecha(): turns what the user typed into the wire format the
     server's analizar_fecha() expects. "10/10/2026" -> "2026-10-10".
 
-    Already-ISO input passes through unchanged, so a value round-tripped from
-    a response that fecha() could not parse is not corrupted here. Anything
-    else is returned unchanged too, on purpose: the server is the authority on
-    date validity (it aborts INVALID_ARGUMENT with a message the views
-    already translate), so silently "fixing" or blanking a malformed date
-    here would only hide the real error from the user.
+    Accepts the display format with any of the usual separators
+    ("10-10-2026", "10.10.2026") since that is the same date the placeholder
+    asked for, only typed differently. Already-ISO input passes through
+    unchanged -- and is tried *before* any normalisation, so "2026-10-10" is
+    never mangled into a day-first reading.
+
+    Anything else is returned unchanged too, on purpose: the server is the
+    authority on date validity (it aborts INVALID_ARGUMENT with a message the
+    views already translate), so silently "fixing" or blanking a malformed
+    date here would only hide the real error from the user. Views call
+    es_fecha_valida() first precisely so that case is caught before the round
+    trip.
     """
     text = (value or "").strip()
     if not text:
         return text
-    for pattern in (DISPLAY_DATE_FORMAT, "%Y-%m-%d"):
-        try:
-            return datetime.strptime(text, pattern).date().isoformat()
-        except ValueError:
-            continue
+    for candidate in (text, _normalizar_separadores(text)):
+        # DISPLAY_DATE_FORMAT antes que "%Y/%m/%d": son inconfundibles (el año
+        # tiene 4 dígitos y no puede ser un día), pero el orden deja explícito
+        # que lo que el formulario pide es DD/MM/AAAA.
+        for pattern in ("%Y-%m-%d", DISPLAY_DATE_FORMAT, "%Y/%m/%d"):
+            try:
+                return datetime.strptime(candidate, pattern).date().isoformat()
+            except ValueError:
+                continue
     return text
+
+
+def es_fecha_valida(value: str) -> bool:
+    """True si `value` es algo que fecha_a_iso() sabe convertir a formato de
+    cable -- es decir, si el operador escribió una fecha real.
+
+    Existe para que cada vista pueda marcar el campo en rojo y explicar el
+    formato DD/MM/AAAA *antes* de mandar la solicitud. Sin esto el único aviso
+    llegaba del servidor, cuyo mensaje nombra el formato de cable
+    ("AAAA-MM-DD"): al operador se le decía que usara un formato que el
+    formulario nunca le pidió. Un valor vacío devuelve False -- quien llama
+    decide si el campo es obligatorio, pero "" no es una fecha.
+    """
+    convertida = fecha_a_iso(value)
+    if not convertida:
+        return False
+    try:
+        date.fromisoformat(convertida)
+    except ValueError:
+        return False
+    return True
 
 
 def a_hora_local(value: datetime) -> datetime:

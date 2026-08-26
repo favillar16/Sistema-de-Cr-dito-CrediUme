@@ -44,6 +44,11 @@ class DashboardServiceStub(object):
                 request_serializer=dashboard__service__pb2.GetPeriodReportRequest.SerializeToString,
                 response_deserializer=dashboard__service__pb2.GetPeriodReportResponse.FromString,
                 _registered_method=True)
+        self.GetClientPaymentStatusReport = channel.unary_unary(
+                '/dashboard.DashboardService/GetClientPaymentStatusReport',
+                request_serializer=dashboard__service__pb2.GetClientPaymentStatusReportRequest.SerializeToString,
+                response_deserializer=dashboard__service__pb2.GetClientPaymentStatusReportResponse.FromString,
+                _registered_method=True)
 
 
 class DashboardServiceServicer(object):
@@ -66,6 +71,17 @@ class DashboardServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetClientPaymentStatusReport(self, request, context):
+        """BR-DASH-003: estado de pago de los clientes, una fila por cliente con
+        cartera viva (al menos un préstamo ACTIVE o DEFAULTED). A diferencia de
+        GetDashboardStats (totales agregados) y de GetPeriodReport (lo ocurrido
+        en un rango), esto es un listado nominal: quién está al día y quién
+        debe, para llamar/gestionar la cobranza.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_DashboardServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -78,6 +94,11 @@ def add_DashboardServiceServicer_to_server(servicer, server):
                     servicer.GetPeriodReport,
                     request_deserializer=dashboard__service__pb2.GetPeriodReportRequest.FromString,
                     response_serializer=dashboard__service__pb2.GetPeriodReportResponse.SerializeToString,
+            ),
+            'GetClientPaymentStatusReport': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetClientPaymentStatusReport,
+                    request_deserializer=dashboard__service__pb2.GetClientPaymentStatusReportRequest.FromString,
+                    response_serializer=dashboard__service__pb2.GetClientPaymentStatusReportResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -134,6 +155,33 @@ class DashboardService(object):
             '/dashboard.DashboardService/GetPeriodReport',
             dashboard__service__pb2.GetPeriodReportRequest.SerializeToString,
             dashboard__service__pb2.GetPeriodReportResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetClientPaymentStatusReport(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dashboard.DashboardService/GetClientPaymentStatusReport',
+            dashboard__service__pb2.GetClientPaymentStatusReportRequest.SerializeToString,
+            dashboard__service__pb2.GetClientPaymentStatusReportResponse.FromString,
             options,
             channel_credentials,
             insecure,

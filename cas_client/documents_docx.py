@@ -11,6 +11,7 @@ so the authorised commercial terms can't drift between the PDF and the DOCX
 of the same contract."""
 
 from docx import Document
+from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -299,6 +300,75 @@ def reporte_periodo_docx(report, generated_by: str = "") -> Document:
     return document
 
 
+def _apaisar(document: Document) -> None:
+    """Pasa la hoja a orientación horizontal.
+
+    Cambiar `orientation` sola no alcanza: Word toma el tamaño de página de
+    page_width/page_height, así que hay que intercambiarlos además, o sale una
+    hoja vertical declarada como horizontal.
+    """
+    seccion = document.sections[0]
+    ancho, alto = seccion.page_width, seccion.page_height
+    seccion.orientation = WD_ORIENT.LANDSCAPE
+    seccion.page_width, seccion.page_height = alto, ancho
+
+
+def reporte_estado_pagos_docx(report, generated_by: str = "") -> Document:
+    """BR-DASH-003, contraparte .docx de documents.reporte_estado_pagos_html().
+    Sin banner de borrador, igual criterio que reporte_periodo_docx.
+
+    Es el único documento apaisado: su tabla tiene 8 columnas (el resto tiene
+    2 o 3), y en vertical las celdas se parten en varias líneas cada una hasta
+    volver ilegible la fila. El PDF hace lo propio poniendo la impresora en
+    horizontal -- ver dashboard_view.py.
+
+    report: dashboard_service_pb2.GetClientPaymentStatusReportResponse"""
+    document = Document()
+    _apaisar(document)
+    _add_header(document, "Estado de Pago de Clientes")
+
+    alcance = (
+        "Solo clientes con cuotas vencidas o préstamos incumplidos"
+        if report.only_overdue
+        else "Todos los clientes con cartera viva (préstamos activos o incumplidos)"
+    )
+    lineas = [
+        ("Fecha del reporte", fecha_hora(report.generated_at.ToDatetime())),
+        ("Alcance", alcance),
+        ("Clientes informados", str(report.clients_count)),
+        ("Con atraso", str(report.overdue_clients_count)),
+        ("Saldo pendiente", gs(report.total_outstanding)),
+        ("Monto vencido", gs(report.total_overdue)),
+    ]
+    if generated_by:
+        lineas.append(("Generado por", generated_by))
+    _add_labeled_lines(document, lineas)
+
+    # Mismas columnas y mismas filas que el PDF y que la tabla de la vista --
+    # ver documents.ESTADO_PAGOS_COLUMNAS / _filas_estado_pagos.
+    columnas = documents.ESTADO_PAGOS_COLUMNAS
+    filas = documents._filas_estado_pagos(report)
+    table = document.add_table(rows=1 + len(filas), cols=len(columnas))
+    table.style = "Table Grid"
+    for col, text in enumerate(columnas):
+        table.rows[0].cells[col].text = text
+    for row_index, tupla in enumerate(filas, start=1):
+        cells = table.rows[row_index].cells
+        for col, celda in enumerate(tupla):
+            cells[col].text = celda
+
+    _add_footer_note(
+        document,
+        'El "monto vencido" es lo ya exigible e impago; el "saldo pendiente" '
+        "incluye además las cuotas futuras todavía no vencidas. Los totales "
+        "corresponden a los clientes listados, no a toda la cartera.",
+    )
+    _add_footer_note(
+        document, "Documento generado por el sistema de CREDIMED UME. Uso interno."
+    )
+    return document
+
+
 def liquidacion_docx(loan, client, schedule) -> Document:
     """loan: loan_service_pb2.GetLoanByIdResponse
     client: client_service_pb2.GetClientByIdResponse
@@ -318,7 +388,7 @@ def liquidacion_docx(loan, client, schedule) -> Document:
                 "Tasa de interés",
                 f"{rate_percent(loan.interest_rate)} anual "
                 f"({rate_percent_mensual(loan.interest_rate)} mensual sobre "
-                "saldos deudores)",
+                "el monto original)",
             ),
             ("Plazo", f"{loan.term_months} meses"),
             ("Total pagado", gs(loan.total_paid)),
@@ -375,7 +445,7 @@ def pagare_docx(loan, client) -> Document:
     body.add_run(
         ", que PAGARÉ(MOS) solidariamente, a su orden, libre de gastos y sin "
         f"protesto, en {loan.term_months} cuotas iguales, mensuales y "
-        f"consecutivas, con vencimiento la primera de ellas el día "
+        "consecutivas, con vencimiento la primera de ellas el día "
         f"{fecha(loan.first_due_date)}, y las siguientes cuotas en esas mismas "
         f"fechas de los meses subsiguientes hasta su total cancelación, en "
         f"el domicilio de {documents._COMPANY_NAME}, sito en "
@@ -387,7 +457,7 @@ def pagare_docx(loan, client) -> Document:
         "Queda expresamente pactado que los importes de las cuotas "
         "documentadas en este instrumento devengarán un interés "
         f"compensatorio del {rate_percent_mensual(loan.interest_rate)} "
-        "mensual sobre saldos deudores."
+        "mensual, calculado sobre el monto original del préstamo."
     )
 
     mora_paragraph = document.add_paragraph()
@@ -510,17 +580,19 @@ def contrato_docx(loan, client) -> Document:
             "Segunda (Reembolso)",
             "El(Los) Prestatario(s) se compromete(n) a reembolsar el "
             f"préstamo otorgado en {loan.term_months} cuotas iguales, "
-            "mensuales y consecutivas, bajo el sistema de amortización "
-            f"francés (cuota fija), venciendo la primera de ellas el día "
+            "mensuales y consecutivas: cada cuota amortiza una porción "
+            "constante del capital e incluye un interés fijo calculado sobre "
+            "el monto original del préstamo, de modo que todas las cuotas son "
+            "del mismo importe. La primera de ellas vence el día "
             f"{fecha(loan.first_due_date)}, mediante transferencia bancaria, "
             "débito directo o descuento en cuenta, según lo acordado.",
         ),
         (
             "Tercera (Intereses)",
             "Se acuerda el pago de un interés compensatorio del "
-            f"{rate_percent_mensual(loan.interest_rate)} mensual sobre "
-            "saldos deudores, abonado junto con las cuotas de amortización "
-            "del capital. Para el caso de falta de pago en la fecha "
+            f"{rate_percent_mensual(loan.interest_rate)} mensual, "
+            "calculado sobre el monto original del préstamo y abonado junto "
+            "con las cuotas de amortización del capital. Para el caso de falta de pago en la fecha "
             "convenida, se aplicará además, sobre cada cuota vencida e "
             "impaga, un interés moratorio en carácter punitorio del "
             f"{documents._TERM_MORATORY_RATE}, que se devengará a partir de "

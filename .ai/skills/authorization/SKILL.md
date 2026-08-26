@@ -37,6 +37,16 @@ mapped per RPC method:
     whole of `CashService` stay `CASHIER_AND_ABOVE`. This was an
     earlier-model-corrected change: those origination methods used to
     be `CASHIER_AND_ABOVE` back when nobody had the role.
+-   The two dashboard reports sit at **different** tiers on purpose:
+    `GetPeriodReport` (`BR-DASH-002`) is `MANAGER_AND_ABOVE` because a
+    period close is management material, while
+    `GetClientPaymentStatusReport` (`BR-DASH-003`) is
+    `CREDIT_ANALYST_AND_ABOVE` because chasing overdue clients is the
+    analyst's job. The teller is excluded from both, by the same
+    reasoning as `BR-CAJA-005`. Mirrored in the UI by
+    `rbac_ui.can_view_period_report()` /
+    `can_view_payment_status_report()`, each guarded by a test that
+    reads `METHOD_ROLES` instead of restating the expectation.
 -   **Not every authorization rule belongs in `rbac.py`.** `rbac.py`
     answers "may this role call this method". Rules of the form "on
     which rows may it act" live in the servicer — see

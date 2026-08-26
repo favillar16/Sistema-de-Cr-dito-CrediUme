@@ -523,6 +523,21 @@ class DashboardServiceClient:
             error_cls=ApiError,
         )
 
+    def get_client_payment_status_report(
+        self, access_token: str, only_overdue: bool = False
+    ) -> dashboard_service_pb2.GetClientPaymentStatusReportResponse:
+        """BR-DASH-003. `only_overdue` recorta el listado a los clientes con
+        cuotas vencidas o préstamos incumplidos -- la lista de gestión de
+        cobranza. Sin filtro devuelve toda la cartera viva."""
+        return _invoke(
+            self._stub.GetClientPaymentStatusReport,
+            dashboard_service_pb2.GetClientPaymentStatusReportRequest(
+                only_overdue=only_overdue
+            ),
+            access_token=access_token,
+            error_cls=ApiError,
+        )
+
 
 class CashServiceClient:
     """Thin wrapper around the CashService gRPC stub (BR-CAJA-*).

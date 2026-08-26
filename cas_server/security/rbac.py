@@ -76,6 +76,14 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     # MANAGER+ en vez de seguir a GetDashboardStats, que sí es CASHIER_AND_ABOVE
     # por ser solo conteos de la pantalla de inicio.
     "/dashboard.DashboardService/GetPeriodReport": MANAGER_AND_ABOVE,
+    # BR-DASH-003. Un escalón por debajo del cierre de período: el listado de
+    # estado de pago es material de gestión de cobranza (a quién llamar y por
+    # cuánto), que es trabajo del Analista de Crédito, no solo de la gerencia.
+    # El Cajero queda afuera por el mismo criterio que BR-CAJA-005: consulta y
+    # cobra el préstamo que tiene delante, no gestiona la cartera.
+    "/dashboard.DashboardService/GetClientPaymentStatusReport": (
+        CREDIT_ANALYST_AND_ABOVE
+    ),
     # BR-CAJA-*. Todas son CASHIER_AND_ABOVE porque el turno sobre el que
     # operan se resuelve desde el token, no desde el request: cada rol opera
     # su propia caja. Las dos asimetrías por rol (un Gerente puede cerrar la
