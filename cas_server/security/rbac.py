@@ -57,6 +57,10 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     "/loans.LoanService/UpdateInstallmentAmount": MANAGER_AND_ABOVE,
     "/loans.LoanService/ApproveLoan": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/MarkDefaulted": CREDIT_ANALYST_AND_ABOVE,
+    # BR-LOAN-014: simétrica con MarkDefaulted a propósito -- quien puede poner
+    # la marca de incumplimiento puede sacarla. El cajero queda afuera igual que
+    # de todo el ciclo de vida (BR-CAJA-005): cobra, no decide el estado.
+    "/loans.LoanService/RevertDefault": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/DisburseLoan": MANAGER_AND_ABOVE,
     # BR-LOAN-012: borrar un préstamo cargado por error es la única operación
     # que elimina una fila en vez de moverle el estado. Estuvo en

@@ -89,6 +89,11 @@ class LoanServiceStub(object):
                 request_serializer=loan__service__pb2.MarkDefaultedRequest.SerializeToString,
                 response_deserializer=loan__service__pb2.MarkDefaultedResponse.FromString,
                 _registered_method=True)
+        self.RevertDefault = channel.unary_unary(
+                '/loans.LoanService/RevertDefault',
+                request_serializer=loan__service__pb2.RevertDefaultRequest.SerializeToString,
+                response_deserializer=loan__service__pb2.RevertDefaultResponse.FromString,
+                _registered_method=True)
         self.GetAmortizationSchedule = channel.unary_unary(
                 '/loans.LoanService/GetAmortizationSchedule',
                 request_serializer=loan__service__pb2.GetAmortizationScheduleRequest.SerializeToString,
@@ -188,6 +193,17 @@ class LoanServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RevertDefault(self, request, context):
+        """Revierte un incumplimiento y devuelve el préstamo a ACTIVE -- BR-LOAN-014.
+        Analista de Crédito o superior, y solo sobre un préstamo DEFAULTED. Exige
+        un motivo, que queda auditado: sin esta RPC un préstamo incumplido no
+        admite cobros (RecordPayment exige ACTIVE) ni borrado, y bloquea para
+        siempre la baja del cliente.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetAmortizationSchedule(self, request, context):
         """Plan de amortización calculado bajo demanda (no persistido)
         """
@@ -206,7 +222,8 @@ class LoanServiceServicer(object):
 
     def DeleteLoan(self, request, context):
         """Eliminación definitiva de un préstamo cargado por error -- BR-LOAN-012.
-        Solo Gerente o Administrador, y solo mientras el préstamo no haya movido
+        Analista de Crédito o superior (todos menos el cajero), y solo mientras
+        el préstamo no haya movido
         dinero (PENDING, APPROVED o EXPIRED, y sin ningún pago registrado).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -270,6 +287,11 @@ def add_LoanServiceServicer_to_server(servicer, server):
                     servicer.MarkDefaulted,
                     request_deserializer=loan__service__pb2.MarkDefaultedRequest.FromString,
                     response_serializer=loan__service__pb2.MarkDefaultedResponse.SerializeToString,
+            ),
+            'RevertDefault': grpc.unary_unary_rpc_method_handler(
+                    servicer.RevertDefault,
+                    request_deserializer=loan__service__pb2.RevertDefaultRequest.FromString,
+                    response_serializer=loan__service__pb2.RevertDefaultResponse.SerializeToString,
             ),
             'GetAmortizationSchedule': grpc.unary_unary_rpc_method_handler(
                     servicer.GetAmortizationSchedule,
@@ -584,6 +606,33 @@ class LoanService(object):
             '/loans.LoanService/MarkDefaulted',
             loan__service__pb2.MarkDefaultedRequest.SerializeToString,
             loan__service__pb2.MarkDefaultedResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RevertDefault(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loans.LoanService/RevertDefault',
+            loan__service__pb2.RevertDefaultRequest.SerializeToString,
+            loan__service__pb2.RevertDefaultResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -1,4 +1,5 @@
 from cas_client.rbac_ui import (
+    can_revert_default,
     FIXED_INTEREST_RATE,
     can_delete_loan,
     can_edit_installment_amount,
@@ -205,3 +206,27 @@ def test_payment_status_report_is_gated_lower_than_the_period_report():
     assert can_view_payment_status_report("CREDIT_ANALYST")
     assert not can_view_period_report("CREDIT_ANALYST")
     assert not can_view_payment_status_report("CASHIER")
+
+
+def test_revert_default_gate_matches_rbac_tables_exactly():
+    """BR-LOAN-014. Misma guarda de sincronización que las de arriba: se
+    compara contra la tabla METHOD_ROLES real en vez de repetir a mano la
+    expectativa."""
+    from cas_server.security.rbac import allowed_roles
+
+    permitidos = allowed_roles("/loans.LoanService/RevertDefault")
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+        esperado = any(permitido.value == role for permitido in permitidos)
+        assert can_revert_default(role) == esperado, role
+
+
+def test_revert_default_is_gated_exactly_like_mark_defaulted():
+    """BR-LOAN-014: quien puede poner la marca de incumplimiento puede sacarla.
+    Si los dos gates se separaran, un operador podría marcar un préstamo como
+    incumplido y quedar sin poder deshacerlo -- que es el callejón sin salida
+    que esta regla vino a cerrar."""
+    from cas_server.security.rbac import allowed_roles
+
+    assert allowed_roles("/loans.LoanService/RevertDefault") == allowed_roles(
+        "/loans.LoanService/MarkDefaulted"
+    )

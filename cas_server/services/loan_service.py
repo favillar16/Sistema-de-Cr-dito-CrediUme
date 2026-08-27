@@ -1075,6 +1075,69 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 success=True, status=prestamo.status.value
             )
 
+    def RevertDefault(self, request, context):
+        """BR-LOAN-014: levanta el incumplimiento y devuelve el préstamo a ACTIVE.
+
+        Sin esta operación un préstamo marcado incumplido queda sin salida:
+        `RecordPayment` exige ACTIVE, así que no se le puede cobrar ni cuando el
+        cliente regulariza; `DeleteLoan` excluye los estados que ya movieron
+        dinero, así que tampoco se borra; y mientras exista con un estado
+        distinto de PAID bloquea la baja del cliente (BR-CLI-004).
+
+        El `reason` es obligatorio como en `DeleteLoan`, aunque acá la fila no
+        desaparece: revertir un incumplimiento es deshacer el juicio de otro
+        operador sobre la cobrabilidad, y el AuditLog es lo único que explica
+        por qué se hizo (regularizó, se marcó por error, acuerdo de pago).
+
+        Se toma `with_for_update` sobre la fila, igual que `ApproveLoan`, para
+        que dos reversiones simultáneas no escriban ambas su entrada de
+        auditoría sobre el mismo cambio de estado.
+        """
+        loan_id = analizar_uuid(request.loan_id, "loan_id", context)
+        motivo = request.reason.strip()
+        if not motivo:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "Debe indicarse el motivo por el que se revierte el incumplimiento",
+            )
+        ahora = datetime.now(timezone.utc)
+
+        with SessionLocal() as sesion:
+            prestamo = sesion.get(Loan, loan_id, with_for_update=True)
+            if prestamo is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Préstamo no encontrado")
+
+            if prestamo.status != LoanStatusEnum.DEFAULTED:
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "Solo puede revertirse el incumplimiento de un préstamo "
+                    "en estado DEFAULTED",
+                )
+
+            # Vuelve a ACTIVE y no a otro estado porque MarkDefaulted solo
+            # acepta préstamos ACTIVE: ese es, por construcción, el estado del
+            # que salió. Que esté al día o siga en mora lo responde
+            # `payment_status` (BR-LOAN-009) recalculado sobre el cronograma,
+            # no el estado del préstamo.
+            prestamo.status = LoanStatusEnum.ACTIVE
+
+            sesion.add(
+                AuditLog(
+                    user_id=id_actor_actual(get_current_claims()),
+                    action=(
+                        f"PRESTAMO_INCUMPLIMIENTO_REVERTIDO loan_id={prestamo.id} "
+                        f"motivo={motivo}"
+                    ),
+                    ip_address=ip_remota(context),
+                    timestamp=ahora,
+                )
+            )
+            sesion.commit()
+
+            return loan_service_pb2.RevertDefaultResponse(
+                success=True, status=prestamo.status.value
+            )
+
     def GetAmortizationSchedule(self, request, context):
         loan_id = analizar_uuid(request.loan_id, "loan_id", context)
 

@@ -33,6 +33,7 @@ from cas_client.formatting import (
 from cas_client.grpc_client import ApiError, ClientServiceClient, LoanServiceClient
 from cas_client.rbac_ui import (
     can_delete_loan,
+    can_revert_default,
     can_edit_installment_amount,
     can_edit_interest_rate,
     can_originate_credit,
@@ -995,6 +996,13 @@ class LoansView(BaseView):
             ("_approve_button", "Aprobar", self._on_approve),
             ("_disburse_button", "Desembolsar", self._on_disburse),
             ("_default_button", "Marcar incumplido", self._on_mark_defaulted),
+            # BR-LOAN-014: la contraparte de "Marcar incumplido", pegada a él
+            # a propósito -- son la misma decisión en los dos sentidos.
+            (
+                "_revert_default_button",
+                "Revertir incumplimiento",
+                self._on_revert_default,
+            ),
             ("_schedule_button", "Ver cronograma", self._on_view_schedule),
         ):
             button = QPushButton(label)
@@ -1231,6 +1239,11 @@ class LoansView(BaseView):
         self._default_button.setEnabled(
             loan.status == "ACTIVE" and role_at_least(role, "CREDIT_ANALYST")
         )
+        # BR-LOAN-014. Se deshabilita (no se oculta) como el resto del grid de
+        # acciones: sólo el borrado, que es irreversible, se esconde por rol.
+        self._revert_default_button.setEnabled(
+            loan.status == "DEFAULTED" and can_revert_default(role)
+        )
         # BR-LOAN-012. Se oculta (no se deshabilita) para quien no tiene el
         # rol, misma convención que el ítem "Usuarios" del sidebar; para quien
         # sí lo tiene queda visible pero deshabilitado en los estados no
@@ -1298,6 +1311,40 @@ class LoansView(BaseView):
             self._selected_loan_id,
             on_success=lambda _r: self._on_action_success(
                 "Préstamo marcado como incumplido."
+            ),
+        )
+
+    def _on_revert_default(self) -> None:
+        """BR-LOAN-014: levanta el incumplimiento para poder volver a cobrar.
+
+        Pide el motivo (el servidor lo exige) pero, a diferencia del borrado,
+        sin diálogo previo de confirmación: la acción es reversible -- se puede
+        volver a marcar incumplido -- y no destruye nada, así que dos ventanas
+        seguidas serían ruido. El préstamo vuelve a ACTIVE y, si el cliente
+        sigue en mora, la fila "Cuotas" lo mostrará igual: el estado del
+        préstamo y el estado de pago son cosas distintas (BR-LOAN-009).
+        """
+        if self._selected_loan_id is None:
+            return
+        motivo, ok = QInputDialog.getText(
+            self,
+            "Revertir incumplimiento",
+            "Indique por qué se levanta el incumplimiento (queda auditado):",
+        )
+        if not ok:
+            return
+        motivo = motivo.strip()
+        if not motivo:
+            self._toast.show_message(
+                "Debe indicar el motivo para revertir el incumplimiento."
+            )
+            return
+        self._run_loan_action(
+            self._client.revert_default,
+            self._selected_loan_id,
+            motivo,
+            on_success=lambda _r: self._on_action_success(
+                "Incumplimiento revertido: el préstamo vuelve a estar activo."
             ),
         )
 

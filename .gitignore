@@ -28,6 +28,8 @@ comprobante_*.pdf
 comprobante_*.docx
 reporte_*.pdf
 reporte_*.docx
+estado_de_pago_*.pdf
+estado_de_pago_*.docx
 
 # Editor/OS cruft
 .vscode/

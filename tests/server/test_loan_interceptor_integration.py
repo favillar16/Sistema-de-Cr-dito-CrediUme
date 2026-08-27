@@ -15,7 +15,14 @@ import pytest
 
 from cas_server.config import LOAN_FIXED_INTEREST_RATE
 from cas_server.db.base import SessionLocal
-from cas_server.db.models import Client, Loan, LoanStatusEnum, RoleEnum, User
+from cas_server.db.models import (
+    AuditLog,
+    Client,
+    Loan,
+    LoanStatusEnum,
+    RoleEnum,
+    User,
+)
 from cas_server.security.interceptor import AuthInterceptor
 from cas_server.security.passwords import hash_password
 from cas_server.services.auth_service import AuthServicer
@@ -492,3 +499,178 @@ def test_record_payment_falls_back_to_username_when_operator_has_no_name(stubs):
     )
     assert response.recorded_by_name == "manager_anon"
     assert response.recorded_by_national_id == ""
+
+
+# --- BR-LOAN-014: reversión de un incumplimiento ------------------------------
+
+
+def _estado_prestamo(loan_id):
+    with SessionLocal() as session:
+        return session.get(Loan, loan_id).status
+
+
+def test_revert_default_requires_credit_analyst_or_above(stubs):
+    """BR-LOAN-014: mismo nivel que MarkDefaulted -- quien puede poner la marca
+    puede sacarla. El cajero cobra, no decide el estado del préstamo."""
+    auth_stub, loan_stub = stubs
+    _create_user("cashier_rd", "Passw0rd!", RoleEnum.CASHIER)
+    _create_user("analyst_rd", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
+    client_id = _create_client_row(national_id="7000031", email="revert1@example.com")
+    loan_id = _create_loan_row(client_id, LoanStatusEnum.DEFAULTED)
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        loan_stub.RevertDefault(
+            loan_service_pb2.RevertDefaultRequest(
+                loan_id=str(loan_id), reason="regularizó"
+            ),
+            metadata=_login(auth_stub, "cashier_rd", "Passw0rd!"),
+        )
+    assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+    assert _estado_prestamo(loan_id) == LoanStatusEnum.DEFAULTED
+
+    response = loan_stub.RevertDefault(
+        loan_service_pb2.RevertDefaultRequest(
+            loan_id=str(loan_id), reason="regularizó"
+        ),
+        metadata=_login(auth_stub, "analyst_rd", "Passw0rd!"),
+    )
+    assert response.success
+    assert response.status == "ACTIVE"
+    assert _estado_prestamo(loan_id) == LoanStatusEnum.ACTIVE
+
+
+def test_revert_default_requires_a_reason(stubs):
+    """El motivo es lo único que explica por qué se deshizo el juicio de otro
+    operador sobre la cobrabilidad, así que un motivo en blanco se rechaza."""
+    auth_stub, loan_stub = stubs
+    _create_user("analyst_rd2", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
+    client_id = _create_client_row(national_id="7000032", email="revert2@example.com")
+    loan_id = _create_loan_row(client_id, LoanStatusEnum.DEFAULTED)
+
+    metadata = _login(auth_stub, "analyst_rd2", "Passw0rd!")
+    for motivo in ("", "   "):
+        with pytest.raises(grpc.RpcError) as exc_info:
+            loan_stub.RevertDefault(
+                loan_service_pb2.RevertDefaultRequest(
+                    loan_id=str(loan_id), reason=motivo
+                ),
+                metadata=metadata,
+            )
+        assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+    assert _estado_prestamo(loan_id) == LoanStatusEnum.DEFAULTED
+
+
+@pytest.mark.parametrize(
+    "estado",
+    [
+        LoanStatusEnum.PENDING,
+        LoanStatusEnum.APPROVED,
+        LoanStatusEnum.ACTIVE,
+        LoanStatusEnum.PAID,
+        LoanStatusEnum.EXPIRED,
+    ],
+)
+def test_revert_default_only_applies_to_a_defaulted_loan(stubs, estado):
+    auth_stub, loan_stub = stubs
+    _create_user(f"analyst_rd_{estado.value}", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
+    client_id = _create_client_row(
+        national_id=f"70001{estado.value[:2]}", email=f"rev{estado.value}@example.com"
+    )
+    loan_id = _create_loan_row(client_id, estado)
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        loan_stub.RevertDefault(
+            loan_service_pb2.RevertDefaultRequest(
+                loan_id=str(loan_id), reason="prueba"
+            ),
+            metadata=_login(auth_stub, f"analyst_rd_{estado.value}", "Passw0rd!"),
+        )
+    assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+    assert _estado_prestamo(loan_id) == estado
+
+
+def test_revert_default_audits_the_reason(stubs):
+    """La fila del préstamo no desaparece (a diferencia de DeleteLoan), pero el
+    motivo sigue siendo lo único que explica la decisión."""
+    auth_stub, loan_stub = stubs
+    _create_user("analyst_rd3", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
+    client_id = _create_client_row(national_id="7000034", email="revert4@example.com")
+    loan_id = _create_loan_row(client_id, LoanStatusEnum.DEFAULTED)
+
+    loan_stub.RevertDefault(
+        loan_service_pb2.RevertDefaultRequest(
+            loan_id=str(loan_id), reason="acuerdo de pago firmado"
+        ),
+        metadata=_login(auth_stub, "analyst_rd3", "Passw0rd!"),
+    )
+
+    with SessionLocal() as session:
+        acciones = [
+            fila.action
+            for fila in session.query(AuditLog).all()
+            if fila.action.startswith("PRESTAMO_INCUMPLIMIENTO_REVERTIDO")
+        ]
+    assert len(acciones) == 1
+    assert str(loan_id) in acciones[0]
+    assert "acuerdo de pago firmado" in acciones[0]
+
+
+def test_reverting_a_default_makes_the_loan_collectable_again(stubs):
+    """La razón de ser de BR-LOAN-014.
+
+    RecordPayment exige ACTIVE, así que mientras el préstamo esté DEFAULTED no
+    se le puede cobrar ni cuando el cliente regulariza -- y DeleteLoan tampoco
+    lo acepta, porque ya movió dinero. Sin la reversión, el préstamo queda
+    congelado para siempre. Este test recorre justamente ese callejón: cobro
+    rechazado, reversión, cobro aceptado.
+    """
+    auth_stub, loan_stub = stubs
+    _create_user("analyst_rd4", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
+    client_id = _create_client_row(national_id="7000035", email="revert5@example.com")
+    loan_id = _create_loan_row(client_id, LoanStatusEnum.DEFAULTED)
+    metadata = _login(auth_stub, "analyst_rd4", "Passw0rd!")
+
+    pago = loan_service_pb2.RecordPaymentRequest(
+        loan_id=str(loan_id),
+        amount="100.00",
+        transfer_reference="TRF-REVERT-1",
+    )
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        loan_stub.RecordPayment(pago, metadata=metadata)
+    assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+
+    # Y tampoco se puede borrar: BR-LOAN-012 excluye los estados que ya
+    # movieron dinero, así que sin RevertDefault no queda ninguna salida.
+    with pytest.raises(grpc.RpcError) as exc_info:
+        loan_stub.DeleteLoan(
+            loan_service_pb2.DeleteLoanRequest(
+                loan_id=str(loan_id), reason="intento de salida"
+            ),
+            metadata=metadata,
+        )
+    assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+
+    loan_stub.RevertDefault(
+        loan_service_pb2.RevertDefaultRequest(
+            loan_id=str(loan_id), reason="el cliente se puso al día"
+        ),
+        metadata=metadata,
+    )
+
+    respuesta = loan_stub.RecordPayment(pago, metadata=metadata)
+    assert respuesta.amount_paid == "100.00"
+
+
+def test_revert_default_on_unknown_loan_is_not_found(stubs):
+    auth_stub, loan_stub = stubs
+    _create_user("analyst_rd5", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        loan_stub.RevertDefault(
+            loan_service_pb2.RevertDefaultRequest(
+                loan_id="11111111-1111-1111-1111-111111111111", reason="x"
+            ),
+            metadata=_login(auth_stub, "analyst_rd5", "Passw0rd!"),
+        )
+    assert exc_info.value.code() == grpc.StatusCode.NOT_FOUND

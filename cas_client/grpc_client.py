@@ -465,6 +465,19 @@ class LoanServiceClient:
             error_cls=ApiError,
         )
 
+    def revert_default(
+        self, access_token: str, loan_id: str, reason: str
+    ) -> loan_service_pb2.RevertDefaultResponse:
+        """BR-LOAN-014: levanta el incumplimiento y devuelve el préstamo a
+        ACTIVE, que es la única forma de volver a cobrarle. `reason` es
+        obligatorio -- el servidor rechaza un motivo vacío."""
+        return _invoke(
+            self._stub.RevertDefault,
+            loan_service_pb2.RevertDefaultRequest(loan_id=loan_id, reason=reason),
+            access_token=access_token,
+            error_cls=ApiError,
+        )
+
     def get_amortization_schedule(
         self, access_token: str, loan_id: str
     ) -> loan_service_pb2.GetAmortizationScheduleResponse:

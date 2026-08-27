@@ -132,6 +132,16 @@ def can_delete_loan(role: str | None) -> bool:
     return role_at_least(role, "CREDIT_ANALYST")
 
 
+def can_revert_default(role: str | None) -> bool:
+    """BR-LOAN-014: levantar el incumplimiento de un préstamo -- mirrors
+    rbac.py's CREDIT_ANALYST_AND_ABOVE gate on RevertDefault. Es a propósito
+    el mismo nivel que marca el incumplimiento (`MarkDefaulted`): quien puede
+    poner la marca puede sacarla. El servidor limita además *qué* préstamos
+    admiten la reversión (solo los DEFAULTED), lo que esta función no puede
+    saber -- por eso la vista combina las dos condiciones."""
+    return role_at_least(role, "CREDIT_ANALYST")
+
+
 def can_edit_installment_amount(role: str | None) -> bool:
     """Only Agente de Créditos (MANAGER) and Administrador (ADMIN) can adjust
     an individual installment's amount (UpdateInstallmentAmount) -- mirrors

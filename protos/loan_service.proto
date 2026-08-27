@@ -40,6 +40,13 @@ service LoanService {
     // Marca un préstamo activo como incumplido (Analista de Crédito o superior)
     rpc MarkDefaulted (MarkDefaultedRequest) returns (MarkDefaultedResponse);
 
+    // Revierte un incumplimiento y devuelve el préstamo a ACTIVE -- BR-LOAN-014.
+    // Analista de Crédito o superior, y solo sobre un préstamo DEFAULTED. Exige
+    // un motivo, que queda auditado: sin esta RPC un préstamo incumplido no
+    // admite cobros (RecordPayment exige ACTIVE) ni borrado, y bloquea para
+    // siempre la baja del cliente.
+    rpc RevertDefault (RevertDefaultRequest) returns (RevertDefaultResponse);
+
     // Plan de amortización calculado bajo demanda (no persistido)
     rpc GetAmortizationSchedule (GetAmortizationScheduleRequest) returns (GetAmortizationScheduleResponse);
 
@@ -49,7 +56,8 @@ service LoanService {
     rpc UpdateInstallmentAmount (UpdateInstallmentAmountRequest) returns (UpdateInstallmentAmountResponse);
 
     // Eliminación definitiva de un préstamo cargado por error -- BR-LOAN-012.
-    // Solo Gerente o Administrador, y solo mientras el préstamo no haya movido
+    // Analista de Crédito o superior (todos menos el cajero), y solo mientras
+    // el préstamo no haya movido
     // dinero (PENDING, APPROVED o EXPIRED, y sin ningún pago registrado).
     rpc DeleteLoan (DeleteLoanRequest) returns (DeleteLoanResponse);
 }
@@ -264,6 +272,18 @@ message MarkDefaultedRequest {
 message MarkDefaultedResponse {
     bool success = 1;
     string status = 2;
+}
+
+message RevertDefaultRequest {
+    string loan_id = 1;
+    // Obligatorio: por qué se levanta el incumplimiento (regularizó, se marcó
+    // por error, acuerdo de pago). Queda en el AuditLog.
+    string reason = 2;
+}
+
+message RevertDefaultResponse {
+    bool success = 1;
+    string status = 2; // ACTIVE
 }
 
 message GetAmortizationScheduleRequest {
