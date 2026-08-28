@@ -211,13 +211,15 @@ def test_create_loan_stores_the_charges_sent_with_the_proposal(stubs):
     )
     metadata = _login(auth_stub, "analyst_c", "Passw0rd!")
 
+    # BR-LOAN-006 (revisado 2026-08-28): tope de 1000.00 * 0.25 * 6/12 =
+    # 125.00 -- los 120.00 de acá quedan por debajo.
     creado = loan_stub.CreateLoan(
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount="1000.00",
             term_months=6,
-            charge_admin_fee="200.00",
-            charge_contracted_insurance="300.00",
+            charge_admin_fee="75.00",
+            charge_contracted_insurance="45.00",
             guarantee_type="SOLA FIRMA",
             guarantee_amount="1500.00",
         ),
@@ -226,8 +228,8 @@ def test_create_loan_stores_the_charges_sent_with_the_proposal(stubs):
     detalle = loan_stub.GetLoanById(
         loan_service_pb2.GetLoanByIdRequest(loan_id=creado.loan_id), metadata=metadata
     )
-    assert detalle.total_charges == "500.00"
-    assert detalle.total_credit_with_charges == "1500.00"
+    assert detalle.total_charges == "120.00"
+    assert detalle.total_credit_with_charges == "1120.00"
     assert detalle.amount_to_disburse == "1000.00"
     assert detalle.guarantee_type == "SOLA FIRMA"
 

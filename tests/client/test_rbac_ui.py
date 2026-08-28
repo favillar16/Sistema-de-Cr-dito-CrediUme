@@ -1,6 +1,9 @@
+from decimal import Decimal
+
 from cas_client.rbac_ui import (
     can_revert_default,
     FIXED_INTEREST_RATE,
+    MAX_CHARGES_RATIO,
     can_delete_loan,
     can_edit_installment_amount,
     can_edit_interest_rate,
@@ -81,7 +84,15 @@ def test_fixed_interest_rate_matches_server_side_constant():
     # two processes, same as rbac_ui.py's own module docstring notes for
     # role_at_least/rbac.py). This test exists so a drift is caught here
     # instead of silently rejecting loans in the UI's "Estándar" flow.
-    assert FIXED_INTEREST_RATE == "0.45"  # 45% anual = 3,75% mensual
+    assert FIXED_INTEREST_RATE == "0.20"  # 20% anual, tope legal = 1,667% mensual
+
+
+def test_max_charges_ratio_matches_server_side_constant():
+    # BR-LOAN-006 (revisado 2026-08-28): cas_server/config.py's
+    # LOAN_MAX_CHARGES_RATIO must stay in sync with this UI-side constant by
+    # hand, same caveat as FIXED_INTEREST_RATE above. 25% is the complement of
+    # the 20% legal interest cap to reach the entity's 45% total.
+    assert MAX_CHARGES_RATIO == Decimal("0.25")
 
 
 def test_is_teller_only_matches_the_cashier_role():

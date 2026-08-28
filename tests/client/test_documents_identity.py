@@ -101,7 +101,7 @@ class _FakeLoanCompleto:
     id = "91cc3960-1111-2222-3333-444455556666"
     status = "ACTIVE"
     principal_amount = "18000000.00"
-    interest_rate = "0.45"  # tasa fija vigente: 45% anual = 3,75% mensual
+    interest_rate = "0.20"  # tasa fija vigente: 20% anual (tope legal) = 1,667% mensual
     term_months = 18
     first_due_date = "2026-09-15"
     total_paid = "0.00"
@@ -145,15 +145,18 @@ def test_authorised_commercial_terms():
 
 
 def test_compensatory_interest_is_quoted_monthly_not_annually():
-    """El sistema guarda la tasa nominal anual (0.45) pero la cláusula la
-    declara mensual (3,75%), que es lo que amortization.py cobra por período.
-    Imprimir "45%" ahí prometería una tasa distinta de la cuota calculada."""
+    """El sistema guarda la tasa nominal anual (0.20, el tope legal) pero la
+    cláusula la declara mensual (1,667%), que es lo que amortization.py cobra
+    por período. Imprimir "20%" ahí prometería una tasa distinta de la cuota
+    calculada -- y "45%" prometería directamente otra cosa, el costo total
+    (interés + cargos), no el interés."""
     for documento in (
         documents.pagare_html(_FakeLoanCompleto, _FakeClient),
         documents.contrato_html(_FakeLoanCompleto, _FakeClient),
     ):
         texto = _texto_plano(documento)
-        assert "compensatorio del 3,75% mensual" in texto
+        assert "compensatorio del 1,667% mensual" in texto
+        assert "20% mensual" not in texto
         assert "45% mensual" not in texto
 
 

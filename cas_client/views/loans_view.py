@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 import grpc
 from PySide6.QtCore import Qt, Signal
@@ -34,6 +34,7 @@ from cas_client.formatting import (
 from cas_client.grpc_client import ApiError, ClientServiceClient, LoanServiceClient
 from cas_client.rbac_ui import (
     FIXED_INTEREST_RATE,
+    MAX_CHARGES_RATIO,
     can_delete_loan,
     can_revert_default,
     can_edit_installment_amount,
@@ -178,7 +179,9 @@ _SUMMARY_ROWS = (
 
 # Texto que explica, una sola vez, cómo se compone el costo del préstamo. Lo
 # usan el alta y la edición de la propuesta: es lo que hace entendible que el
-# cliente reciba una cifra y amortice otra.
+# cliente reciba una cifra y amortice otra. Deliberadamente sin el detalle de
+# porcentajes (BR-LOAN-006, en specs/loans/README) -- eso queda fuera de la
+# pantalla, esto solo explica qué significa el número.
 _CHARGES_HINT = (
     "Los cargos se financian junto con el capital: se suman para formar el "
     "Total del crédito, que es el monto que amortizan las cuotas y sobre el "
@@ -717,11 +720,18 @@ class LoansView(BaseView):
 
         # BR-LOAN-007: la tasa dejó de ser un campo. Se muestra como dato para
         # que siga estando a la vista de quien arma la propuesta, pero no hay
-        # nada que tipear ni un rol que la desbloquee.
+        # nada que tipear ni un rol que la desbloquee. Revisado 2026-08-28: ya
+        # no se llama "45%" a esto -- por ley el interés no puede superar el
+        # 20%, así que el resto hasta el 45% pactado se cobra como cargo
+        # administrativo financiado (ver la tarjeta de cargos, abajo), no
+        # como interés. El detalle de porcentajes no se explica en pantalla
+        # (queda en specs/loans/README) -- solo se avisa dónde está.
         rate_line = QLabel(
-            f"Tasa de interés: {fixed_interest_rate_percent()}% anual "
+            f"Interés legal: {fixed_interest_rate_percent()}% anual "
             f"({rate_percent_mensual(FIXED_INTEREST_RATE)} mensual sobre el "
-            "monto original) — fija para todos los usuarios."
+            "monto original) — es el máximo que permite la ley y es fijo "
+            "para todos los usuarios. Costos Administrativos generados más "
+            "abajo."
         )
         rate_line.setWordWrap(True)
         rate_line.setStyleSheet(
@@ -751,6 +761,14 @@ class LoansView(BaseView):
             charges_grid.add_widget(field)
             setattr(self, f"{prefix}{attribute}", widget)
         charges.addWidget(charges_grid)
+
+        # BR-LOAN-006: sugiere el tope de "Gastos administrativos por
+        # desembolso" (25% anual del capital, prorrateado por el plazo) en
+        # cuanto el operador completa capital y plazo, para que no tenga que
+        # calcularlo a mano. Solo sugiere -- no pisa un valor ya cargado, y el
+        # servidor vuelve a validar el tope real al guardar.
+        principal_input.editingFinished.connect(lambda: self._suggest_admin_fee(prefix))
+        term_input.editingFinished.connect(lambda: self._suggest_admin_fee(prefix))
         charges_hint = QLabel(_CHARGES_HINT)
         charges_hint.setWordWrap(True)
         charges_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
@@ -789,6 +807,35 @@ class LoansView(BaseView):
         layout.addLayout(submit_row)
 
         return container
+
+    def _suggest_admin_fee(self, prefix: str) -> None:
+        """BR-LOAN-006: sugiere "Gastos administrativos por desembolso" con
+        el tope de cargos (25% anual del capital, prorrateado por el plazo),
+        para que el operador no tenga que calcularlo a mano.
+
+        No pisa un monto ya cargado -- ni el que el operador haya tipeado, ni
+        el que trae una propuesta existente al abrir la edición (que se
+        precarga con `set_amount`, el cual no dispara `editingFinished`) --
+        y sigue siendo editable: esto es solo una comodidad de carga, el
+        servidor es quien hace valer el tope real.
+        """
+        admin_fee_input = getattr(self, f"{prefix}_charge_admin_fee")
+        if admin_fee_input.raw_value():
+            return
+        principal = getattr(self, f"{prefix}_principal").raw_value()
+        term_text = getattr(self, f"{prefix}_term").text().strip()
+        if not (principal and term_text):
+            return
+        try:
+            term_months = int(term_text)
+        except ValueError:
+            return
+        if term_months <= 0:
+            return
+        sugerido = (
+            Decimal(principal) * MAX_CHARGES_RATIO / Decimal(12) * term_months
+        ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        admin_fee_input.set_amount(str(sugerido))
 
     def _proposal_fields(self, prefix: str) -> dict | None:
         """Lee un formulario de propuesta y devuelve los argumentos de la RPC,

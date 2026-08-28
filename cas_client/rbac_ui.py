@@ -40,15 +40,21 @@ def tier_label(role: str | None) -> str:
 # BR-LOAN-007: la tasa es fija para TODOS los roles desde 2026-08-28. El
 # formulario "Nuevo préstamo" ya no tiene campo de tasa -- la muestra como
 # dato, no como entrada -- y el servidor rechaza cualquier valor distinto a
-# este, venga del rol que venga. Cambiarla es una decisión comercial de la
-# entidad: hay que mover también cas_server/config.py's
+# este, venga del rol que venga. Cambiarla es una decisión comercial/legal de
+# la entidad: hay que mover también cas_server/config.py's
 # LOAN_FIXED_INTEREST_RATE y revisar la cláusula de interés compensatorio de
 # cas_client/documents.py.
-FIXED_INTEREST_RATE = "0.45"  # decimal fraction, sistema alemán -- ver loans_view.py
-# 45% nominal anual = 3,75% mensual sobre el monto original del préstamo (la
-# tasa compensatoria que declaran el Pagaré y el Contrato; BR-LOAN-013 -- el
-# interés no se calcula sobre el saldo deudor). El servidor divide por 12 por
-# período.
+#
+# Revisado 2026-08-28: bajó de 0.45 a 0.20 porque, por ley, el interés en sí
+# no puede superar el 20% anual -- el 45% de antes mezclaba interés y gastos
+# administrativos en una sola tasa. Ver MAX_CHARGES_RATIO abajo para el
+# complemento (25%) que ahora se cobra como cargo financiado, no como
+# interés.
+FIXED_INTEREST_RATE = "0.20"  # decimal fraction, sistema alemán -- ver loans_view.py
+# 20% nominal anual = el máximo que la ley permite cobrar como interés
+# (1,667% mensual sobre el monto original del préstamo -- la tasa
+# compensatoria que declaran el Pagaré y el Contrato; BR-LOAN-013, el interés
+# no se calcula sobre el saldo deudor). El servidor divide por 12 por período.
 # Guarded by tests/client/test_rbac_ui.py's test_fixed_interest_rate_matches_
 # server_side_constant -- must stay the exact decimal-fraction string
 # cas_server/config.py's LOAN_FIXED_INTEREST_RATE compares against.
@@ -56,12 +62,24 @@ FIXED_INTEREST_RATE = "0.45"  # decimal fraction, sistema alemán -- ver loans_v
 
 def fixed_interest_rate_percent() -> str:
     """FIXED_INTEREST_RATE como porcentaje para mostrar en pantalla:
-    "0.45" -> "45"."""
+    "0.20" -> "20"."""
     percent = Decimal(FIXED_INTEREST_RATE) * 100
     text = f"{percent:f}"
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
+
+
+# BR-LOAN-006 (revisado 2026-08-28). Tope conjunto de los 4 cargos
+# financiados (impuesto s/intereses, gastos administrativos por desembolso,
+# seguro de cancelación, seguros contratados): 25% anual del capital
+# solicitado, prorrateado por el plazo igual que el interés. Es el
+# complemento de FIXED_INTEREST_RATE para llegar al 45% anual que la entidad
+# fija como costo total del crédito (20% de interés legal + hasta 25% de
+# gastos administrativos = 45%). Debe mantenerse igual a
+# cas_server/config.py's LOAN_MAX_CHARGES_RATIO, por la misma razón que
+# FIXED_INTEREST_RATE (no hay fuente compartida entre los dos procesos).
+MAX_CHARGES_RATIO = Decimal("0.25")
 
 
 def can_edit_interest_rate(role: str | None) -> bool:

@@ -1,6 +1,6 @@
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 import grpc
 
@@ -221,6 +221,45 @@ def _monto_financiado(prestamo: Loan) -> Decimal:
     return prestamo.principal_amount + _total_cargos(prestamo)
 
 
+def _tope_cargos(capital: Decimal, plazo_meses: int) -> Decimal:
+    """BR-LOAN-006 (revisado 2026-08-28): tope conjunto de los 4 cargos
+    financiados, con la misma mecánica de prorrateo por plazo que el interés
+    (BR-LOAN-013): `capital * LOAN_MAX_CHARGES_RATIO / 12 * plazo_meses`.
+
+    Se mide sobre `principal_amount` (el capital solicitado), no sobre el
+    monto financiado -- éste ya incluiría los cargos que el tope está
+    limitando. Es el complemento de `LOAN_FIXED_INTEREST_RATE` (20% anual, el
+    máximo legal de interés) para llegar al 45% anual que la entidad fija
+    como costo total del crédito.
+    """
+    return (
+        capital * config.LOAN_MAX_CHARGES_RATIO / Decimal(12) * plazo_meses
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _validar_tope_cargos(
+    capital: Decimal, total_cargos: Decimal, plazo_meses: int, context
+) -> None:
+    """Aborta INVALID_ARGUMENT si los cargos superan `_tope_cargos`.
+
+    Los 4 cargos (BR-LOAN-006) siguen siendo de monto libre -- el operador
+    los escribe a mano -- pero, desde que existe un interés legal fijo
+    (BR-LOAN-007, 20%) separado del costo total pactado (45%), la única
+    forma de no dejar que un cargo cargado a mano exceda el 25% que le
+    corresponde es validarlo acá, en el mismo punto donde ya se valida el
+    tope del 40% de BR-LOAN-002.
+    """
+    tope = _tope_cargos(capital, plazo_meses)
+    if total_cargos > tope:
+        porcentaje = int(config.LOAN_MAX_CHARGES_RATIO * 100)
+        context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "Los cargos financiados no pueden superar, en conjunto, el "
+            f"{porcentaje}% anual del capital solicitado prorrateado por el "
+            f"plazo ({tope} Gs para este préstamo) (BR-LOAN-006)",
+        )
+
+
 def _cargos_de_solicitud(request, context) -> dict[str, Decimal | None]:
     """Los 4 cargos de un CreateLoanRequest/UpdateLoanProposalRequest, ya
     convertidos a Decimal. Vacío -> None (el cargo no aplica)."""
@@ -270,7 +309,7 @@ def _tasa_estandar_o_abortar(texto_tasa: str, context) -> Decimal:
     exactamente `config.LOAN_FIXED_INTEREST_RATE`, para que un llamador viejo
     que la manda explícitamente siga funcionando. Cualquier otro valor se
     rechaza en vez de descartarse en silencio: si alguien pidió 30%, dejarlo
-    creado al 45% sin avisar es peor que fallar.
+    creado a la tasa fija sin avisar es peor que fallar.
 
     Hasta 2026-08-28 un MANAGER/ADMIN podía fijar una tasa distinta acá. Ya no:
     la tasa pasó a ser una decisión comercial de la entidad y se cambia en
@@ -515,6 +554,7 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
         tipo_garantia, monto_garantia = _garantia_de_solicitud(request, context)
         cargos = _cargos_de_solicitud(request, context)
         total_cargos = sum((c for c in cargos.values() if c is not None), CERO)
+        _validar_tope_cargos(capital, total_cargos, request.term_months, context)
 
         claims = get_current_claims()
         ahora = datetime.now(timezone.utc)
@@ -616,6 +656,7 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
         tipo_garantia, monto_garantia = _garantia_de_solicitud(request, context)
         cargos = _cargos_de_solicitud(request, context)
         total_cargos = sum((c for c in cargos.values() if c is not None), CERO)
+        _validar_tope_cargos(capital, total_cargos, request.term_months, context)
 
         with SessionLocal() as sesion:
             prestamo = sesion.get(Loan, loan_id)
@@ -746,6 +787,9 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
 
             cargos = _cargos_de_solicitud(request, context)
             total_cargos = sum((c for c in cargos.values() if c is not None), CERO)
+            _validar_tope_cargos(
+                prestamo.principal_amount, total_cargos, prestamo.term_months, context
+            )
 
             # Desde que los cargos se capitalizan (BR-LOAN-006) suben la cuota,
             # así que esta RPC pasó a ser un camino más por el que se puede

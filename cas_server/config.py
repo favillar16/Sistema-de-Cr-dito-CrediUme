@@ -91,11 +91,26 @@ LOAN_MAX_ACTIVE_PER_CLIENT = 3  # BR-LOAN-001
 LOAN_MAX_INSTALLMENT_INCOME_RATIO = Decimal("0.40")  # BR-LOAN-002
 LOAN_APPROVAL_EXPIRY_DAYS = 30  # BR-LOAN-003
 LOAN_DEFAULT_FIRST_DUE_DAYS = 30  # BR-LOAN-004
-# BR-LOAN-007. Tasa nominal anual: amortization.py aplica tasa_anual / 12 por
-# período sobre el **monto original** del préstamo (BR-LOAN-013, el interés no
-# varía), así que 0.45 = 45% anual = el 3,75% mensual que fija la cláusula de
-# interés compensatorio del Pagaré/Contrato (autorizado por la entidad). Si
-# cambia esta tasa hay que mover también cas_client/rbac_ui.py's
-# FIXED_INTEREST_RATE (no hay fuente compartida entre los dos procesos) y
-# revisar el texto de esa cláusula en cas_client/documents.py.
-LOAN_FIXED_INTEREST_RATE = Decimal("0.45")  # 45% anual = 3,75% mensual
+# BR-LOAN-007 (revisado 2026-08-28). Tasa nominal anual: amortization.py
+# aplica tasa_anual / 12 por período sobre el **monto original** del préstamo
+# (BR-LOAN-013, el interés no varía). 0.20 = 20% anual = el **máximo que la
+# ley permite cobrar como interés** -- ya no 45%: eso era interés + gastos
+# administrativos mezclados en una sola tasa, y por ley el interés en sí no
+# puede superar el 20%. La cláusula de interés compensatorio del
+# Pagaré/Contrato (autorizada por la entidad) declara ahora el 1,667%
+# mensual que corresponde a esta tasa, no 3,75%. Si cambia esta tasa hay que
+# mover también cas_client/rbac_ui.py's FIXED_INTEREST_RATE (no hay fuente
+# compartida entre los dos procesos) y revisar el texto de esa cláusula en
+# cas_client/documents.py.
+LOAN_FIXED_INTEREST_RATE = Decimal("0.20")  # 20% anual, tope legal de interés
+
+# BR-LOAN-006 (revisado 2026-08-28). Tope conjunto de los 4 cargos
+# financiados (impuesto s/intereses, gastos administrativos por desembolso,
+# seguro de cancelación, seguros contratados): 25% anual del **capital
+# solicitado**, prorrateado por el plazo con la misma mecánica que el interés
+# (`capital * LOAN_MAX_CHARGES_RATIO / 12 * term_months`, ver
+# loan_service.py's `_tope_cargos`). Es el complemento de
+# LOAN_FIXED_INTEREST_RATE: 20% de interés legal + hasta 25% de gastos
+# administrativos = el 45% anual que la entidad fija como costo total del
+# crédito, sin que el interés en sí supere el máximo legal.
+LOAN_MAX_CHARGES_RATIO = Decimal("0.25")  # 25% anual, tope de cargos financiados

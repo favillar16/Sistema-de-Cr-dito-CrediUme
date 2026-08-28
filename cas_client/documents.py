@@ -63,8 +63,11 @@ _TERM_JURISDICTION_CITY = "Coronel Oviedo"
 
 # El interés compensatorio NO se escribe fijo acá: sale de loan.interest_rate,
 # para que el documento no pueda contradecir la cuota que el sistema realmente
-# calculó. Con la tasa fija vigente (config.LOAN_FIXED_INTEREST_RATE = 0.45)
-# rate_percent_mensual() imprime "3,75%", la tasa mensual autorizada.
+# calculó. Con la tasa fija vigente (config.LOAN_FIXED_INTEREST_RATE = 0.20,
+# el tope legal) rate_percent_mensual() imprime "1,667%", la tasa mensual
+# autorizada -- ya no "3,75%": ese número mezclaba interés y gastos
+# administrativos en una sola cifra (ver _cargos_y_garantia_block más abajo,
+# que es donde el crédito financiado con cargos se declara por separado).
 #
 # BR-LOAN-013: ese porcentaje se aplica al **monto original del préstamo**, no
 # al saldo deudor -- por eso el interés de cada cuota es el mismo y las cuotas
