@@ -54,11 +54,11 @@ def test_tier_label_unknown_role_returns_desconocido():
     assert tier_label(None) == "Desconocido"
 
 
-def test_can_edit_interest_rate_only_manager_and_above():
-    assert not can_edit_interest_rate("CASHIER")
-    assert not can_edit_interest_rate("CREDIT_ANALYST")
-    assert can_edit_interest_rate("MANAGER")
-    assert can_edit_interest_rate("ADMIN")
+def test_nobody_can_edit_the_interest_rate():
+    """BR-LOAN-007: la tasa es fija para todos desde 2026-08-28 -- incluido el
+    Administrador, que hasta entonces sí podía escribir otra."""
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN", None):
+        assert not can_edit_interest_rate(role)
 
 
 def test_can_edit_installment_amount_only_manager_and_above():

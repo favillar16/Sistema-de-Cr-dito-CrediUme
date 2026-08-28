@@ -42,6 +42,11 @@ Thumbs.db
 # as a structural reference for cas_client/documents.py, never published.
 docs/contrato.pdf
 docs/pagare credi ume.docx
+# Mismo criterio: fotos de la pantalla de otra institución, usadas como
+# referencia de cómo debían funcionar los cargos capitalizados (BR-LOAN-006).
+# El texto del requerimiento sí se versiona; las capturas no.
+docs/cambios finales/*.jpg
+docs/cambios finales/*.png
 
 # Respaldos de base de datos (pg_dump) -- contienen datos reales de clientes
 backups/

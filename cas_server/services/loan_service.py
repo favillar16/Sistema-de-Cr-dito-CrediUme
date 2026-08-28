@@ -16,10 +16,8 @@ from cas_server.db.models import (
     LoanPayment,
     LoanStatusEnum,
     PaymentMethodEnum,
-    RoleEnum,
     User,
 )
-from cas_server.security import rbac
 from cas_server.security.current_user import get_current_claims
 from cas_server.services.amortization import calcular_cronograma
 
@@ -112,7 +110,7 @@ def _ajustes_prestamo(prestamo: Loan) -> dict[int, Decimal]:
 
 def _totales_prestamo(prestamo: Loan) -> tuple[Decimal, Decimal]:
     cronograma = calcular_cronograma(
-        prestamo.principal_amount,
+        _monto_financiado(prestamo),
         prestamo.interest_rate,
         prestamo.term_months,
         ajustes=_ajustes_prestamo(prestamo),
@@ -135,7 +133,7 @@ def _cronograma_con_pendientes(prestamo: Loan) -> list[tuple]:
     Devuelve una lista de (fila: Cuota, monto_pendiente: Decimal, pagada: bool).
     """
     cronograma = calcular_cronograma(
-        prestamo.principal_amount,
+        _monto_financiado(prestamo),
         prestamo.interest_rate,
         prestamo.term_months,
         fecha_primer_vencimiento=prestamo.first_due_date,
@@ -186,7 +184,12 @@ def _estado_pago_prestamo(prestamo: Loan, hoy: date) -> tuple[str, Decimal, int]
 
 
 def _total_cargos(prestamo: Loan) -> Decimal:
-    """BR-LOAN-006: suma de los 4 cargos/seguros opcionales, puramente informativa."""
+    """BR-LOAN-006: suma de los 4 cargos/seguros del préstamo.
+
+    **Ya no es informativa** (lo fue hasta 2026-08-28): desde que los cargos se
+    capitalizan, esta suma entra en el monto que el cronograma amortiza. Ver
+    `_monto_financiado`.
+    """
     return sum(
         (
             cargo
@@ -200,6 +203,124 @@ def _total_cargos(prestamo: Loan) -> Decimal:
         ),
         CERO,
     )
+
+
+def _monto_financiado(prestamo: Loan) -> Decimal:
+    """BR-LOAN-006: "Total del Crédito" = capital solicitado + cargos.
+
+    Es el monto que el cronograma amortiza y sobre el que se devenga el
+    interés -- **no** lo que el cliente recibe en mano, que sigue siendo
+    `principal_amount` ("A desembolsar"). Los cargos se financian junto con el
+    capital, así que también generan interés.
+
+    Todo lo que deriva del cronograma (saldo restante, mora de BR-LOAN-009,
+    imputación FIFO de los pagos, tope de BR-LOAN-002) pasa por acá: hay una
+    sola definición de qué monto se amortiza, para que la pantalla, el
+    cronograma impreso y el cobro no puedan discrepar.
+    """
+    return prestamo.principal_amount + _total_cargos(prestamo)
+
+
+def _cargos_de_solicitud(request, context) -> dict[str, Decimal | None]:
+    """Los 4 cargos de un CreateLoanRequest/UpdateLoanProposalRequest, ya
+    convertidos a Decimal. Vacío -> None (el cargo no aplica)."""
+
+    def _cargo(valor: str, nombre_campo: str) -> Decimal | None:
+        texto = valor.strip()
+        return analizar_decimal(texto, nombre_campo, context) if texto else None
+
+    return {
+        "charge_interest_tax": _cargo(
+            request.charge_interest_tax, "charge_interest_tax"
+        ),
+        "charge_admin_fee": _cargo(request.charge_admin_fee, "charge_admin_fee"),
+        "charge_cancellation_insurance": _cargo(
+            request.charge_cancellation_insurance, "charge_cancellation_insurance"
+        ),
+        "charge_contracted_insurance": _cargo(
+            request.charge_contracted_insurance, "charge_contracted_insurance"
+        ),
+    }
+
+
+def _garantia_de_solicitud(request, context) -> tuple[str | None, Decimal | None]:
+    """BR-LOAN-005: (tipo, monto) de la garantía, o (None, None) si no hay.
+    Ambos campos van juntos o ninguno."""
+    tipo = request.guarantee_type.strip()
+    monto_texto = request.guarantee_amount.strip()
+    if bool(tipo) != bool(monto_texto):
+        context.abort(
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "guarantee_type y guarantee_amount deben completarse juntos, "
+            "o dejarse ambos vacíos (BR-LOAN-005)",
+        )
+    monto = (
+        analizar_decimal(monto_texto, "guarantee_amount", context)
+        if monto_texto
+        else None
+    )
+    return (tipo or None), monto
+
+
+def _tasa_estandar_o_abortar(texto_tasa: str, context) -> Decimal:
+    """BR-LOAN-007: la tasa es fija para todos los roles, sin excepción.
+
+    Se acepta el campo vacío -- la forma normal de pedir "la tasa vigente" y
+    lo que manda el cliente desde que se le sacó el campo del formulario -- o
+    exactamente `config.LOAN_FIXED_INTEREST_RATE`, para que un llamador viejo
+    que la manda explícitamente siga funcionando. Cualquier otro valor se
+    rechaza en vez de descartarse en silencio: si alguien pidió 30%, dejarlo
+    creado al 45% sin avisar es peor que fallar.
+
+    Hasta 2026-08-28 un MANAGER/ADMIN podía fijar una tasa distinta acá. Ya no:
+    la tasa pasó a ser una decisión comercial de la entidad y se cambia en
+    `config.LOAN_FIXED_INTEREST_RATE` (mirroreada a mano en
+    `cas_client/rbac_ui.py`), no préstamo por préstamo.
+    """
+    estandar = config.LOAN_FIXED_INTEREST_RATE
+    texto = texto_tasa.strip()
+    if not texto:
+        return estandar
+    tasa = analizar_decimal(texto, "interest_rate", context)
+    if tasa != estandar:
+        context.abort(
+            grpc.StatusCode.FAILED_PRECONDITION,
+            f"La tasa de interés es fija ({estandar}) y no puede cambiarse "
+            "desde la aplicación (BR-LOAN-007)",
+        )
+    return tasa
+
+
+def _validar_tope_cuota(
+    cliente: Client,
+    monto_financiado: Decimal,
+    tasa: Decimal,
+    plazo_meses: int,
+    context,
+) -> None:
+    """BR-LOAN-002: la cuota no puede exceder el 40% del ingreso declarado.
+
+    Se mide contra `cronograma[0]`, la cuota representativa del sistema alemán
+    (BR-LOAN-013: todas iguales salvo los centavos de la última), y sobre el
+    **monto financiado** -- capital + cargos capitalizados, que es lo que el
+    cliente realmente va a pagar todos los meses.
+    """
+    if cliente.declared_monthly_income is None:
+        context.abort(
+            grpc.StatusCode.FAILED_PRECONDITION,
+            "El cliente no tiene ingresos declarados registrados (BR-LOAN-002)",
+        )
+    cuota_mensual = calcular_cronograma(monto_financiado, tasa, plazo_meses)[
+        0
+    ].monto_cuota
+    cuota_maxima = (
+        cliente.declared_monthly_income * config.LOAN_MAX_INSTALLMENT_INCOME_RATIO
+    )
+    if cuota_mensual > cuota_maxima:
+        context.abort(
+            grpc.StatusCode.FAILED_PRECONDITION,
+            "La cuota mensual excede el 40% del ingreso declarado (BR-LOAN-002)",
+        )
 
 
 def _nombre_usuario_creador(sesion, prestamo: Loan) -> str:
@@ -275,7 +396,7 @@ def _cuotas_cubiertas_por_pago(
     cuáles quedaron saldadas.
     """
     cronograma = calcular_cronograma(
-        prestamo.principal_amount,
+        _monto_financiado(prestamo),
         prestamo.interest_rate,
         prestamo.term_months,
         fecha_primer_vencimiento=prestamo.first_due_date,
@@ -300,6 +421,14 @@ def _prestamo_a_respuesta(
     total_programado, total_pagado = _totales_prestamo(prestamo)
     saldo_restante = max(total_programado - total_pagado, CERO)
     total_cargos = _total_cargos(prestamo)
+    monto_financiado = _monto_financiado(prestamo)
+    cronograma = calcular_cronograma(
+        monto_financiado,
+        prestamo.interest_rate,
+        prestamo.term_months,
+        ajustes=_ajustes_prestamo(prestamo),
+    )
+    total_interes = sum((fila.interes for fila in cronograma), CERO)
     estado_pago, monto_vencido, cuotas_vencidas = _estado_pago_prestamo(
         prestamo, datetime.now(timezone.utc).date()
     )
@@ -337,7 +466,14 @@ def _prestamo_a_respuesta(
             else str(prestamo.charge_contracted_insurance)
         ),
         total_charges=str(total_cargos),
-        total_credit_with_charges=str(total_programado + total_cargos),
+        # "Total del Crédito" de la propuesta: capital + cargos, el monto que
+        # el cronograma amortiza (BR-LOAN-006). Distinto de total_to_pay, que
+        # le suma además el interés.
+        total_credit_with_charges=str(monto_financiado),
+        amount_to_disburse=str(prestamo.principal_amount),
+        total_interest=str(total_interes),
+        total_to_pay=str(total_programado),
+        installment_amount=str(cronograma[0].monto_cuota),
         payment_status=estado_pago,
         overdue_amount=str(monto_vencido),
         overdue_installments_count=cuotas_vencidas,
@@ -353,12 +489,18 @@ def _prestamo_a_respuesta(
 
 class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
     def CreateLoan(self, request, context):
-        if not (
-            request.client_id and request.principal_amount and request.interest_rate
-        ):
+        """Alta de la propuesta completa: términos, garantía y cargos juntos.
+
+        Los cargos entran acá y no en una segunda llamada porque desde
+        BR-LOAN-006 se capitalizan: forman parte del monto que se amortiza, así
+        que determinan la cuota que BR-LOAN-002 tiene que validar. Crear el
+        préstamo sin ellos y agregarlos después habría dejado pasar propuestas
+        cuya cuota real excede el tope.
+        """
+        if not (request.client_id and request.principal_amount):
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
-                "client_id, principal_amount e interest_rate son obligatorios",
+                "client_id y principal_amount son obligatorios",
             )
         if request.term_months <= 0:
             context.abort(
@@ -369,30 +511,17 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
         capital = analizar_decimal(
             request.principal_amount, "principal_amount", context, permitir_cero=False
         )
-        tasa_interes = analizar_decimal(request.interest_rate, "interest_rate", context)
+        tasa_interes = _tasa_estandar_o_abortar(request.interest_rate, context)
+        tipo_garantia, monto_garantia = _garantia_de_solicitud(request, context)
+        cargos = _cargos_de_solicitud(request, context)
+        total_cargos = sum((c for c in cargos.values() if c is not None), CERO)
 
-        # BR-LOAN-007: solo Agente de Créditos (MANAGER) o Administrador pueden
-        # fijar una tasa distinta a la estándar. `claims` es None únicamente en
-        # llamadas directas al servicer sin pasar por AuthInterceptor (tests) --
-        # en producción esta RPC siempre tiene claims, así que no restringimos
-        # cuando no hay contexto de autenticación disponible.
         claims = get_current_claims()
-        if claims is not None:
-            rol_actual = RoleEnum(claims.role)
-            if (
-                rol_actual not in rbac.MANAGER_AND_ABOVE
-                and tasa_interes != config.LOAN_FIXED_INTEREST_RATE
-            ):
-                context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "Solo un Agente de Créditos o Administrador puede fijar una "
-                    "tasa distinta a la estándar "
-                    f"({config.LOAN_FIXED_INTEREST_RATE}) (BR-LOAN-007)",
-                )
-
         ahora = datetime.now(timezone.utc)
-        fecha_primer_vencimiento = ahora.date() + timedelta(
-            days=config.LOAN_DEFAULT_FIRST_DUE_DAYS
+        fecha_primer_vencimiento = (
+            analizar_fecha(request.first_due_date, "first_due_date", context)
+            if request.first_due_date.strip()
+            else ahora.date() + timedelta(days=config.LOAN_DEFAULT_FIRST_DUE_DAYS)
         )
 
         with SessionLocal() as sesion:
@@ -409,28 +538,13 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     grpc.StatusCode.FAILED_PRECONDITION, "El cliente no está activo"
                 )
 
-            if cliente.declared_monthly_income is None:
-                context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "El cliente no tiene ingresos declarados registrados (BR-LOAN-002)",
-                )
-
-            # BR-LOAN-002 contra cronograma[0]: bajo el sistema alemán
-            # (BR-LOAN-013) todas las cuotas son iguales salvo la última, que
-            # difiere en centavos por el redondeo del capital, así que la
-            # primera es la cuota representativa del préstamo.
-            cronograma = calcular_cronograma(capital, tasa_interes, request.term_months)
-            cuota_mensual = cronograma[0].monto_cuota
-            cuota_maxima = (
-                cliente.declared_monthly_income
-                * config.LOAN_MAX_INSTALLMENT_INCOME_RATIO
+            _validar_tope_cuota(
+                cliente,
+                capital + total_cargos,
+                tasa_interes,
+                request.term_months,
+                context,
             )
-            if cuota_mensual > cuota_maxima:
-                context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "La cuota mensual excede el 40% del ingreso declarado "
-                    "(BR-LOAN-002)",
-                )
 
             prestamos_existentes = (
                 sesion.query(Loan).filter(Loan.client_id == cliente.id).all()
@@ -453,8 +567,11 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 interest_rate=tasa_interes,
                 term_months=request.term_months,
                 first_due_date=fecha_primer_vencimiento,
+                guarantee_type=tipo_garantia,
+                guarantee_amount=monto_garantia,
                 status=LoanStatusEnum.PENDING,
                 created_at=ahora,
+                **cargos,
             )
             sesion.add(prestamo)
             sesion.flush()
@@ -462,7 +579,11 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
             sesion.add(
                 AuditLog(
                     user_id=id_actor_actual(get_current_claims()),
-                    action=f"PRESTAMO_CREADO loan_id={prestamo.id} client_id={cliente.id}",
+                    action=(
+                        f"PRESTAMO_CREADO loan_id={prestamo.id} "
+                        f"client_id={cliente.id} capital={capital} "
+                        f"cargos={total_cargos}"
+                    ),
                     ip_address=ip_remota(context),
                     timestamp=ahora,
                 )
@@ -492,6 +613,9 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
         fecha_primer_vencimiento = analizar_fecha(
             request.first_due_date, "first_due_date", context
         )
+        tipo_garantia, monto_garantia = _garantia_de_solicitud(request, context)
+        cargos = _cargos_de_solicitud(request, context)
+        total_cargos = sum((c for c in cargos.values() if c is not None), CERO)
 
         with SessionLocal() as sesion:
             prestamo = sesion.get(Loan, loan_id)
@@ -512,9 +636,9 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     "creación del préstamo",
                 )
 
-            # Mismas dos verificaciones que CreateLoan hace antes de validar
-            # BR-LOAN-002. Faltaban acá: sin ellas, un cliente sin ingresos
-            # declarados hacía reventar la multiplicación de más abajo
+            # Misma verificación que CreateLoan hace antes de validar
+            # BR-LOAN-002. Faltaba acá: sin ella, un cliente sin ingresos
+            # declarados hacía reventar la multiplicación del tope
             # (None * Decimal) y la RPC respondía UNKNOWN -- que la vista
             # traduce a "Ocurrió un error inesperado", sin decir qué falta.
             cliente = sesion.get(Client, prestamo.client_id)
@@ -523,34 +647,27 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     grpc.StatusCode.NOT_FOUND,
                     "El cliente del préstamo no existe",
                 )
-            if cliente.declared_monthly_income is None:
-                context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "El cliente no tiene ingresos declarados registrados (BR-LOAN-002)",
-                )
 
-            # Primera cuota, por el mismo motivo que en CreateLoan: es la
-            # cuota representativa del cronograma alemán.
-            cronograma = calcular_cronograma(
-                capital, prestamo.interest_rate, request.term_months
+            # El tope se mide sobre capital + cargos: los cargos se capitalizan
+            # (BR-LOAN-006), así que suben la cuota igual que el capital.
+            _validar_tope_cuota(
+                cliente,
+                capital + total_cargos,
+                prestamo.interest_rate,
+                request.term_months,
+                context,
             )
-            cuota_mensual = cronograma[0].monto_cuota
-            cuota_maxima = (
-                cliente.declared_monthly_income
-                * config.LOAN_MAX_INSTALLMENT_INCOME_RATIO
-            )
-            if cuota_mensual > cuota_maxima:
-                context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "La cuota mensual excede el 40% del ingreso declarado "
-                    "(BR-LOAN-002)",
-                )
 
             monto_anterior = prestamo.principal_amount
             cuotas_anterior = prestamo.term_months
+            cargos_anterior = _total_cargos(prestamo)
             prestamo.principal_amount = capital
             prestamo.term_months = request.term_months
             prestamo.first_due_date = fecha_primer_vencimiento
+            prestamo.guarantee_type = tipo_garantia
+            prestamo.guarantee_amount = monto_garantia
+            for campo, valor in cargos.items():
+                setattr(prestamo, campo, valor)
 
             sesion.add(
                 AuditLog(
@@ -559,7 +676,10 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                         f"PRESTAMO_PROPUESTA_ACTUALIZADA loan_id={prestamo.id} "
                         f"monto_anterior={monto_anterior} monto_nuevo={capital} "
                         f"cuotas_anterior={cuotas_anterior} "
-                        f"cuotas_nuevo={request.term_months}"
+                        f"cuotas_nuevo={request.term_months} "
+                        f"cargos_anterior={cargos_anterior} "
+                        f"cargos_nuevo={total_cargos} "
+                        f"garantia={tipo_garantia or '-'}/{monto_garantia}"
                     ),
                     ip_address=ip_remota(context),
                     timestamp=datetime.now(timezone.utc),
@@ -573,19 +693,7 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
 
     def UpdateLoanGuarantee(self, request, context):
         loan_id = analizar_uuid(request.loan_id, "loan_id", context)
-        tipo = request.guarantee_type.strip()
-        monto_texto = request.guarantee_amount.strip()
-        if bool(tipo) != bool(monto_texto):
-            context.abort(
-                grpc.StatusCode.INVALID_ARGUMENT,
-                "guarantee_type y guarantee_amount deben completarse juntos, "
-                "o dejarse ambos vacíos (BR-LOAN-005)",
-            )
-        monto = (
-            analizar_decimal(monto_texto, "guarantee_amount", context)
-            if monto_texto
-            else None
-        )
+        tipo, monto = _garantia_de_solicitud(request, context)
 
         with SessionLocal() as sesion:
             prestamo = sesion.get(Loan, loan_id)
@@ -600,7 +708,7 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     "(BR-LOAN-005)",
                 )
 
-            prestamo.guarantee_type = tipo or None
+            prestamo.guarantee_type = tipo
             prestamo.guarantee_amount = monto
 
             sesion.add(
@@ -636,22 +744,28 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     "(BR-LOAN-006)",
                 )
 
-            def _cargo(valor: str, nombre_campo: str) -> Decimal | None:
-                texto = valor.strip()
-                return analizar_decimal(texto, nombre_campo, context) if texto else None
+            cargos = _cargos_de_solicitud(request, context)
+            total_cargos = sum((c for c in cargos.values() if c is not None), CERO)
 
-            prestamo.charge_interest_tax = _cargo(
-                request.charge_interest_tax, "charge_interest_tax"
+            # Desde que los cargos se capitalizan (BR-LOAN-006) suben la cuota,
+            # así que esta RPC pasó a ser un camino más por el que se puede
+            # violar el tope del 40%. Antes no hacía falta validar acá porque
+            # los cargos no tocaban el cronograma.
+            cliente = sesion.get(Client, prestamo.client_id)
+            if cliente is None:
+                context.abort(
+                    grpc.StatusCode.NOT_FOUND, "El cliente del préstamo no existe"
+                )
+            _validar_tope_cuota(
+                cliente,
+                prestamo.principal_amount + total_cargos,
+                prestamo.interest_rate,
+                prestamo.term_months,
+                context,
             )
-            prestamo.charge_admin_fee = _cargo(
-                request.charge_admin_fee, "charge_admin_fee"
-            )
-            prestamo.charge_cancellation_insurance = _cargo(
-                request.charge_cancellation_insurance, "charge_cancellation_insurance"
-            )
-            prestamo.charge_contracted_insurance = _cargo(
-                request.charge_contracted_insurance, "charge_contracted_insurance"
-            )
+
+            for campo, valor in cargos.items():
+                setattr(prestamo, campo, valor)
 
             sesion.add(
                 AuditLog(
@@ -1212,7 +1326,7 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
             ajustes_tentativos = dict(_ajustes_prestamo(prestamo))
             ajustes_tentativos[numero] = monto_ajustado
             cronograma_tentativo = calcular_cronograma(
-                prestamo.principal_amount,
+                _monto_financiado(prestamo),
                 prestamo.interest_rate,
                 prestamo.term_months,
                 ajustes=ajustes_tentativos,

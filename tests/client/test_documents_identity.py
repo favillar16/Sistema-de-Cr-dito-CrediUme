@@ -109,11 +109,18 @@ class _FakeLoanCompleto:
     guarantee_type = ""
     guarantee_amount = "0.00"
     charge_interest_tax = ""
-    charge_admin_fee = ""
     charge_cancellation_insurance = ""
     charge_contracted_insurance = ""
-    total_charges = "0.00"
-    total_credit_with_charges = "18000000.00"
+    # BR-LOAN-006: los cargos se capitalizan, así que el préstamo de muestra
+    # los trae cargados -- un fake sin cargos no ejercitaría el bloque de
+    # composición del crédito que hoy imprimen los tres documentos.
+    charge_admin_fee = "1000000.00"
+    total_charges = "1000000.00"
+    total_credit_with_charges = "19000000.00"
+    total_interest = "12825000.00"
+    total_to_pay = "31825000.00"
+    installment_amount = "1768055.56"
+    amount_to_disburse = "18000000.00"
 
 
 def _texto_plano(documento: str) -> str:

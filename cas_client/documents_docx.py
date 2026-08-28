@@ -10,6 +10,8 @@ constants (_COMPANY_*, _TERM_*, _ESTADOS_LABEL) rather than duplicating them,
 so the authorised commercial terms can't drift between the PDF and the DOCX
 of the same contract."""
 
+import html
+
 from docx import Document
 from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -156,32 +158,40 @@ def _add_signature_line(document: Document, text: str) -> None:
 
 
 def _add_cargos_y_garantia(document: Document, loan) -> None:
-    """BR-LOAN-005/006 desglose -- same fields/condition as documents.py's
-    _cargos_y_garantia_block(), purely informational (see CLAUDE.md)."""
+    """BR-LOAN-005/006: composición del crédito + garantía.
+
+    Las filas salen de documents.py's filas_composicion_credito() para que el
+    PDF y el DOCX del mismo préstamo no puedan mostrar totales distintos --
+    mismo criterio que _filas_reporte() en el reporte de período. Ese módulo
+    escribe para HTML, así que las etiquetas vienen con entidades
+    (&eacute;...) y hay que desescaparlas antes de meterlas en un docx.
+    """
     filas = [
-        (nombre, monto)
-        for nombre, monto in (
-            ("Impuesto al interés", loan.charge_interest_tax),
-            ("Gastos administrativos", loan.charge_admin_fee),
-            ("Seguro de cancelación de deuda", loan.charge_cancellation_insurance),
-            ("Seguros contratados", loan.charge_contracted_insurance),
-        )
-        if monto
+        (html.unescape(nombre), monto, destacar)
+        for nombre, monto, destacar in documents.filas_composicion_credito(loan)
     ]
 
-    if filas:
-        _add_section_heading(document, "Cargos y seguros")
-        table = document.add_table(rows=1 + len(filas) + 1, cols=2)
-        table.style = "Table Grid"
-        table.rows[0].cells[0].text = "Concepto"
-        table.rows[0].cells[1].text = "Monto (Gs)"
-        for row_index, (nombre, monto) in enumerate(filas, start=1):
-            cells = table.rows[row_index].cells
-            cells[0].text = nombre
-            cells[1].text = gs(monto)
-        total_cells = table.rows[-1].cells
-        total_cells[0].text = "Total cargos"
-        total_cells[1].text = gs(loan.total_charges)
+    _add_section_heading(document, "Composición del crédito")
+    table = document.add_table(rows=1 + len(filas), cols=2)
+    table.style = "Table Grid"
+    table.rows[0].cells[0].text = "Concepto"
+    table.rows[0].cells[1].text = "Monto (Gs)"
+    for row_index, (nombre, monto, destacar) in enumerate(filas, start=1):
+        cells = table.rows[row_index].cells
+        cells[0].text = nombre
+        cells[1].text = monto
+        if destacar:
+            for cell in cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.bold = True
+    _add_footer_note(
+        document,
+        "Los cargos y seguros se financian junto con el capital: integran el "
+        "total del crédito, que es el monto que amortizan las cuotas y sobre "
+        "el que se calcula el interés. El importe entregado al cliente es el "
+        "capital solicitado.",
+    )
 
     if loan.guarantee_type:
         _add_labeled_lines(
@@ -189,11 +199,8 @@ def _add_cargos_y_garantia(document: Document, loan) -> None:
             [
                 (
                     "Garantía",
-                    f"{loan.guarantee_type} — Monto aplicado: {gs(loan.guarantee_amount)}",
-                ),
-                (
-                    "Total del crédito (incl. cargos)",
-                    gs(loan.total_credit_with_charges),
+                    f"{loan.guarantee_type} — Monto aplicado: "
+                    f"{gs(loan.guarantee_amount)}",
                 ),
             ],
         )
@@ -440,10 +447,13 @@ def pagare_docx(loan, client) -> Document:
 
     body = document.add_paragraph()
     body.add_run(f"DECLARO(AMOS) ADEUDAR a {documents._COMPANY_NAME} la suma de ")
-    amount_run = body.add_run(f"Guaraníes {gs(loan.principal_amount)}")
+    amount_run = body.add_run(f"Guaraníes {gs(loan.total_credit_with_charges)}")
     amount_run.bold = True
     body.add_run(
-        ", que PAGARÉ(MOS) solidariamente, a su orden, libre de gastos y sin "
+        f", integrada por un capital de {gs(loan.principal_amount)} y "
+        f"{gs(loan.total_charges)} en concepto de cargos y seguros "
+        "financiados, que PAGARÉ(MOS) solidariamente, a su orden, libre de "
+        "gastos y sin "
         f"protesto, en {loan.term_months} cuotas iguales, mensuales y "
         "consecutivas, con vencimiento la primera de ellas el día "
         f"{fecha(loan.first_due_date)}, y las siguientes cuotas en esas mismas "
@@ -571,19 +581,24 @@ def contrato_docx(loan, client) -> Document:
         (
             "Primera (Objeto)",
             f"{documents._COMPANY_NAME} otorga al(los) Prestatario(s) un "
-            f"préstamo de dinero por la suma de Guaraníes "
+            f"préstamo de dinero por un capital de Guaraníes "
             f"{gs(loan.principal_amount)}, que se desembolsa a la firma del "
-            "presente instrumento, conjuntamente con un Pagaré a la orden "
-            "por dicho monto, destinado a servir como título de crédito.",
+            f"presente instrumento. Al capital se adicionan "
+            f"{gs(loan.total_charges)} en concepto de cargos, gastos "
+            "administrativos y seguros, que se financian junto con él, de "
+            "modo que el monto total del crédito asciende a Guaraníes "
+            f"{gs(loan.total_credit_with_charges)}, importe por el cual se "
+            "suscribe un Pagaré a la orden destinado a servir como título "
+            "de crédito.",
         ),
         (
             "Segunda (Reembolso)",
             "El(Los) Prestatario(s) se compromete(n) a reembolsar el "
             f"préstamo otorgado en {loan.term_months} cuotas iguales, "
             "mensuales y consecutivas: cada cuota amortiza una porción "
-            "constante del capital e incluye un interés fijo calculado sobre "
-            "el monto original del préstamo, de modo que todas las cuotas son "
-            "del mismo importe. La primera de ellas vence el día "
+            "constante del monto total del crédito e incluye un interés fijo "
+            "calculado sobre ese mismo monto original, de modo que todas las "
+            "cuotas son del mismo importe. La primera de ellas vence el día "
             f"{fecha(loan.first_due_date)}, mediante transferencia bancaria, "
             "débito directo o descuento en cuenta, según lo acordado.",
         ),

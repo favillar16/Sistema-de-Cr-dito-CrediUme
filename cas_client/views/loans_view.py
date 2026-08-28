@@ -1,4 +1,4 @@
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 import grpc
 from PySide6.QtCore import Qt, Signal
@@ -29,13 +29,14 @@ from cas_client.formatting import (
     fecha_a_iso,
     gs,
     rate_percent,
+    rate_percent_mensual,
 )
 from cas_client.grpc_client import ApiError, ClientServiceClient, LoanServiceClient
 from cas_client.rbac_ui import (
+    FIXED_INTEREST_RATE,
     can_delete_loan,
     can_revert_default,
     can_edit_installment_amount,
-    can_edit_interest_rate,
     can_originate_credit,
     fixed_interest_rate_percent,
     role_at_least,
@@ -138,12 +139,77 @@ _PAYMENT_STATUS_LABEL = {
     "CUOTA_VENCIDA": "Cuota vencida",
 }
 
+# BR-LOAN-006: los 4 cargos, en el orden en que se cargan y se muestran. La
+# tupla es (atributo del formulario, etiqueta, nombre del campo en la RPC) y es
+# la ÚNICA lista: el formulario de propuesta, el resumen del detalle y el
+# armado de la llamada la recorren, así que agregar o renombrar un cargo se
+# hace en un solo lugar en vez de en cinco bloques copiados.
+_CHARGE_FIELDS = (
+    ("_charge_interest_tax", "Impuesto s/ intereses", "charge_interest_tax"),
+    ("_charge_admin_fee", "Gastos administrativos por desembolso", "charge_admin_fee"),
+    (
+        "_charge_cancellation_insurance",
+        "Seguro de cancelación de deuda",
+        "charge_cancellation_insurance",
+    ),
+    (
+        "_charge_contracted_insurance",
+        "Seguros contratados",
+        "charge_contracted_insurance",
+    ),
+)
+
+# Filas del resumen del préstamo, en el orden en que se leen: primero cómo se
+# arma el costo (capital -> cargos -> total del crédito -> interés -> total a
+# pagar), después qué recibe y qué paga el cliente. Cada entrada es
+# (atributo del campo de la respuesta, etiqueta, destacada). Las destacadas son
+# las tres cifras que el operador le dice al cliente en voz alta.
+_SUMMARY_ROWS = (
+    ("principal_amount", "Capital solicitado", False),
+    ("total_charges", "Total de cargos", False),
+    ("total_credit_with_charges", "Total del crédito", True),
+    ("total_interest", "Total de interés", False),
+    ("total_to_pay", "Total a pagar", True),
+    ("installment_amount", "Cuota mensual", True),
+    ("amount_to_disburse", "A desembolsar al cliente", False),
+    ("total_paid", "Total pagado", False),
+    ("remaining_balance", "Saldo restante", False),
+)
+
+# Texto que explica, una sola vez, cómo se compone el costo del préstamo. Lo
+# usan el alta y la edición de la propuesta: es lo que hace entendible que el
+# cliente reciba una cifra y amortice otra.
+_CHARGES_HINT = (
+    "Los cargos se financian junto con el capital: se suman para formar el "
+    "Total del crédito, que es el monto que amortizan las cuotas y sobre el "
+    "que se calcula el interés. El cliente igual recibe en mano solo el "
+    "capital solicitado. Dejar un cargo vacío es no aplicarlo."
+)
+
 # BR-LOAN-012: estados desde los que el servidor acepta eliminar un préstamo.
 # Copia literal de _ESTADOS_ELIMINABLES en loan_service.py -- se mantiene a
 # mano, igual que rbac_ui.py replica los niveles de rbac.py: el servidor
 # vuelve a verificarlo, esto solo evita ofrecer un botón que respondería
 # FAILED_PRECONDITION.
 _DELETABLE_STATUSES = ("PENDING", "APPROVED", "EXPIRED")
+
+
+def _charges_breakdown_text(loan) -> str:
+    """Desglose de los cargos que se capitalizaron, o una frase que diga que no
+    hay ninguno.
+
+    Sin esto, "Total de cargos" es una cifra que aparece sumada al capital sin
+    que se pueda ver de dónde salió -- justo lo que el cliente pregunta cuando
+    ve que amortiza más de lo que recibió.
+    """
+    partes = [
+        f"{label}: {gs(getattr(loan, field_name))}"
+        for _attribute, label, field_name in _CHARGE_FIELDS
+        if getattr(loan, field_name)
+    ]
+    if not partes:
+        return "Sin cargos aplicados: el total del crédito es el capital solicitado."
+    return "Cargos aplicados — " + "  ·  ".join(partes)
 
 
 def _cuotas_texto_y_color(loan) -> tuple[str, str]:
@@ -604,6 +670,187 @@ class LoansView(BaseView):
 
     # ---- Página de alta ---------------------------------------------------
 
+    # ---- Formulario de propuesta (alta y edición comparten forma) ---------
+
+    def _build_proposal_form(self, prefix: str, submit_text: str, on_submit) -> QWidget:
+        """Arma el formulario de propuesta completo: términos + cargos +
+        garantía + un único botón de guardado.
+
+        El alta y la edición usan exactamente el mismo formulario porque
+        describen la misma cosa. Antes la edición eran tres tarjetas con tres
+        botones independientes ("Guardar propuesta" / "Guardar garantía" /
+        "Guardar cargos"), y desde que los cargos se capitalizan (BR-LOAN-006)
+        eso pasó a ser directamente engañoso: guardar los términos sin los
+        cargos mostraba una cuota que dejaba de ser la real en cuanto se
+        guardaba la segunda tarjeta. Un solo guardado envía la propuesta
+        entera y el servidor valida el tope del 40% sobre el conjunto.
+
+        `prefix` nombra los widgets ("_new" / "_edit") para que las dos
+        páginas coexistan sin pisarse los campos.
+        """
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        # -- Términos --
+        terms_frame, terms = card()
+        terms.addWidget(section_label("Datos del préstamo"))
+
+        grid = ResponsiveGrid(min_cell_width=220)
+        principal_field, principal_input = labeled_field(
+            "Capital solicitado (Gs)", "Ej. 10.000.000", input_cls=CurrencyInput
+        )
+        term_field, term_input = labeled_field("Plazo en meses", "Ej. 12")
+        due_field, due_input = labeled_field(
+            "Primer vencimiento", DISPLAY_DATE_PLACEHOLDER
+        )
+        grid.add_widget(principal_field)
+        grid.add_widget(term_field)
+        grid.add_widget(due_field)
+        terms.addWidget(grid)
+        setattr(self, f"{prefix}_principal", principal_input)
+        setattr(self, f"{prefix}_term", term_input)
+        setattr(self, f"{prefix}_first_due_date", due_input)
+
+        # BR-LOAN-007: la tasa dejó de ser un campo. Se muestra como dato para
+        # que siga estando a la vista de quien arma la propuesta, pero no hay
+        # nada que tipear ni un rol que la desbloquee.
+        rate_line = QLabel(
+            f"Tasa de interés: {fixed_interest_rate_percent()}% anual "
+            f"({rate_percent_mensual(FIXED_INTEREST_RATE)} mensual sobre el "
+            "monto original) — fija para todos los usuarios."
+        )
+        rate_line.setWordWrap(True)
+        rate_line.setStyleSheet(
+            f"color: {theme.PRIMARY}; font-size: 12px; font-weight: 600;"
+        )
+        terms.addWidget(rate_line)
+
+        hint = QLabel(
+            "Cada mes se amortiza la misma porción de capital y se cobra un "
+            "interés fijo sobre el monto original, por lo que todas las "
+            "cuotas son iguales. Esa cuota no puede exceder el 40% del "
+            "ingreso declarado del cliente."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        terms.addWidget(hint)
+        layout.addWidget(terms_frame)
+
+        # -- Cargos capitalizados (BR-LOAN-006) --
+        charges_frame, charges = card()
+        charges.addWidget(section_label("Cargos y seguros financiados"))
+        charges_grid = ResponsiveGrid(min_cell_width=220)
+        for attribute, label, _field_name in _CHARGE_FIELDS:
+            field, widget = labeled_field(
+                f"{label} (Gs)", "Ej. 500.000", input_cls=CurrencyInput
+            )
+            charges_grid.add_widget(field)
+            setattr(self, f"{prefix}{attribute}", widget)
+        charges.addWidget(charges_grid)
+        charges_hint = QLabel(_CHARGES_HINT)
+        charges_hint.setWordWrap(True)
+        charges_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        charges.addWidget(charges_hint)
+        layout.addWidget(charges_frame)
+
+        # -- Garantía (BR-LOAN-005) --
+        guarantee_frame, guarantee = card()
+        guarantee.addWidget(section_label("Garantía"))
+        guarantee_grid = ResponsiveGrid(min_cell_width=220)
+        type_field, type_input = labeled_field("Tipo de garantía", "Ej. SOLA FIRMA")
+        amount_field, amount_input = labeled_field(
+            "Monto aplicado (Gs)", "Ej. 6.434.769", input_cls=CurrencyInput
+        )
+        guarantee_grid.add_widget(type_field)
+        guarantee_grid.add_widget(amount_field)
+        guarantee.addWidget(guarantee_grid)
+        setattr(self, f"{prefix}_guarantee_type", type_input)
+        setattr(self, f"{prefix}_guarantee_amount", amount_input)
+        guarantee_hint = QLabel(
+            "Ambos campos se completan juntos, o se dejan ambos vacíos (sin "
+            "garantía). La garantía no altera la cuota."
+        )
+        guarantee_hint.setWordWrap(True)
+        guarantee_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        guarantee.addWidget(guarantee_hint)
+        layout.addWidget(guarantee_frame)
+
+        submit_button = QPushButton(submit_text)
+        submit_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        submit_button.setStyleSheet(theme.accent_button_style(padding="10px"))
+        submit_button.clicked.connect(on_submit)
+        submit_row = QHBoxLayout()
+        submit_row.addStretch()
+        submit_row.addWidget(submit_button)
+        layout.addLayout(submit_row)
+
+        return container
+
+    def _proposal_fields(self, prefix: str) -> dict | None:
+        """Lee un formulario de propuesta y devuelve los argumentos de la RPC,
+        o None (mostrando el aviso correspondiente) si falta algo.
+
+        Compartido por el alta y la edición: los dos mandan la propuesta
+        entera, así que validarla dos veces por separado solo daba lugar a que
+        una de las dos copias se quedara atrás.
+        """
+        principal = getattr(self, f"{prefix}_principal").raw_value()
+        term = getattr(self, f"{prefix}_term").text().strip()
+        due_input = getattr(self, f"{prefix}_first_due_date")
+        first_due_date = due_input.text().strip()
+        if not (principal and term):
+            self._toast.show_message("Complete el capital y el plazo.")
+            return None
+        try:
+            term_months = int(term)
+        except ValueError:
+            self._toast.show_message("El plazo debe ser un número entero de meses.")
+            return None
+        if first_due_date and not es_fecha_valida(first_due_date):
+            due_input.set_error(True)
+            self._toast.show_message(
+                "Revise el primer vencimiento: use el formato "
+                f"{DISPLAY_DATE_PLACEHOLDER}."
+            )
+            return None
+        due_input.set_error(False)
+
+        guarantee_type = getattr(self, f"{prefix}_guarantee_type").text().strip()
+        guarantee_amount = getattr(self, f"{prefix}_guarantee_amount").raw_value()
+        if bool(guarantee_type) != bool(guarantee_amount):
+            self._toast.show_message(
+                "Complete el tipo y el monto de la garantía juntos, o deje "
+                "ambos vacíos."
+            )
+            return None
+
+        campos = {
+            "principal_amount": principal,
+            "term_months": term_months,
+            "first_due_date": fecha_a_iso(first_due_date) if first_due_date else "",
+            "guarantee_type": guarantee_type,
+            "guarantee_amount": guarantee_amount,
+        }
+        for attribute, _label, field_name in _CHARGE_FIELDS:
+            campos[field_name] = getattr(self, f"{prefix}{attribute}").raw_value()
+        return campos
+
+    def _clear_proposal_form(self, prefix: str) -> None:
+        for suffix in (
+            "_principal",
+            "_term",
+            "_first_due_date",
+            "_guarantee_type",
+            "_guarantee_amount",
+        ):
+            getattr(self, f"{prefix}{suffix}").clear()
+        for attribute, _label, _field_name in _CHARGE_FIELDS:
+            getattr(self, f"{prefix}{attribute}").clear()
+
+    # ---- Página de alta ---------------------------------------------------
+
     def _build_create_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -616,47 +863,12 @@ class LoansView(BaseView):
         back_button.clicked.connect(lambda: self._stack.setCurrentIndex(_PAGE_SEARCH))
         layout.addWidget(back_button)
 
-        card_frame, card_layout = card()
-        card_layout.addWidget(section_label("Datos del préstamo"))
-
-        grid = ResponsiveGrid(min_cell_width=220)
-        principal_field, self._new_principal = labeled_field(
-            "Capital (Gs)", "Ej. 15.000.000", input_cls=CurrencyInput
+        layout.addWidget(
+            self._build_proposal_form(
+                "_new", "Solicitar préstamo", self._on_create_submit
+            )
         )
-        term_field, self._new_term = labeled_field("Plazo en meses", "Ej. 12")
-        grid.add_widget(principal_field)
-        grid.add_widget(term_field)
-        card_layout.addWidget(grid)
-
-        rate_field, self._new_rate = labeled_field(
-            "Tasa de interés (%)", "Ej. 5 = 5% de interés"
-        )
-        card_layout.addWidget(rate_field)
-
-        self._rate_hint = QLabel("")
-        self._rate_hint.setWordWrap(True)
-        self._rate_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
-        card_layout.addWidget(self._rate_hint)
-
-        hint = QLabel(
-            "La cuota se calcula con el sistema alemán: cada mes se amortiza "
-            "la misma porción de capital (capital ÷ cuotas) y se cobra un "
-            "interés fijo sobre el monto original del préstamo, por lo que "
-            "todas las cuotas son iguales. Esa cuota no debe exceder el 40% "
-            "del ingreso declarado del cliente (BR-LOAN-002)."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
-        card_layout.addWidget(hint)
-
-        submit_button = QPushButton("Solicitar préstamo")
-        submit_button.setStyleSheet(theme.accent_button_style(padding="10px"))
-        submit_button.clicked.connect(self._on_create_submit)
-        card_layout.addWidget(submit_button)
-
-        layout.addWidget(card_frame)
         layout.addStretch()
-
         return page
 
     def _show_create_page(self) -> None:
@@ -665,44 +877,12 @@ class LoansView(BaseView):
                 "Seleccione primero un cliente para poder crear un préstamo."
             )
             return
-        self._new_principal.clear()
-        self._new_term.clear()
-
-        if can_edit_interest_rate(self._session.role):
-            self._new_rate.clear()
-            self._new_rate.setReadOnly(False)
-            self._rate_hint.setText(
-                "Como Agente de Créditos/Administrador podés fijar la tasa de "
-                "interés del préstamo. Ingresá el número tal cual (5 = 5% de interés)."
-            )
-        else:
-            self._new_rate.setText(fixed_interest_rate_percent())
-            self._new_rate.setReadOnly(True)
-            self._rate_hint.setText(
-                f"Tasa fija para su nivel de usuario: {fixed_interest_rate_percent()}% "
-                "de interés. Solo un Agente de Créditos o Administrador puede "
-                "modificarla."
-            )
+        self._clear_proposal_form("_new")
         self._stack.setCurrentIndex(_PAGE_CREATE)
 
     def _on_create_submit(self) -> None:
-        principal = self._new_principal.raw_value()
-        rate_percent_text = self._new_rate.text().strip()
-        term = self._new_term.text().strip()
-        if not (principal and rate_percent_text and term):
-            self._toast.show_message("Complete capital, tasa y plazo.")
-            return
-        try:
-            term_months = int(term)
-        except ValueError:
-            self._toast.show_message("El plazo debe ser un número entero de meses.")
-            return
-        try:
-            # The field takes a plain percentage (user types 5 for 5% de
-            # interés) -- the server expects the decimal-fraction equivalent.
-            rate_decimal = str(Decimal(rate_percent_text.replace(",", ".")) / 100)
-        except InvalidOperation:
-            self._toast.show_message("La tasa de interés debe ser un número (ej. 5).")
+        campos = self._proposal_fields("_new")
+        if campos is None:
             return
 
         self._set_loading(True)
@@ -711,9 +891,7 @@ class LoansView(BaseView):
             self._session.access_token,
             error_translator=_friendly_message,
             client_id=self._current_client_id,
-            principal_amount=principal,
-            interest_rate=rate_decimal,
-            term_months=term_months,
+            **campos,
         )
         self._worker.succeeded.connect(self._on_create_success)
         self._worker.failed.connect(self._on_error)
@@ -722,7 +900,8 @@ class LoansView(BaseView):
 
     def _on_create_success(self, response) -> None:
         self._toast.show_message(
-            "Préstamo solicitado (estado Pendiente). Mostrando el cronograma de cuotas."
+            "Préstamo solicitado (estado Pendiente). Mostrando el cronograma "
+            "de cuotas."
         )
         self._run_list(self._current_client_id)
         self._pending_schedule_after_create = True
@@ -742,140 +921,42 @@ class LoansView(BaseView):
         back_button.clicked.connect(lambda: self._stack.setCurrentIndex(_PAGE_DETAIL))
         layout.addWidget(back_button)
 
-        card_frame, card_layout = card()
-        card_layout.addWidget(section_label("Editar propuesta de crédito"))
+        layout.addWidget(
+            self._build_proposal_form(
+                "_edit", "Guardar propuesta", self._on_edit_proposal_submit
+            )
+        )
 
-        grid = ResponsiveGrid(min_cell_width=220)
-        principal_field, self._edit_principal = labeled_field(
-            "Capital (Gs)", "Ej. 15.000.000", input_cls=CurrencyInput
+        note = QLabel(
+            "Solo se puede editar mientras el préstamo esté Pendiente. Guardar "
+            "reemplaza la propuesta completa: términos, cargos y garantía."
         )
-        term_field, self._edit_term = labeled_field("Plazo en meses", "Ej. 12")
-        grid.add_widget(principal_field)
-        grid.add_widget(term_field)
-        card_layout.addWidget(grid)
-
-        due_date_field, self._edit_first_due_date = labeled_field(
-            "Primer vencimiento", DISPLAY_DATE_PLACEHOLDER
-        )
-        card_layout.addWidget(due_date_field)
-
-        hint = QLabel(
-            "Solo se puede editar mientras el préstamo esté Pendiente. La cuota "
-            "resultante no debe exceder el 40% del ingreso declarado del cliente "
-            "(BR-LOAN-002)."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
-        card_layout.addWidget(hint)
-
-        submit_button = QPushButton("Guardar propuesta")
-        submit_button.setStyleSheet(theme.accent_button_style(padding="10px"))
-        submit_button.clicked.connect(self._on_edit_proposal_submit)
-        card_layout.addWidget(submit_button)
-
-        layout.addWidget(card_frame)
-
-        # -- Tarjeta de garantía (BR-LOAN-005) --
-        guarantee_frame, guarantee_layout = card()
-        guarantee_layout.addWidget(section_label("Garantía"))
-        guarantee_grid = ResponsiveGrid(min_cell_width=220)
-        type_field, self._edit_guarantee_type = labeled_field(
-            "Tipo de garantía", "Ej. SOLA FIRMA"
-        )
-        amount_field, self._edit_guarantee_amount = labeled_field(
-            "Monto aplicado (Gs)", "Ej. 6.434.769", input_cls=CurrencyInput
-        )
-        guarantee_grid.add_widget(type_field)
-        guarantee_grid.add_widget(amount_field)
-        guarantee_layout.addWidget(guarantee_grid)
-        guarantee_hint = QLabel(
-            "Ambos campos se completan juntos, o se dejan ambos vacíos (sin "
-            "garantía)."
-        )
-        guarantee_hint.setWordWrap(True)
-        guarantee_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
-        guarantee_layout.addWidget(guarantee_hint)
-        guarantee_submit = QPushButton("Guardar garantía")
-        guarantee_submit.setStyleSheet(theme.secondary_button_style())
-        guarantee_submit.clicked.connect(self._on_edit_guarantee_submit)
-        guarantee_layout.addWidget(guarantee_submit)
-        layout.addWidget(guarantee_frame)
-
-        # -- Tarjeta de cargos y seguros (BR-LOAN-006, informativo) --
-        charges_frame, charges_layout = card()
-        charges_layout.addWidget(section_label("Cargos y seguros"))
-        charges_grid = ResponsiveGrid(min_cell_width=220)
-        tax_field, self._edit_charge_interest_tax = labeled_field(
-            "Impuesto al interés (Gs)", "Ej. 50.000", input_cls=CurrencyInput
-        )
-        admin_field, self._edit_charge_admin_fee = labeled_field(
-            "Gastos administrativos (Gs)", "Ej. 30.000", input_cls=CurrencyInput
-        )
-        cancel_ins_field, self._edit_charge_cancellation_insurance = labeled_field(
-            "Seguro de cancelación de deuda (Gs)", "Ej. 20.000", input_cls=CurrencyInput
-        )
-        contracted_ins_field, self._edit_charge_contracted_insurance = labeled_field(
-            "Seguros contratados (Gs)", "Ej. 10.000", input_cls=CurrencyInput
-        )
-        charges_grid.add_widget(tax_field)
-        charges_grid.add_widget(admin_field)
-        charges_grid.add_widget(cancel_ins_field)
-        charges_grid.add_widget(contracted_ins_field)
-        charges_layout.addWidget(charges_grid)
-        charges_hint = QLabel(
-            "Cargos informativos: no afectan la cuota mensual ni el tope del "
-            "40% de BR-LOAN-002 (BR-LOAN-006)."
-        )
-        charges_hint.setWordWrap(True)
-        charges_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
-        charges_layout.addWidget(charges_hint)
-        charges_submit = QPushButton("Guardar cargos")
-        charges_submit.setStyleSheet(theme.secondary_button_style())
-        charges_submit.clicked.connect(self._on_edit_charges_submit)
-        charges_layout.addWidget(charges_submit)
-        layout.addWidget(charges_frame)
-
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        layout.addWidget(note)
         layout.addStretch()
-
         return page
 
     def _show_edit_proposal_page(self) -> None:
         if self._detail_loan is None:
             return
-        self._edit_principal.set_amount(self._detail_loan.principal_amount)
-        self._edit_term.setText(str(self._detail_loan.term_months))
-        self._edit_first_due_date.setText(fecha(self._detail_loan.first_due_date))
-        self._edit_guarantee_type.setText(self._detail_loan.guarantee_type)
-        self._edit_guarantee_amount.set_amount(self._detail_loan.guarantee_amount)
-        self._edit_charge_interest_tax.set_amount(self._detail_loan.charge_interest_tax)
-        self._edit_charge_admin_fee.set_amount(self._detail_loan.charge_admin_fee)
-        self._edit_charge_cancellation_insurance.set_amount(
-            self._detail_loan.charge_cancellation_insurance
-        )
-        self._edit_charge_contracted_insurance.set_amount(
-            self._detail_loan.charge_contracted_insurance
-        )
+        loan = self._detail_loan
+        self._edit_principal.set_amount(loan.principal_amount)
+        self._edit_term.setText(str(loan.term_months))
+        self._edit_first_due_date.setText(fecha(loan.first_due_date))
+        self._edit_guarantee_type.setText(loan.guarantee_type)
+        self._edit_guarantee_amount.set_amount(loan.guarantee_amount)
+        for attribute, _label, field_name in _CHARGE_FIELDS:
+            getattr(self, f"_edit{attribute}").set_amount(getattr(loan, field_name))
         self._stack.setCurrentIndex(_PAGE_EDIT_PROPOSAL)
 
     def _on_edit_proposal_submit(self) -> None:
-        principal = self._edit_principal.raw_value()
-        term = self._edit_term.text().strip()
-        first_due_date = self._edit_first_due_date.text().strip()
-        if not (principal and term and first_due_date):
-            self._toast.show_message("Complete capital, plazo y primer vencimiento.")
+        campos = self._proposal_fields("_edit")
+        if campos is None:
             return
-        if not es_fecha_valida(first_due_date):
+        if not campos["first_due_date"]:
             self._edit_first_due_date.set_error(True)
-            self._toast.show_message(
-                "Revise el primer vencimiento: use el formato "
-                f"{DISPLAY_DATE_PLACEHOLDER}."
-            )
-            return
-        self._edit_first_due_date.set_error(False)
-        try:
-            term_months = int(term)
-        except ValueError:
-            self._toast.show_message("El plazo debe ser un número entero de meses.")
+            self._toast.show_message("Indique el primer vencimiento.")
             return
 
         self._set_loading(True)
@@ -884,54 +965,10 @@ class LoansView(BaseView):
             self._session.access_token,
             error_translator=_friendly_message,
             loan_id=self._selected_loan_id,
-            principal_amount=principal,
-            term_months=term_months,
-            first_due_date=fecha_a_iso(first_due_date),
+            **campos,
         )
         self._worker.succeeded.connect(
             lambda _r: self._on_action_success("Propuesta actualizada.")
-        )
-        self._worker.failed.connect(self._on_error)
-        self._worker.finished.connect(lambda: self._set_loading(False))
-        self._worker.start()
-
-    def _on_edit_guarantee_submit(self) -> None:
-        guarantee_type = self._edit_guarantee_type.text().strip()
-        guarantee_amount = self._edit_guarantee_amount.raw_value()
-        self._set_loading(True)
-        self._worker = AsyncWorker(
-            self._client.update_loan_guarantee,
-            self._session.access_token,
-            error_translator=_friendly_message,
-            loan_id=self._selected_loan_id,
-            guarantee_type=guarantee_type,
-            guarantee_amount=guarantee_amount,
-        )
-        self._worker.succeeded.connect(
-            lambda _r: self._on_action_success("Garantía actualizada.")
-        )
-        self._worker.failed.connect(self._on_error)
-        self._worker.finished.connect(lambda: self._set_loading(False))
-        self._worker.start()
-
-    def _on_edit_charges_submit(self) -> None:
-        self._set_loading(True)
-        self._worker = AsyncWorker(
-            self._client.update_loan_charges,
-            self._session.access_token,
-            error_translator=_friendly_message,
-            loan_id=self._selected_loan_id,
-            charge_interest_tax=self._edit_charge_interest_tax.raw_value(),
-            charge_admin_fee=self._edit_charge_admin_fee.raw_value(),
-            charge_cancellation_insurance=(
-                self._edit_charge_cancellation_insurance.raw_value()
-            ),
-            charge_contracted_insurance=(
-                self._edit_charge_contracted_insurance.raw_value()
-            ),
-        )
-        self._worker.succeeded.connect(
-            lambda _r: self._on_action_success("Cargos actualizados.")
         )
         self._worker.failed.connect(self._on_error)
         self._worker.finished.connect(lambda: self._set_loading(False))
@@ -970,10 +1007,51 @@ class LoansView(BaseView):
         title_row.addWidget(self._detail_payment_badge)
         summary.addLayout(title_row)
 
+        # Condiciones del préstamo: lo que no es plata (plazo, tasa, fechas,
+        # garantía). Va arriba y en una sola línea porque es contexto, no el
+        # número que se busca al abrir la pantalla.
         self._detail_info = QLabel("")
         self._detail_info.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         self._detail_info.setWordWrap(True)
         summary.addWidget(self._detail_info)
+
+        # Composición del costo, en cifras separadas y etiquetadas. Antes esto
+        # era un párrafo de texto corrido con seis montos pegados con "·": con
+        # los cargos capitalizados hay tres totales distintos (total del
+        # crédito, total a pagar, a desembolsar) que se parecen entre sí, y
+        # confundirlos es cobrarle mal al cliente.
+        self._detail_amount_labels: dict[str, QLabel] = {}
+        amounts = ResponsiveGrid(min_cell_width=180, spacing=8)
+        for field_name, label_text, destacada in _SUMMARY_ROWS:
+            cell = QWidget()
+            column = QVBoxLayout(cell)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(2)
+            caption = QLabel(label_text)
+            caption.setWordWrap(True)
+            caption.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 11px;")
+            column.addWidget(caption)
+            value = QLabel("-")
+            # El color va explícito en las dos ramas: un QLabel sin color
+            # declarado toma la paleta del sistema, no la del tema (la misma
+            # trampa que documenta flat_button_style()), y ahí el monto queda
+            # ilegible o directamente invisible según el tema del escritorio.
+            value.setStyleSheet(
+                f"font-size: 15px; font-weight: 700; color: {theme.PRIMARY};"
+                if destacada
+                else f"font-size: 14px; font-weight: 600; color: {theme.TEXT_PRIMARY};"
+            )
+            column.addWidget(value)
+            self._detail_amount_labels[field_name] = value
+            amounts.add_widget(cell)
+        summary.addWidget(amounts)
+
+        self._detail_charges_breakdown = QLabel("")
+        self._detail_charges_breakdown.setWordWrap(True)
+        self._detail_charges_breakdown.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 12px;"
+        )
+        summary.addWidget(self._detail_charges_breakdown)
         layout.addWidget(summary_frame)
 
         # -- Tarjeta de acciones: ciclo de vida + registro de pago --
@@ -1185,18 +1263,18 @@ class LoansView(BaseView):
         garantia = (
             f"{loan.guarantee_type} ({gs(loan.guarantee_amount)})"
             if loan.guarantee_type
-            else "-"
+            else "sin garantía"
         )
         self._detail_info.setText(
-            f"Capital: {gs(loan.principal_amount)}  ·  "
-            f"Tasa de interés: {rate_percent(loan.interest_rate)}  ·  "
-            f"Plazo: {loan.term_months} meses  ·  "
-            f"Primer vencimiento: {fecha(loan.first_due_date)}\n"
-            f"Total pagado: {gs(loan.total_paid)}  ·  "
-            f"Saldo restante: {gs(loan.remaining_balance)}\n"
-            f"Garantía: {garantia}  ·  Total cargos: {gs(loan.total_charges)}  ·  "
-            f"Total con cargos: {gs(loan.total_credit_with_charges)}"
+            f"Plazo: {loan.term_months} cuotas  ·  "
+            f"Tasa de interés: {rate_percent(loan.interest_rate)} anual "
+            f"({rate_percent_mensual(loan.interest_rate)} mensual)  ·  "
+            f"Primer vencimiento: {fecha(loan.first_due_date)}  ·  "
+            f"Garantía: {garantia}"
         )
+        for field_name, value_label in self._detail_amount_labels.items():
+            value_label.setText(gs(getattr(loan, field_name)))
+        self._detail_charges_breakdown.setText(_charges_breakdown_text(loan))
 
         puede_pagare_contrato = loan.status in ("APPROVED", "ACTIVE", "PAID")
         total_pagado = Decimal(loan.total_paid) if loan.total_paid else Decimal("0")

@@ -171,7 +171,15 @@ def test_create_loan_rejects_non_standard_rate_for_standard_role(stubs):
     assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
 
 
-def test_create_loan_allows_manager_to_set_custom_rate(stubs):
+def test_create_loan_rejects_a_custom_rate_even_from_a_manager(stubs):
+    """BR-LOAN-007 dejó de tener excepción por rol (2026-08-28).
+
+    Este test decía lo contrario hasta esa fecha: se reescribió, no se borró,
+    porque su nombre en el historial ("allows_manager_to_set_custom_rate") es
+    justamente lo que llevaría a "restaurar" la excepción creyendo que se
+    perdió. La tasa es una condición comercial de la entidad, no algo que se
+    negocie préstamo por préstamo.
+    """
     auth_stub, loan_stub = stubs
     _create_user("manager_r", "Passw0rd!", RoleEnum.MANAGER)
     client_id = _create_client_row(
@@ -179,16 +187,49 @@ def test_create_loan_allows_manager_to_set_custom_rate(stubs):
     )
     metadata = _login(auth_stub, "manager_r", "Passw0rd!")
 
-    response = loan_stub.CreateLoan(
+    with pytest.raises(grpc.RpcError) as exc_info:
+        loan_stub.CreateLoan(
+            loan_service_pb2.CreateLoanRequest(
+                client_id=str(client_id),
+                principal_amount="1000.00",
+                interest_rate="0.10",
+                term_months=6,
+            ),
+            metadata=metadata,
+        )
+    assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+
+
+def test_create_loan_stores_the_charges_sent_with_the_proposal(stubs):
+    """La propuesta viaja completa en una sola llamada: los cargos ya no
+    necesitan un UpdateLoanCharges posterior (y no deben, porque determinan la
+    cuota que valida BR-LOAN-002)."""
+    auth_stub, loan_stub = stubs
+    _create_user("analyst_c", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
+    client_id = _create_client_row(
+        national_id="7000020", email="charges_create@example.com"
+    )
+    metadata = _login(auth_stub, "analyst_c", "Passw0rd!")
+
+    creado = loan_stub.CreateLoan(
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount="1000.00",
-            interest_rate="0.10",
             term_months=6,
+            charge_admin_fee="200.00",
+            charge_contracted_insurance="300.00",
+            guarantee_type="SOLA FIRMA",
+            guarantee_amount="1500.00",
         ),
         metadata=metadata,
     )
-    assert response.loan_id
+    detalle = loan_stub.GetLoanById(
+        loan_service_pb2.GetLoanByIdRequest(loan_id=creado.loan_id), metadata=metadata
+    )
+    assert detalle.total_charges == "500.00"
+    assert detalle.total_credit_with_charges == "1500.00"
+    assert detalle.amount_to_disburse == "1000.00"
+    assert detalle.guarantee_type == "SOLA FIRMA"
 
 
 def test_update_loan_proposal_allows_credit_analyst(stubs):

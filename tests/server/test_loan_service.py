@@ -1,4 +1,5 @@
 import threading
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -49,16 +50,45 @@ def servicer():
     return LoanServicer()
 
 
-def _create_loan(servicer, client_id, principal="1000.00", rate="0.12", term=6):
-    return servicer.CreateLoan(
+# BR-LOAN-007: la tasa dejó de ser un parámetro del préstamo -- CreateLoan
+# solo acepta la estándar (o el campo vacío). Los tests que necesitan otra
+# tasa construyen la fila Loan directamente, como ya hacen varios.
+_TASA_ESTANDAR = str(config.LOAN_FIXED_INTEREST_RATE)
+
+
+def _create_loan(
+    servicer,
+    client_id,
+    principal="1000.00",
+    rate=_TASA_ESTANDAR,
+    term=6,
+    **cargos,
+):
+    """Crea un préstamo por la RPC y, si el test pide una tasa distinta a la
+    estándar, se la escribe después directamente en la fila.
+
+    CreateLoan ya no acepta otra tasa (BR-LOAN-007), pero varios tests de
+    aritmética usan `rate="0.00"` justamente para que los montos den redondos y
+    la aserción hable del cobro y no del redondeo del interés. Forzarlos a la
+    tasa real cambiaría lo que esas pruebas verifican; escribir la tasa a mano
+    conserva su intención sin dejar un agujero en la regla.
+    """
+    creado = servicer.CreateLoan(
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount=principal,
-            interest_rate=rate,
+            interest_rate=_TASA_ESTANDAR,
             term_months=term,
+            **cargos,
         ),
         FakeContext(),
     )
+    if rate != _TASA_ESTANDAR:
+        with SessionLocal() as session:
+            prestamo = session.get(Loan, uuid.UUID(creado.loan_id))
+            prestamo.interest_rate = Decimal(rate)
+            session.commit()
+    return creado
 
 
 def test_create_loan_success_is_pending(servicer):
@@ -80,7 +110,7 @@ def test_create_loan_installment_exceeds_income_ratio_is_failed_precondition(ser
     client_id = _create_client(declared_monthly_income=Decimal("10.00"))
 
     with pytest.raises(AbortCalled) as exc_info:
-        _create_loan(servicer, client_id, principal="1000.00", rate="0.24", term=12)
+        _create_loan(servicer, client_id, principal="1000.00", term=12)
     assert exc_info.value.code == grpc.StatusCode.FAILED_PRECONDITION
 
 
@@ -144,7 +174,7 @@ def test_update_loan_proposal_installment_exceeds_income_ratio_is_failed_precond
     servicer,
 ):
     client_id = _create_client(declared_monthly_income=Decimal("10.00"))
-    loan = _create_loan(servicer, client_id, principal="1.00", rate="0.24", term=12)
+    loan = _create_loan(servicer, client_id, principal="1.00", term=12)
 
     with pytest.raises(AbortCalled) as exc_info:
         servicer.UpdateLoanProposal(
@@ -357,10 +387,15 @@ def test_update_loan_charges_invalid_amount_is_invalid_argument(servicer):
     assert exc_info.value.code == grpc.StatusCode.INVALID_ARGUMENT
 
 
-def test_charges_do_not_affect_record_payment_payoff(servicer):
-    """BR-LOAN-006: los cargos son puramente informativos -- RecordPayment sigue
-    basándose únicamente en capital+interés para decidir cuándo un préstamo
-    pasa a PAID, sin importar los cargos cargados."""
+def test_charges_are_capitalized_into_what_the_borrower_must_repay(servicer):
+    """BR-LOAN-006: los cargos se financian, así que el préstamo NO queda
+    saldado al cubrir solo el capital.
+
+    Es la inversión exacta del invariante que este archivo protegía hasta
+    2026-08-28 (los cargos eran informativos y no movían el payoff). Se deja
+    escrito en positivo y con la cifra completa para que, si alguien vuelve a
+    dejar los cargos fuera del cronograma, falle acá y no en la caja.
+    """
     client_id = _create_client()
     loan = _create_loan(servicer, client_id, principal="1200.00", rate="0.00", term=12)
     servicer.UpdateLoanCharges(
@@ -380,15 +415,112 @@ def test_charges_do_not_affect_record_payment_payoff(servicer):
         loan_service_pb2.DisburseLoanRequest(loan_id=loan.loan_id), FakeContext()
     )
 
-    response = servicer.RecordPayment(
+    detalle = servicer.GetLoanById(
+        loan_service_pb2.GetLoanByIdRequest(loan_id=loan.loan_id), FakeContext()
+    )
+    assert detalle.total_charges == "2000.00"
+    assert detalle.total_credit_with_charges == "3200.00"
+    # A tasa 0 el total a pagar es el total del crédito, y lo que recibe el
+    # cliente sigue siendo solo el capital.
+    assert detalle.total_to_pay == "3200.00"
+    assert detalle.amount_to_disburse == "1200.00"
+
+    parcial = servicer.RecordPayment(
         loan_service_pb2.RecordPaymentRequest(
-            loan_id=loan.loan_id, amount="1200.00", transfer_reference="TRX-CHARGES"
+            loan_id=loan.loan_id, amount="1200.00", transfer_reference="TRX-CHARGES-1"
         ),
         FakeContext(),
     )
-    assert response.success
-    assert response.status == "PAID"
-    assert response.remaining_balance == "0.00"
+    assert parcial.status == "ACTIVE"
+    assert parcial.remaining_balance == "2000.00"
+
+    total = servicer.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=loan.loan_id, amount="2000.00", transfer_reference="TRX-CHARGES-2"
+        ),
+        FakeContext(),
+    )
+    assert total.status == "PAID"
+    assert total.remaining_balance == "0.00"
+
+
+def test_charges_can_be_loaded_with_the_loan_in_one_call(servicer):
+    """La propuesta entra completa en CreateLoan: sin esto el tope del 40% se
+    validaba sobre una cuota que todavía no incluía los cargos."""
+    client_id = _create_client()
+    loan = _create_loan(
+        servicer,
+        client_id,
+        principal="1200.00",
+        rate="0.00",
+        term=12,
+        charge_admin_fee="600.00",
+        charge_contracted_insurance="200.00",
+        guarantee_type="SOLA FIRMA",
+        guarantee_amount="900.00",
+    )
+
+    detalle = servicer.GetLoanById(
+        loan_service_pb2.GetLoanByIdRequest(loan_id=loan.loan_id), FakeContext()
+    )
+    assert detalle.total_charges == "800.00"
+    assert detalle.total_credit_with_charges == "2000.00"
+    assert detalle.guarantee_type == "SOLA FIRMA"
+    assert detalle.installment_amount == "166.67"
+
+
+def test_create_loan_rejects_a_rate_other_than_the_fixed_one(servicer):
+    """BR-LOAN-007: la tasa es fija para todos. Se rechaza en vez de
+    descartarse en silencio -- crear al 45% algo que se pidió al 10% es peor
+    que fallar."""
+    client_id = _create_client()
+
+    with pytest.raises(AbortCalled) as exc_info:
+        servicer.CreateLoan(
+            loan_service_pb2.CreateLoanRequest(
+                client_id=str(client_id),
+                principal_amount="1000.00",
+                interest_rate="0.10",
+                term_months=6,
+            ),
+            FakeContext(),
+        )
+    assert exc_info.value.code == grpc.StatusCode.FAILED_PRECONDITION
+
+
+def test_create_loan_without_a_rate_uses_the_fixed_one(servicer):
+    """El cliente ya no manda tasa (se le sacó el campo del formulario): el
+    campo vacío es la forma normal de pedir la tasa vigente."""
+    client_id = _create_client(declared_monthly_income=Decimal("100000.00"))
+
+    creado = servicer.CreateLoan(
+        loan_service_pb2.CreateLoanRequest(
+            client_id=str(client_id),
+            principal_amount="1000.00",
+            term_months=6,
+        ),
+        FakeContext(),
+    )
+    detalle = servicer.GetLoanById(
+        loan_service_pb2.GetLoanByIdRequest(loan_id=creado.loan_id), FakeContext()
+    )
+    assert Decimal(detalle.interest_rate) == config.LOAN_FIXED_INTEREST_RATE
+
+
+def test_update_loan_charges_rejects_charges_that_break_the_income_cap(servicer):
+    """El tope del 40% pasó a depender de los cargos, así que UpdateLoanCharges
+    es un camino nuevo por el que se lo podía violar."""
+    client_id = _create_client(declared_monthly_income=Decimal("500.00"))
+    loan = _create_loan(servicer, client_id, principal="1200.00", rate="0.00", term=12)
+
+    with pytest.raises(AbortCalled) as exc_info:
+        servicer.UpdateLoanCharges(
+            loan_service_pb2.UpdateLoanChargesRequest(
+                loan_id=loan.loan_id, charge_admin_fee="1000000.00"
+            ),
+            FakeContext(),
+        )
+    assert exc_info.value.code == grpc.StatusCode.FAILED_PRECONDITION
 
 
 def test_create_loan_blocked_at_three_active_loans(servicer):

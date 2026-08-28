@@ -37,9 +37,13 @@ def tier_label(role: str | None) -> str:
     return _TIER_LABELS.get(role, "Desconocido")
 
 
-# BR-LOAN-002's 40%-of-income cap is still enforced server-side regardless of
-# who sets the rate -- this only controls whether the rate *field* is
-# editable in the "Nuevo préstamo" form.
+# BR-LOAN-007: la tasa es fija para TODOS los roles desde 2026-08-28. El
+# formulario "Nuevo préstamo" ya no tiene campo de tasa -- la muestra como
+# dato, no como entrada -- y el servidor rechaza cualquier valor distinto a
+# este, venga del rol que venga. Cambiarla es una decisión comercial de la
+# entidad: hay que mover también cas_server/config.py's
+# LOAN_FIXED_INTEREST_RATE y revisar la cláusula de interés compensatorio de
+# cas_client/documents.py.
 FIXED_INTEREST_RATE = "0.45"  # decimal fraction, sistema alemán -- ver loans_view.py
 # 45% nominal anual = 3,75% mensual sobre el monto original del préstamo (la
 # tasa compensatoria que declaran el Pagaré y el Contrato; BR-LOAN-013 -- el
@@ -51,10 +55,8 @@ FIXED_INTEREST_RATE = "0.45"  # decimal fraction, sistema alemán -- ver loans_v
 
 
 def fixed_interest_rate_percent() -> str:
-    """Percent-entry equivalent of FIXED_INTEREST_RATE for the "Nuevo
-    préstamo" form -- the field now takes the rate as a plain percentage
-    (the user types 45, not 0.45), so the Estándar-tier prefill needs to
-    match that convention: "0.45" -> "45"."""
+    """FIXED_INTEREST_RATE como porcentaje para mostrar en pantalla:
+    "0.45" -> "45"."""
     percent = Decimal(FIXED_INTEREST_RATE) * 100
     text = f"{percent:f}"
     if "." in text:
@@ -63,15 +65,15 @@ def fixed_interest_rate_percent() -> str:
 
 
 def can_edit_interest_rate(role: str | None) -> bool:
-    """Only Agente de Créditos (MANAGER) and Administrador (ADMIN) can set a
-    custom rate; Estándar (CREDIT_ANALYST/CASHIER) gets FIXED_INTEREST_RATE.
+    """Nadie -- la tasa es fija para todos los roles (BR-LOAN-007).
 
-    This mirrors a real server-side rule now (BR-LOAN-007): loan_service.py's
-    CreateLoan rejects a non-standard interest_rate from any role below
-    MANAGER, so hiding/locking the field here is UX, but the boundary itself
-    is enforced server-side too.
+    Se conserva la función en vez de borrarla porque el rol *sí* sigue siendo
+    el eje del resto de los permisos de esta pantalla, y dejar el nombre con
+    una respuesta explícita ("no, tampoco el Administrador") es lo que evita
+    que alguien vuelva a agregar el campo de tasa suponiendo que se había
+    olvidado. Hasta 2026-08-28 devolvía True para MANAGER/ADMIN.
     """
-    return role_at_least(role, "MANAGER")
+    return False
 
 
 def can_manage_users(role: str | None) -> bool:

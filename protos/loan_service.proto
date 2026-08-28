@@ -64,9 +64,27 @@ service LoanService {
 
 message CreateLoanRequest {
     string client_id = 1;
+    // Capital solicitado: lo que el cliente recibe en mano (A desembolsar).
+    // NO es lo que amortiza el cronograma -- ver total_credit_with_charges.
     string principal_amount = 2; // Decimal como string, ej. "15000.00"
-    string interest_rate = 3;    // Tasa nominal anual como string, ej. "0.24" = 24%/año
+    // BR-LOAN-007: la tasa es fija para todos los roles. Se acepta vacío
+    // (el servidor aplica LOAN_FIXED_INTEREST_RATE) o exactamente esa misma
+    // tasa; cualquier otro valor se rechaza con FAILED_PRECONDITION.
+    string interest_rate = 3;    // Tasa nominal anual como string, ej. "0.45" = 45%/año
     int32 term_months = 4;
+    // Propuesta completa en una sola llamada (BR-LOAN-004/005/006): todo lo
+    // que sigue es opcional. Vacío = el servidor calcula first_due_date
+    // (created_at + LOAN_DEFAULT_FIRST_DUE_DAYS) y deja la garantía y los
+    // cargos sin cargar.
+    string first_due_date = 5; // Formato YYYY-MM-DD. Vacío = automático.
+    string guarantee_type = 6; // Ej. "SOLA FIRMA". Vacío junto con el monto = sin garantía.
+    string guarantee_amount = 7;
+    // Cargos capitalizados (BR-LOAN-006): se suman al capital para formar el
+    // monto que el cronograma amortiza.
+    string charge_interest_tax = 8;
+    string charge_admin_fee = 9;
+    string charge_cancellation_insurance = 10;
+    string charge_contracted_insurance = 11;
 }
 
 message CreateLoanResponse {
@@ -75,11 +93,24 @@ message CreateLoanResponse {
     google.protobuf.Timestamp created_at = 3;
 }
 
+// Propuesta completa: esta RPC reemplaza TODO lo editable de un préstamo
+// PENDING de una sola vez (términos + garantía + cargos), no solo los
+// términos. Los campos de garantía y cargos son autoritativos: enviarlos
+// vacíos borra lo que hubiera cargado. Es deliberado -- desde que los cargos
+// se capitalizan (BR-LOAN-006) cambian la cuota, así que guardarlos por
+// separado de los términos dejaba al operador aprobando una cuota que no era
+// la que había visto.
 message UpdateLoanProposalRequest {
     string loan_id = 1;
     string principal_amount = 2; // Decimal como string, ej. "15000.00"
     int32 term_months = 3;
     string first_due_date = 4; // Formato YYYY-MM-DD
+    string guarantee_type = 5;
+    string guarantee_amount = 6;
+    string charge_interest_tax = 7;
+    string charge_admin_fee = 8;
+    string charge_cancellation_insurance = 9;
+    string charge_contracted_insurance = 10;
 }
 
 message UpdateLoanProposalResponse {
@@ -134,8 +165,12 @@ message GetLoanByIdResponse {
     string charge_admin_fee = 15;
     string charge_cancellation_insurance = 16;
     string charge_contracted_insurance = 17;
-    string total_charges = 18; // Suma de los 4 cargos, informativo
-    string total_credit_with_charges = 19; // total_paid + remaining_balance + total_charges
+    string total_charges = 18; // Suma de los 4 cargos (BR-LOAN-006)
+    // "Total del Crédito": principal_amount + total_charges. Es el monto que
+    // el cronograma amortiza y sobre el que se devenga el interés, NO lo que
+    // el cliente recibe (eso es amount_to_disburse). Ojo: hasta 2026-08-28
+    // este campo valía "total a pagar + cargos", que era otra cosa.
+    string total_credit_with_charges = 19;
     // Estado de cuotas -- BR-LOAN-009. Solo tiene sentido para préstamos
     // ACTIVE (compara lo que debería estar pagado a hoy según los
     // vencimientos del cronograma contra lo realmente pagado); "" para el
@@ -156,6 +191,13 @@ message GetLoanByIdResponse {
     // created_by_username.
     string created_by_full_name = 24;
     string created_by_national_id = 25;
+    // Cifras derivadas del cronograma, calculadas por el servidor para que la
+    // pantalla y los documentos no las vuelvan a deducir cada uno por su
+    // cuenta (BR-LOAN-006).
+    string amount_to_disburse = 26; // Lo que recibe el cliente = principal_amount
+    string total_interest = 27;     // Interés total del cronograma
+    string total_to_pay = 28;       // total_credit_with_charges + total_interest
+    string installment_amount = 29; // Cuota mensual (la primera, representativa)
 }
 
 message ListClientLoansRequest {

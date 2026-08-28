@@ -178,49 +178,82 @@ def _footer(text: str) -> str:
     return f'<p style="margin-top:24px; font-size:12px; color:{theme.TEXT_MUTED};">{text}</p>'
 
 
-def _cargos_y_garantia_block(loan) -> str:
-    """BR-LOAN-005/006: desglose informativo de garant&iacute;a y cargos/seguros,
-    si el pr&eacute;stamo tiene alguno cargado. No afecta el cronograma."""
-    filas_cargos = [
-        (nombre, monto)
-        for nombre, monto in (
-            ("Impuesto al inter&eacute;s", loan.charge_interest_tax),
-            ("Gastos administrativos", loan.charge_admin_fee),
-            (
-                "Seguro de cancelaci&oacute;n de deuda",
-                loan.charge_cancellation_insurance,
-            ),
-            ("Seguros contratados", loan.charge_contracted_insurance),
-        )
-        if monto
-    ]
+# BR-LOAN-006: los 4 cargos con su nombre para los documentos. Espeja
+# _CHARGE_FIELDS de loans_view.py -- se mantiene a mano igual que
+# _ESTADOS_LABEL, porque este m&oacute;dulo no importa vistas (documents_docx.py
+# reutiliza esta constante para que el PDF y el DOCX no puedan diferir).
+_CHARGE_LABELS = (
+    ("charge_interest_tax", "Impuesto s/ intereses"),
+    ("charge_admin_fee", "Gastos administrativos por desembolso"),
+    ("charge_cancellation_insurance", "Seguro de cancelaci&oacute;n de deuda"),
+    ("charge_contracted_insurance", "Seguros contratados"),
+)
 
-    cargos_seccion = ""
-    if filas_cargos:
-        filas_html = "".join(
-            f"<tr><td>{nombre}</td><td>{gs(monto)}</td></tr>"
-            for nombre, monto in filas_cargos
-        )
-        cargos_seccion = f"""
-        <h3 style="color:{theme.PRIMARY};">Cargos y seguros</h3>
+
+def filas_composicion_credito(loan) -> list[tuple[str, str, bool]]:
+    """(concepto, monto, destacar) de la composici&oacute;n del cr&eacute;dito.
+
+    Una sola definici&oacute;n para el PDF y el DOCX, por el mismo motivo que
+    `_filas_reporte`: son cifras que el cliente compara entre el papel que
+    firma y el que se lleva.
+
+    Es tambi&eacute;n donde queda dicho, en el documento y no solo en la
+    pantalla, que el cliente recibe el capital pero amortiza capital + cargos
+    (BR-LOAN-006): sin estas filas el cronograma adjunto arranca de un monto
+    mayor al del pr&eacute;stamo sin ninguna explicaci&oacute;n visible.
+    """
+    filas = [("Capital solicitado", gs(loan.principal_amount), False)]
+    filas += [
+        (nombre, gs(getattr(loan, campo)), False)
+        for campo, nombre in _CHARGE_LABELS
+        if getattr(loan, campo)
+    ]
+    filas += [
+        ("Total de cargos financiados", gs(loan.total_charges), False),
+        (
+            "Total del cr&eacute;dito (monto que amortizan las cuotas)",
+            gs(loan.total_credit_with_charges),
+            True,
+        ),
+        ("Total de inter&eacute;s", gs(loan.total_interest), False),
+        ("Total a pagar", gs(loan.total_to_pay), True),
+        ("Cuota mensual", gs(loan.installment_amount), True),
+        ("Importe a desembolsar al cliente", gs(loan.amount_to_disburse), False),
+    ]
+    return filas
+
+
+def _cargos_y_garantia_block(loan) -> str:
+    """BR-LOAN-005/006: composici&oacute;n del cr&eacute;dito (capital + cargos
+    capitalizados) y garant&iacute;a de respaldo."""
+    filas_html = "".join(
+        f"<tr><td>{'<b>' if destacar else ''}{nombre}{'</b>' if destacar else ''}</td>"
+        f"<td>{'<b>' if destacar else ''}{monto}{'</b>' if destacar else ''}</td></tr>"
+        for nombre, monto, destacar in filas_composicion_credito(loan)
+    )
+    composicion = f"""
+        <h3 style="color:{theme.PRIMARY};">Composici&oacute;n del cr&eacute;dito</h3>
         <table border="1" cellspacing="0" cellpadding="6" width="100%">
           <tr style="background-color:{theme.APP_BACKGROUND};">
             <th>Concepto</th><th>Monto (Gs)</th>
           </tr>
           {filas_html}
-          <tr><td><b>Total cargos</b></td><td><b>{gs(loan.total_charges)}</b></td></tr>
         </table>
+        <p style="font-size:12px; color:{theme.TEXT_MUTED};">Los cargos y
+        seguros se financian junto con el capital: integran el total del
+        cr&eacute;dito, que es el monto que amortizan las cuotas y sobre el
+        que se calcula el inter&eacute;s. El importe entregado al cliente es
+        el capital solicitado.</p>
         """
 
     garantia_seccion = ""
     if loan.guarantee_type:
         garantia_seccion = f"""
         <p><b>Garant&iacute;a:</b> {loan.guarantee_type} &mdash; Monto aplicado:
-        {gs(loan.guarantee_amount)}<br/>
-        <b>Total del cr&eacute;dito (incl. cargos):</b> {gs(loan.total_credit_with_charges)}</p>
+        {gs(loan.guarantee_amount)}</p>
         """
 
-    return cargos_seccion + garantia_seccion
+    return composicion + garantia_seccion
 
 
 def liquidacion_html(loan, client, schedule) -> str:
@@ -240,7 +273,9 @@ def liquidacion_html(loan, client, schedule) -> str:
     {_client_block(client)}
     <p><b>Pr&eacute;stamo:</b> {loan.id}<br/>
     <b>Estado:</b> {estado}<br/>
-    <b>Capital:</b> {gs(loan.principal_amount)}<br/>
+    <b>Capital solicitado:</b> {gs(loan.principal_amount)}<br/>
+    <b>Total del cr&eacute;dito (capital + cargos):</b>
+    {gs(loan.total_credit_with_charges)}<br/>
     <b>Tasa de inter&eacute;s:</b> {rate_percent(loan.interest_rate)} anual
     ({rate_percent_mensual(loan.interest_rate)} mensual sobre el monto
     original)<br/>
@@ -286,7 +321,9 @@ def pagare_html(loan, client) -> str:
     {_client_block(client)}
     <p>{_garantia_linea(loan)}</p>
     <p>DECLARO(AMOS) ADEUDAR a {_COMPANY_NAME} la suma de
-    <b>Guaran&iacute;es {gs(loan.principal_amount)}</b>, que PAGAR&Eacute;(MOS)
+    <b>Guaran&iacute;es {gs(loan.total_credit_with_charges)}</b>, integrada por
+    un capital de {gs(loan.principal_amount)} y {gs(loan.total_charges)} en
+    concepto de cargos y seguros financiados, que PAGAR&Eacute;(MOS)
     solidariamente, a su orden, libre de gastos y sin protesto, en
     <b>{loan.term_months}</b> cuotas iguales, mensuales y consecutivas, con
     vencimiento la primera de ellas el d&iacute;a
@@ -714,17 +751,21 @@ def contrato_html(loan, client) -> str:
     <p>{_garantia_linea(loan)}</p>
     <h3 style="color:{theme.PRIMARY};">Cl&aacute;usulas</h3>
     <p><b>Primera (Objeto):</b> {_COMPANY_NAME} otorga al(los) Prestatario(s)
-    un pr&eacute;stamo de dinero por la suma de
+    un pr&eacute;stamo de dinero por un capital de
     <b>Guaran&iacute;es {gs(loan.principal_amount)}</b>, que se desembolsa a
-    la firma del presente instrumento, conjuntamente con un Pagar&eacute; a
-    la orden por dicho monto, destinado a servir como t&iacute;tulo de
-    cr&eacute;dito.</p>
+    la firma del presente instrumento. Al capital se adicionan
+    <b>{gs(loan.total_charges)}</b> en concepto de cargos, gastos
+    administrativos y seguros, que se financian junto con &eacute;l, de modo
+    que el monto total del cr&eacute;dito asciende a
+    <b>Guaran&iacute;es {gs(loan.total_credit_with_charges)}</b>, importe por
+    el cual se suscribe un Pagar&eacute; a la orden destinado a servir como
+    t&iacute;tulo de cr&eacute;dito.</p>
     <p><b>Segunda (Reembolso):</b> El(Los) Prestatario(s) se compromete(n) a
     reembolsar el pr&eacute;stamo otorgado en <b>{loan.term_months}</b>
     cuotas <b>iguales</b>, mensuales y consecutivas: cada cuota amortiza una
-    porci&oacute;n constante del capital e incluye un inter&eacute;s fijo
-    calculado sobre el monto original del pr&eacute;stamo, de modo que todas
-    las cuotas son del mismo importe. La primera de ellas vence el d&iacute;a
+    porci&oacute;n constante del monto total del cr&eacute;dito e incluye un
+    inter&eacute;s fijo calculado sobre ese mismo monto original, de modo que
+    todas las cuotas son del mismo importe. La primera de ellas vence el d&iacute;a
     <b>{fecha(loan.first_due_date)}</b>, mediante transferencia
     bancaria, d&eacute;bito directo o descuento en cuenta, seg&uacute;n lo
     acordado.</p>
