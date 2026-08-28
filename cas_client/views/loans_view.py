@@ -272,6 +272,7 @@ class LoansView(BaseView):
         self._session = session
         self._worker: AsyncWorker | None = None
         self._current_client_id: str | None = None
+        self._current_client_name: str | None = None
         self._selected_loan_id: str | None = None
         self._detail_loan = None
         self._pending_document: tuple[str, str] | None = None
@@ -610,6 +611,7 @@ class LoansView(BaseView):
             self.view_client_requested.emit(client_id)
 
     def _show_loans_for(self, client_id: str, display_name: str) -> None:
+        self._current_client_name = display_name
         self._search_title.setText(f"Préstamos de {display_name}")
         self._client_search_section.hide()
         self._loans_section.show()
@@ -863,6 +865,16 @@ class LoansView(BaseView):
         back_button.clicked.connect(lambda: self._stack.setCurrentIndex(_PAGE_SEARCH))
         layout.addWidget(back_button)
 
+        # Referencia visible del cliente al que quedará asociado este préstamo
+        # -- antes el formulario no mostraba nada y el vínculo con el cliente
+        # (self._current_client_id, obligatorio en CreateLoan) era invisible
+        # para quien lo estaba completando.
+        self._create_client_label = QLabel("")
+        self._create_client_label.setStyleSheet(
+            f"font-size: 14px; font-weight: 600; color: {theme.PRIMARY};"
+        )
+        layout.addWidget(self._create_client_label)
+
         layout.addWidget(
             self._build_proposal_form(
                 "_new", "Solicitar préstamo", self._on_create_submit
@@ -877,6 +889,9 @@ class LoansView(BaseView):
                 "Seleccione primero un cliente para poder crear un préstamo."
             )
             return
+        self._create_client_label.setText(
+            f"Cliente: {self._current_client_name or self._current_client_id}"
+        )
         self._clear_proposal_form("_new")
         self._stack.setCurrentIndex(_PAGE_CREATE)
 
