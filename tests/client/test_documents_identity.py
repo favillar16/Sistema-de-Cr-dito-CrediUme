@@ -182,6 +182,86 @@ def test_acceleration_is_a_faculty_of_the_lender_not_automatic():
     assert "automáticamente exigible" not in texto
 
 
+# ---- Ficha de cliente (análisis para la decisión de aprobación) ----------
+
+
+class _FakeClientCompleto:
+    """Cliente con todos los datos que ficha_cliente_html() necesita --
+    identidad, situación financiera y las tres referencias de BR-CLI-005."""
+
+    first_name = "Fabrizio"
+    last_name = "Villar"
+    national_id = "5746680"
+    address = "Barrio San Miguel"
+    phone_number = "0984992634"
+    email = "fabrizio@example.com"
+    date_of_birth = "1990-05-20"
+    is_active = True
+    declared_monthly_income = "5000000.00"
+    source_of_funds = "Salario"
+    personal_reference_1_name = "Juan Pérez"
+    personal_reference_1_relationship = "Hermano"
+    personal_reference_1_phone = "0981111111"
+    personal_reference_2_name = "María López"
+    personal_reference_2_relationship = "Amiga"
+    personal_reference_2_phone = "0982222222"
+    employment_reference_employer = "ACME S.A."
+    employment_reference_position = "Analista"
+    employment_reference_phone = "0213334444"
+    employment_reference_seniority = "3 años"
+
+    class created_at:
+        @staticmethod
+        def ToDatetime():
+            from datetime import datetime
+
+            return datetime(2024, 1, 10, 9, 0)
+
+
+def test_ficha_cliente_has_no_draft_banner():
+    """No tiene texto legal, solo datos ya registrados -- mismo criterio que
+    el Cronograma y los reportes del dashboard."""
+    html = documents.ficha_cliente_html(_FakeLoanCompleto, _FakeClientCompleto)
+    assert "BORRADOR" not in html
+
+
+def test_ficha_cliente_shows_all_client_data_and_references():
+    html = documents.ficha_cliente_html(_FakeLoanCompleto, _FakeClientCompleto)
+    texto = _texto_plano(html)
+    assert "Fabrizio Villar" in texto
+    assert "5746680" in texto
+    assert "20/05/1990" in texto  # fecha de nacimiento en DD/MM/AAAA, no ISO
+    assert "5.000.000 Gs" in texto  # ingreso declarado
+    assert "Salario" in texto  # origen de fondos
+    assert "Juan Pérez" in texto
+    assert "María López" in texto
+    assert "ACME S.A." in texto
+
+
+def test_ficha_cliente_shows_the_requested_loan_terms():
+    html = documents.ficha_cliente_html(_FakeLoanCompleto, _FakeClientCompleto)
+    texto = _texto_plano(html)
+    assert "18.000.000 Gs" in texto  # capital solicitado
+    assert "1.768.056 Gs" in texto  # cuota mensual (installment_amount)
+    assert "31.825.000 Gs" in texto  # total a pagar
+
+
+def test_ficha_cliente_flags_a_ratio_over_br_loan_002s_cap():
+    """La cuota (1.768.056) sobre un ingreso más bajo supera el 40% de
+    BR-LOAN-002 -- la ficha tiene que marcarlo, no solo mostrar el número."""
+
+    class _ClienteIngresoBajo(_FakeClientCompleto):
+        declared_monthly_income = "3000000.00"
+
+    html = documents.ficha_cliente_html(_FakeLoanCompleto, _ClienteIngresoBajo)
+    assert "supera el 40% admitido por BR-LOAN-002" in html
+
+
+def test_ficha_cliente_does_not_flag_a_ratio_within_the_cap():
+    html = documents.ficha_cliente_html(_FakeLoanCompleto, _FakeClientCompleto)
+    assert "supera el 40%" not in html
+
+
 def test_no_placeholder_survives_in_the_signed_instruments():
     """Un documento que va a la firma no puede salir con "[A DEFINIR]"."""
     for html in (

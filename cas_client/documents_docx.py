@@ -266,6 +266,117 @@ def comprobante_pago_docx(loan, client, payment) -> Document:
     return document
 
 
+def ficha_cliente_docx(loan, client) -> Document:
+    """DOCX de documents.py's ficha_cliente_html() -- ver ese docstring para
+    el razonamiento (ficha de análisis para la decisión de aprobación,
+    reúne datos del cliente + referencias + préstamo solicitado en un solo
+    papel). Sin banner de borrador ni cláusulas legales, mismo criterio que
+    cronograma_docx."""
+    document = Document()
+    _add_header(document, "Ficha de Cliente — Análisis de Crédito")
+
+    _add_section_heading(document, "Datos personales")
+    _add_labeled_lines(
+        document,
+        [
+            ("Nombre completo", f"{client.first_name} {client.last_name}"),
+            ("Documento (C.I.)", client.national_id),
+            ("Fecha de nacimiento", fecha(client.date_of_birth)),
+            ("Estado del cliente", "Activo" if client.is_active else "Inactivo"),
+            ("Cliente desde", fecha_hora(client.created_at.ToDatetime())),
+            ("Email", client.email),
+            ("Teléfono", client.phone_number),
+            ("Dirección", client.address),
+        ],
+    )
+
+    _add_section_heading(document, "Situación financiera declarada")
+    _add_labeled_lines(
+        document,
+        [
+            (
+                "Ingreso mensual declarado",
+                gs(client.declared_monthly_income) or "No registrado",
+            ),
+            ("Origen de fondos", client.source_of_funds or "No registrado"),
+        ],
+    )
+
+    _add_section_heading(document, "Referencias")
+    table = document.add_table(rows=4, cols=4)
+    table.style = "Table Grid"
+    for col, text in enumerate(["Tipo", "Nombre", "Relación / Cargo", "Teléfono"]):
+        table.rows[0].cells[col].text = text
+    filas = [
+        (
+            "Referencia personal 1",
+            client.personal_reference_1_name,
+            client.personal_reference_1_relationship,
+            client.personal_reference_1_phone,
+        ),
+        (
+            "Referencia personal 2",
+            client.personal_reference_2_name,
+            client.personal_reference_2_relationship,
+            client.personal_reference_2_phone,
+        ),
+        (
+            "Referencia laboral",
+            client.employment_reference_employer,
+            f"{client.employment_reference_position} "
+            f"({client.employment_reference_seniority})",
+            client.employment_reference_phone,
+        ),
+    ]
+    for row_index, fila in enumerate(filas, start=1):
+        cells = table.rows[row_index].cells
+        for col, valor in enumerate(fila):
+            cells[col].text = valor
+
+    _add_section_heading(document, "Préstamo solicitado")
+    garantia = (
+        f"{loan.guarantee_type} — Monto: {gs(loan.guarantee_amount)}"
+        if loan.guarantee_type
+        else "Sin garantía registrada"
+    )
+    _add_labeled_lines(
+        document,
+        [
+            ("Número", loan.id),
+            ("Estado", documents._ESTADOS_LABEL.get(loan.status, loan.status)),
+            ("Capital solicitado", gs(loan.principal_amount)),
+            ("Plazo", f"{loan.term_months} meses"),
+            (
+                "Tasa de interés",
+                f"{rate_percent(loan.interest_rate)} anual "
+                f"({rate_percent_mensual(loan.interest_rate)} mensual)",
+            ),
+            ("Cuota mensual", gs(loan.installment_amount)),
+            (
+                "Total del crédito (capital + cargos)",
+                gs(loan.total_credit_with_charges),
+            ),
+            ("Total a pagar", gs(loan.total_to_pay)),
+            ("Garantía", garantia),
+        ],
+    )
+
+    ratio_texto, ratio_excede = documents._relacion_cuota_ingreso(loan, client)
+    ratio_paragraph = document.add_paragraph()
+    ratio_run = ratio_paragraph.add_run(f"Relación cuota/ingreso: {ratio_texto}")
+    ratio_run.bold = True
+    if ratio_excede:
+        ratio_run.font.color.rgb = _rgb(theme.ERROR)
+
+    _add_footer_note(
+        document,
+        "Ficha generada por el sistema de CREDIMED UME. Uso interno para el "
+        "análisis y la decisión de aprobación del crédito -- no constituye un "
+        "documento legal ni se entrega al cliente.",
+    )
+    return document
+
+
 def reporte_periodo_docx(report, generated_by: str = "") -> Document:
     """BR-DASH-002, contraparte .docx de documents.reporte_periodo_html().
     Sin banner de borrador (no tiene texto legal, solo cifras calculadas),

@@ -30,6 +30,8 @@ below -- they are the single place to change if the entity revises its terms,
 and tests/client/test_documents_identity.py guards them against a silent
 revert, the same way it guards the legal identity."""
 
+from decimal import Decimal, InvalidOperation
+
 from cas_client import assets, theme
 from cas_client.formatting import (
     fecha,
@@ -531,6 +533,116 @@ def comprobante_pago_html(loan, client, payment) -> str:
     {_footer("Comprobante emitido por el sistema de CREDIMED UME. El saldo "
              "restante puede variar por cargos o ajustes posteriores a la "
              "fecha de emisi&oacute;n de este comprobante.")}
+    </body></html>
+    """
+
+
+def _relacion_cuota_ingreso(loan, client) -> tuple[str, bool]:
+    """(texto, excede_tope) -- la cuota mensual como % del ingreso mensual
+    declarado del cliente, para que quien decide una aprobación vea de un
+    vistazo qué tan cerca (o cuánto por encima) está esta solicitud del tope
+    del 40% de BR-LOAN-002, sin tener que calcularlo a mano con una
+    calculadora aparte. Puramente informativo -- la validación real de
+    BR-LOAN-002 ya la hace CreateLoan/UpdateLoanProposal en el servidor;
+    esto no vuelve a aplicarla, solo la muestra."""
+    if not client.declared_monthly_income:
+        return "Sin ingreso declarado registrado", False
+    try:
+        ingreso = Decimal(client.declared_monthly_income)
+        cuota = Decimal(loan.installment_amount or loan.principal_amount)
+    except InvalidOperation:
+        return "No se pudo calcular", False
+    if ingreso <= 0:
+        return "Ingreso declarado en cero", False
+    ratio = (cuota / ingreso) * 100
+    excede = ratio > 40
+    texto = f"{ratio:.1f}% del ingreso declarado"
+    if excede:
+        texto += " — supera el 40% admitido por BR-LOAN-002"
+    return texto, excede
+
+
+def ficha_cliente_html(loan, client) -> str:
+    """Ficha de cliente para el análisis de una solicitud de crédito: reúne
+    en un solo papel todos los datos del cliente, sus tres referencias
+    (BR-CLI-005), el origen de fondos (BR-CLI-006) y los términos del
+    préstamo que está solicitando -- pensada para imprimirse y analizarse
+    antes de decidir la aprobación, en vez de tener que abrir la ficha del
+    cliente y la del préstamo por separado. Tiene más sentido con un
+    préstamo PENDING, pero no está restringida a ese estado: nada impide
+    reimprimirla para revisar un expediente ya aprobado.
+
+    Sin banner de borrador: no tiene texto legal que revisar, solo datos ya
+    registrados -- mismo criterio que el Cronograma y los reportes del
+    dashboard. Tampoco es un documento que se entregue al cliente (a
+    diferencia de los otros cinco): es de uso interno para la decisión de
+    crédito.
+
+    loan: loan_service_pb2.GetLoanByIdResponse
+    client: client_service_pb2.GetClientByIdResponse"""
+    estado_cliente = "Activo" if client.is_active else "Inactivo"
+    estado_prestamo = _ESTADOS_LABEL.get(loan.status, loan.status)
+    ratio_texto, ratio_excede = _relacion_cuota_ingreso(loan, client)
+    ratio_color = theme.ERROR if ratio_excede else theme.TEXT_PRIMARY
+    garantia = (
+        f"{loan.guarantee_type} &mdash; Monto: {gs(loan.guarantee_amount)}"
+        if loan.guarantee_type
+        else "Sin garant&iacute;a registrada"
+    )
+    return f"""
+    <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
+    {_header("Ficha de Cliente &mdash; An&aacute;lisis de Cr&eacute;dito")}
+    <h3 style="color:{theme.PRIMARY};">Datos personales</h3>
+    <p><b>Nombre completo:</b> {client.first_name} {client.last_name}<br/>
+    <b>Documento (C.I.):</b> {client.national_id}<br/>
+    <b>Fecha de nacimiento:</b> {fecha(client.date_of_birth)}<br/>
+    <b>Estado del cliente:</b> {estado_cliente}<br/>
+    <b>Cliente desde:</b> {fecha_hora(client.created_at.ToDatetime())}<br/>
+    <b>Email:</b> {client.email}<br/>
+    <b>Tel&eacute;fono:</b> {client.phone_number}<br/>
+    <b>Direcci&oacute;n:</b> {client.address}</p>
+
+    <h3 style="color:{theme.PRIMARY};">Situaci&oacute;n financiera declarada</h3>
+    <p><b>Ingreso mensual declarado:</b>
+    {gs(client.declared_monthly_income) or "No registrado"}<br/>
+    <b>Origen de fondos:</b> {client.source_of_funds or "No registrado"}</p>
+
+    <h3 style="color:{theme.PRIMARY};">Referencias</h3>
+    <table border="1" cellspacing="0" cellpadding="6" width="100%">
+      <tr style="background-color:{theme.APP_BACKGROUND};">
+        <th align="left">Tipo</th><th align="left">Nombre</th>
+        <th align="left">Relaci&oacute;n / Cargo</th><th align="left">Tel&eacute;fono</th>
+      </tr>
+      <tr><td>Referencia personal 1</td><td>{client.personal_reference_1_name}</td>
+          <td>{client.personal_reference_1_relationship}</td>
+          <td>{client.personal_reference_1_phone}</td></tr>
+      <tr><td>Referencia personal 2</td><td>{client.personal_reference_2_name}</td>
+          <td>{client.personal_reference_2_relationship}</td>
+          <td>{client.personal_reference_2_phone}</td></tr>
+      <tr><td>Referencia laboral</td><td>{client.employment_reference_employer}</td>
+          <td>{client.employment_reference_position}
+          ({client.employment_reference_seniority})</td>
+          <td>{client.employment_reference_phone}</td></tr>
+    </table>
+
+    <h3 style="color:{theme.PRIMARY};">Pr&eacute;stamo solicitado</h3>
+    <p><b>N&uacute;mero:</b> {loan.id}<br/>
+    <b>Estado:</b> {estado_prestamo}<br/>
+    <b>Capital solicitado:</b> {gs(loan.principal_amount)}<br/>
+    <b>Plazo:</b> {loan.term_months} meses<br/>
+    <b>Tasa de inter&eacute;s:</b> {rate_percent(loan.interest_rate)} anual
+    ({rate_percent_mensual(loan.interest_rate)} mensual)<br/>
+    <b>Cuota mensual:</b> {gs(loan.installment_amount)}<br/>
+    <b>Total del cr&eacute;dito (capital + cargos):</b>
+    {gs(loan.total_credit_with_charges)}<br/>
+    <b>Total a pagar:</b> {gs(loan.total_to_pay)}<br/>
+    <b>Garant&iacute;a:</b> {garantia}</p>
+    <p style="color:{ratio_color}; font-weight:700;">Relaci&oacute;n cuota/ingreso:
+    {ratio_texto}</p>
+
+    {_footer("Ficha generada por el sistema de CREDIMED UME. Uso interno para el "
+             "an&aacute;lisis y la decisi&oacute;n de aprobaci&oacute;n del cr&eacute;dito "
+             "-- no constituye un documento legal ni se entrega al cliente.")}
     </body></html>
     """
 

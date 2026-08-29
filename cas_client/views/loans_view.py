@@ -124,6 +124,11 @@ _ESTADOS_LABEL = {
 _STATUS_STYLE = theme.LOAN_STATUS_COLORS
 
 _DOCUMENT_LABELS = {
+    # A diferencia de los otros cinco, no es un documento legal ni se
+    # entrega al cliente: es de uso interno, para imprimir y analizar antes
+    # de decidir la aprobación (o no) del préstamo -- por eso va primero y
+    # se habilita sin importar el estado del préstamo (ver _on_detail_loaded).
+    "ficha_cliente": "Ficha de cliente (análisis para aprobación)",
     "liquidacion": "Liquidación de préstamo",
     "pagare": "Pagaré",
     "contrato": "Contrato",
@@ -1346,7 +1351,12 @@ class LoansView(BaseView):
             docx_button,
             print_button,
         ) in self._document_buttons.items():
-            if kind == "liquidacion":
+            if kind == "ficha_cliente":
+                # Uso interno para decidir la aprobación: tiene que estar
+                # disponible especialmente en PENDING, antes de que exista
+                # "puede_pagare_contrato" -- no se restringe por estado.
+                enabled = True
+            elif kind == "liquidacion":
                 enabled = puede_liquidacion
             elif kind == "comprobante":
                 # BR-LOAN-011: solo hay comprobante para un pago concreto, y
@@ -1874,7 +1884,10 @@ class LoansView(BaseView):
             self._save_document_docx(kind, loan, client, schedule)
             return
 
-        if kind == "liquidacion":
+        if kind == "ficha_cliente":
+            html = documents.ficha_cliente_html(loan, client)
+            default_name = f"ficha_cliente_{loan.id[:8]}.pdf"
+        elif kind == "liquidacion":
             html = documents.liquidacion_html(loan, client, schedule)
             default_name = f"liquidacion_{loan.id[:8]}.pdf"
         elif kind == "pagare":
@@ -1918,7 +1931,10 @@ class LoansView(BaseView):
                     self._toast.show_message(_friendly_file_error(exc))
 
     def _save_document_docx(self, kind: str, loan, client, schedule) -> None:
-        if kind == "liquidacion":
+        if kind == "ficha_cliente":
+            docx_document = documents_docx.ficha_cliente_docx(loan, client)
+            default_name = f"ficha_cliente_{loan.id[:8]}.docx"
+        elif kind == "liquidacion":
             docx_document = documents_docx.liquidacion_docx(loan, client, schedule)
             default_name = f"liquidacion_{loan.id[:8]}.docx"
         elif kind == "pagare":
