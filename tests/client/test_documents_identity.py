@@ -139,8 +139,8 @@ def test_authorised_commercial_terms():
     """Las condiciones que autorizó la entidad. Cambiarlas cambia el
     instrumento legal, no solo la redacción."""
     assert documents._TERM_MORATORY_RATE == "0,38% mensual"
-    assert documents._TERM_MORATORY_GRACE_DAYS == 11
-    assert documents._TERM_ACCELERATION_INSTALLMENTS == 4
+    assert documents._TERM_MORATORY_GRACE_DAYS == 5
+    assert documents._TERM_ACCELERATION_INSTALLMENTS == 3
     assert documents._TERM_JURISDICTION_CITY == "Coronel Oviedo"
 
 
@@ -167,10 +167,63 @@ def test_pagare_and_contrato_print_the_mora_terms():
     ):
         texto = _texto_plano(documento)
         assert "punitorio del 0,38% mensual" in texto
-        # La mora recién se devenga a los 11 días del primer vencimiento.
-        assert "a partir de los 11 (once) días corridos" in texto
-        assert "4 (cuatro) cuotas vencidas" in texto
+        # La mora recién se devenga a los 5 días del primer vencimiento
+        # (revisado 2026-09-02, antes 11 -- ver docs/"modelo de pagare.pdf").
+        assert "a partir de los 5 (cinco) días corridos" in texto
+        assert "3 (tres) cuotas vencidas" in texto
         assert "Tribunales de Coronel Oviedo" in texto
+
+
+class _FakeLoanSinCargos(_FakeLoanCompleto):
+    """Mismo préstamo que _FakeLoanCompleto pero sin cargos capitalizados --
+    el caso que la entidad devolvió editado a mano en
+    docs/"contrato modificado credi ume.docx", borrando la mención a un
+    monto de cargos en cero."""
+
+    charge_admin_fee = ""
+    total_charges = "0.00"
+    total_credit_with_charges = "18000000.00"
+
+
+def test_contrato_omits_the_redundant_zero_charges_phrase():
+    """Sin cargos, la cláusula Primera no debe declarar "0 Gs" de cargos ni
+    repetir el capital como si fuera un "monto total del crédito" distinto
+    -- eso es exactamente lo que la entidad tachó a mano en la referencia."""
+    texto = _texto_plano(documents.contrato_html(_FakeLoanSinCargos, _FakeClient))
+    assert "se adicionan" not in texto
+    assert "0 Gs en concepto" not in texto
+    assert "18.000.000 Gs" in texto  # el capital sigue declarado
+
+
+def test_contrato_still_declares_charges_when_present():
+    """Con cargos (el caso normal), la cláusula sigue siendo obligatoria:
+    omitirla declararía una deuda menor a la que cobra el cronograma."""
+    texto = _texto_plano(documents.contrato_html(_FakeLoanCompleto, _FakeClient))
+    assert "se adicionan 1.000.000 Gs" in texto
+    assert "asciende a Guaraníes 19.000.000 Gs" in texto
+
+
+def test_pagare_has_no_logo_or_company_header_block():
+    """BR-LOAN-005/006 aparte: la entidad pidió imitar el formato de un
+    pagaré real (docs/"modelo de pagare.pdf"), que no lleva membrete -- el
+    nombre y el RUC de la entidad solo aparecen dentro del propio texto."""
+    html = documents.pagare_html(_FakeLoanCompleto, _FakeClient)
+    assert documents._COMPANY_RUC not in html
+    assert "logo_full" not in html.lower()
+    assert "PAGAR" in html.upper()
+
+
+def test_pagare_prints_the_bottom_identification_block():
+    """El bloque de identificación (crédito/nombre/domicilio/C.I./firma) va
+    al pie, como en el documento de referencia -- no arriba como un
+    _client_block genérico."""
+    texto = _texto_plano(documents.pagare_html(_FakeLoanCompleto, _FakeClient))
+    assert "Crédito No." in texto
+    assert "Fabrizio Villar" in texto
+    assert "Barrio San Miguel" in texto
+    assert "C.I. No." in texto
+    assert "5746680" in texto
+    assert "Firma:" in texto
 
 
 def test_acceleration_is_a_faculty_of_the_lender_not_automatic():

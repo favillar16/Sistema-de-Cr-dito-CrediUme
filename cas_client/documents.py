@@ -59,8 +59,11 @@ _COMPANY_PHONE = "(0984) 319243"
 # la entidad definió una sola tasa). Por eso hay un único _TERM_MORATORY_RATE
 # donde antes había un par moratoria/punitoria.
 _TERM_MORATORY_RATE = "0,38% mensual"
-_TERM_MORATORY_GRACE_DAYS = 11
-_TERM_ACCELERATION_INSTALLMENTS = 4
+# Revisados por la entidad el 2026-09-02 (antes 11 y 4, respectivamente) --
+# ver docs/"modelo de pagare.pdf" y docs/"contrato modificado credi ume.docx",
+# las dos referencias que la entidad marcó a mano con los valores nuevos.
+_TERM_MORATORY_GRACE_DAYS = 5
+_TERM_ACCELERATION_INSTALLMENTS = 3
 _TERM_JURISDICTION_CITY = "Coronel Oviedo"
 
 # El interés compensatorio NO se escribe fijo acá: sale de loan.interest_rate,
@@ -302,50 +305,153 @@ def liquidacion_html(loan, client, schedule) -> str:
     """
 
 
-def _garantia_linea(loan) -> str:
-    """Línea de codeudor/garantía para Pagaré y Contrato -- el modelo real
-    (BR-LOAN-005) no distingue un codeudor de una garantía en general, así
-    que se muestra tal cual está cargada, en blanco si no hay ninguna (el
-    pagaré de referencia siempre deja esta línea presente, con o sin
-    codeudor)."""
-    if loan.guarantee_type:
+def tiene_cargos_financiados(loan) -> bool:
+    """True si el préstamo realmente capitaliza algún cargo (BR-LOAN-006).
+
+    Compartido por el Contrato y el Pagaré: con cargos en cero, decir "se
+    adicionan 0 Gs ... el monto total del crédito asciende a Guaraníes
+    <el mismo capital>" es ruido -- la referencia que la entidad devolvió
+    (docs/"contrato modificado credi ume.docx") borró esa frase a mano
+    precisamente en un préstamo sin cargos. Con cargos, la frase sigue
+    siendo obligatoria: omitirla declararía una deuda menor a la que cobra
+    el cronograma adjunto."""
+    try:
+        return Decimal(loan.total_charges or "0") > 0
+    except InvalidOperation:
+        return False
+
+
+def _clausula_objeto_texto(loan) -> str:
+    """Cuerpo de la cláusula Primera (Objeto) del Contrato, a partir de
+    "que se desembolsa a la firma del presente instrumento" -- la parte que
+    cambia según si el préstamo tiene cargos capitalizados o no."""
+    if tiene_cargos_financiados(loan):
         return (
-            f"<b>Garant&iacute;a / Codeudor solidario:</b> {loan.guarantee_type} "
-            f"&mdash; Monto: {gs(loan.guarantee_amount)}<br/>"
+            f"Al capital se adicionan <b>{gs(loan.total_charges)}</b> en "
+            "concepto de cargos, gastos administrativos y seguros, que se "
+            "financian junto con &eacute;l, de modo que el monto total del "
+            "cr&eacute;dito asciende a <b>Guaran&iacute;es "
+            f"{gs(loan.total_credit_with_charges)}</b>, importe por el cual "
+            "se suscribe un Pagar&eacute; a la orden destinado a servir "
+            "como t&iacute;tulo de cr&eacute;dito."
         )
     return (
-        "<b>Garant&iacute;a / Codeudor solidario:</b> Sin garant&iacute;a "
-        "registrada<br/>"
+        "Importe por el cual se suscribe un Pagar&eacute; a la orden "
+        "destinado a servir como t&iacute;tulo de cr&eacute;dito."
     )
 
 
+def clausula_objeto_texto_plano(loan) -> str:
+    """Igual que `_clausula_objeto_texto()` pero sin entidades HTML ni
+    `<b>`, para el DOCX (`documents_docx.py`'s `contrato_docx`), que arma sus
+    propios runs en texto plano."""
+    if tiene_cargos_financiados(loan):
+        return (
+            f"Al capital se adicionan {gs(loan.total_charges)} en concepto "
+            "de cargos, gastos administrativos y seguros, que se financian "
+            "junto con él, de modo que el monto total del crédito asciende "
+            f"a Guaraníes {gs(loan.total_credit_with_charges)}, importe por "
+            "el cual se suscribe un Pagaré a la orden destinado a servir "
+            "como título de crédito."
+        )
+    return (
+        "Importe por el cual se suscribe un Pagaré a la orden destinado a "
+        "servir como título de crédito."
+    )
+
+
+def pagare_integracion_texto(loan) -> str:
+    """Frase que desglosa capital + cargos dentro de la declaración de deuda
+    del Pagaré -- solo aparece cuando el préstamo realmente capitaliza
+    cargos (BR-LOAN-006); vacía en caso contrario, mismo criterio que
+    `_clausula_objeto_texto()`. Sin acentos ni entidades propias, así que
+    sirve tal cual tanto para el HTML como para el DOCX."""
+    if tiene_cargos_financiados(loan):
+        return (
+            f", integrada por un capital de {gs(loan.principal_amount)} y "
+            f"{gs(loan.total_charges)} en concepto de cargos y seguros "
+            "financiados,"
+        )
+    return ""
+
+
+def _garantia_label_valor(loan) -> tuple[str, str]:
+    """(etiqueta, valor) de la garant&iacute;a/codeudor -- el modelo real
+    (BR-LOAN-005) no distingue un codeudor de una garant&iacute;a en
+    general, as&iacute; que se muestra tal cual est&aacute; cargada, o "Sin
+    garant&iacute;a registrada" si no hay ninguna (el pagar&eacute; de
+    referencia siempre deja esta l&iacute;nea presente, con o sin
+    codeudor). Compartido por la cl&aacute;usula del Contrato y la ficha de
+    identificaci&oacute;n del Pagar&eacute;."""
+    etiqueta = "Garant&iacute;a / Codeudor solidario"
+    if loan.guarantee_type:
+        return (
+            etiqueta,
+            f"{loan.guarantee_type} &mdash; Monto: {gs(loan.guarantee_amount)}",
+        )
+    return etiqueta, "Sin garant&iacute;a registrada"
+
+
+def _garantia_linea(loan) -> str:
+    etiqueta, valor = _garantia_label_valor(loan)
+    return f"<b>{etiqueta}:</b> {valor}<br/>"
+
+
+def _pagare_header(loan) -> str:
+    """Encabezado del Pagar&eacute;, sin logo ni bloque de identidad de la
+    entidad: imita directamente el layout de un pagar&eacute; real
+    (docs/"modelo de pagare.pdf") -- t&iacute;tulo en may&uacute;scula a la
+    izquierda, referencia del pr&eacute;stamo a la derecha. El nombre y el
+    domicilio de {_COMPANY_NAME} ya se declaran dentro del propio texto del
+    pagar&eacute;, igual que en el documento de referencia (que tampoco
+    lleva membrete), as&iacute; que no hace falta repetirlos acá."""
+    return f"""
+    <table width="100%" cellspacing="0" cellpadding="0">
+      <tr>
+        <td valign="bottom">
+          <div style="font-size: 20px; font-weight: 700; text-transform: uppercase;
+                      color: {theme.PRIMARY};">
+            Pagar&eacute; a la Orden
+          </div>
+        </td>
+        <td align="right" valign="bottom">
+          <div style="font-size: 11px; color: {theme.TEXT_MUTED};">
+            Pr&eacute;stamo N&deg; {loan.id}
+          </div>
+        </td>
+      </tr>
+    </table>
+    <hr style="border: none; border-top: 1px solid {theme.BORDER}; margin: 8px 0 18px 0;"/>
+    """
+
+
 def pagare_html(loan, client) -> str:
+    garantia_etiqueta, garantia_valor = _garantia_label_valor(loan)
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
-    {_header("Pagar&eacute; a la Orden")}
-    {_client_block(client)}
-    <p>{_garantia_linea(loan)}</p>
-    <p>DECLARO(AMOS) ADEUDAR a {_COMPANY_NAME} la suma de
-    <b>Guaran&iacute;es {gs(loan.total_credit_with_charges)}</b>, integrada por
-    un capital de {gs(loan.principal_amount)} y {gs(loan.total_charges)} en
-    concepto de cargos y seguros financiados, que PAGAR&Eacute;(MOS)
-    solidariamente, a su orden, libre de gastos y sin protesto, en
-    <b>{loan.term_months}</b> cuotas iguales, mensuales y consecutivas, con
-    vencimiento la primera de ellas el d&iacute;a
-    <b>{fecha(loan.first_due_date)}</b>,
-    y las siguientes cuotas en esas mismas fechas de los meses subsiguientes
-    hasta su total cancelaci&oacute;n, en el domicilio de {_COMPANY_NAME},
-    sito en {_COMPANY_ADDRESS}.</p>
+    {_pagare_header(loan)}
+    <p>DECLARO(AMOS) ADEUDAR A {_COMPANY_NAME} la suma de
+    <b>Guaran&iacute;es {gs(loan.total_credit_with_charges)}</b>{pagare_integracion_texto(loan)}
+    que PAGAR&Eacute;(MOS) solidariamente, a su orden, libre de gastos y sin
+    protesto, en <b>{loan.term_months}</b> cuotas iguales, mensuales y
+    consecutivas, con vencimiento la primera de ellas el d&iacute;a
+    <b>{fecha(loan.first_due_date)}</b>, y las siguientes cuotas en esas
+    mismas fechas de los meses subsiguientes, que ser&aacute;n abonadas
+    junto con los intereses compensatorios, calculados mensualmente sobre
+    el monto original del pr&eacute;stamo, hasta su total
+    cancelaci&oacute;n, en el domicilio de {_COMPANY_NAME}, sito en
+    {_COMPANY_ADDRESS}.</p>
     <p>Queda expresamente pactado que los importes de las cuotas
     documentadas en este instrumento devengar&aacute;n un inter&eacute;s
     compensatorio del <b>{rate_percent_mensual(loan.interest_rate)}
-    mensual</b>, calculado sobre el monto original del pr&eacute;stamo.</p>
-    <p>En caso de mora se aplicar&aacute;, sobre cada cuota vencida e impaga,
-    un inter&eacute;s moratorio en car&aacute;cter punitorio del
+    mensual</b>, calculado sobre el monto original del pr&eacute;stamo. En
+    caso de mora se aplicar&aacute;, sobre cada cuota vencida e impaga, un
+    inter&eacute;s moratorio en car&aacute;cter punitorio del
     <b>{_TERM_MORATORY_RATE}</b>, que se devengar&aacute; a partir de los
     <b>{_TERM_MORATORY_GRACE_DAYS} ({_numero_en_letras(_TERM_MORATORY_GRACE_DAYS)})
     d&iacute;as</b> corridos contados desde la fecha de su primer
-    vencimiento.</p>
+    vencimiento y durante el per&iacute;odo de cobro hasta la
+    restituci&oacute;n de la deuda declarada impaga.</p>
     <p>La falta de pago de
     <b>{_TERM_ACCELERATION_INSTALLMENTS}
     ({_numero_en_letras(_TERM_ACCELERATION_INSTALLMENTS)}) cuotas
@@ -356,9 +462,17 @@ def pagare_html(loan, client) -> str:
     <p>Todas las partes intervinientes en este documento se someten a la
     jurisdicci&oacute;n y competencia de los Jueces y Tribunales de
     <b>{_TERM_JURISDICTION_CITY}</b>.</p>
-    <p><b>Pr&eacute;stamo:</b> {loan.id}</p>
-    <p style="margin-top:48px;">Firma del deudor: ______________________________</p>
-    {_footer("Lugar y fecha: ______________________________")}
+    <p style="margin-top:20px;">{_TERM_JURISDICTION_CITY}, ____ de
+    ________________ de ________</p>
+    <table cellspacing="0" cellpadding="3" style="margin-top:12px;">
+      <tr><td><b>Cr&eacute;dito No.</b></td><td>&nbsp;&nbsp;{loan.id}</td></tr>
+      <tr><td><b>Nombre</b></td>
+          <td>&nbsp;&nbsp;{client.first_name} {client.last_name}</td></tr>
+      <tr><td><b>Domicilio</b></td><td>&nbsp;&nbsp;{client.address}</td></tr>
+      <tr><td><b>C.I. No.</b></td><td>&nbsp;&nbsp;{client.national_id}</td></tr>
+      <tr><td><b>{garantia_etiqueta}</b></td><td>&nbsp;&nbsp;{garantia_valor}</td></tr>
+    </table>
+    {_footer("Firma: ______________________________")}
     </body></html>
     """
 
@@ -868,13 +982,7 @@ def contrato_html(loan, client) -> str:
     <p><b>Primera (Objeto):</b> {_COMPANY_NAME} otorga al(los) Prestatario(s)
     un pr&eacute;stamo de dinero por un capital de
     <b>Guaran&iacute;es {gs(loan.principal_amount)}</b>, que se desembolsa a
-    la firma del presente instrumento. Al capital se adicionan
-    <b>{gs(loan.total_charges)}</b> en concepto de cargos, gastos
-    administrativos y seguros, que se financian junto con &eacute;l, de modo
-    que el monto total del cr&eacute;dito asciende a
-    <b>Guaran&iacute;es {gs(loan.total_credit_with_charges)}</b>, importe por
-    el cual se suscribe un Pagar&eacute; a la orden destinado a servir como
-    t&iacute;tulo de cr&eacute;dito.</p>
+    la firma del presente instrumento. {_clausula_objeto_texto(loan)}</p>
     <p><b>Segunda (Reembolso):</b> El(Los) Prestatario(s) se compromete(n) a
     reembolsar el pr&eacute;stamo otorgado en <b>{loan.term_months}</b>
     cuotas <b>iguales</b>, mensuales y consecutivas: cada cuota amortiza una

@@ -42,6 +42,14 @@ Thumbs.db
 # as a structural reference for cas_client/documents.py, never published.
 docs/contrato.pdf
 docs/pagare credi ume.docx
+# Mismo criterio (2026-09-02): un pagaré real firmado de otra institución
+# (COOMECIPAR), con nombre/C.I./domicilio/firma de un deudor real, y la copia
+# del Contrato que la propia entidad devolvió editada a mano con las
+# condiciones revisadas -- esta última sin PII de terceros, pero sigue el
+# mismo criterio de no versionar documentos de referencia entregados fuera
+# del control de versiones.
+docs/modelo de pagare.pdf
+docs/contrato modificado credi ume.docx
 # Mismo criterio: fotos de la pantalla de otra institución, usadas como
 # referencia de cómo debían funcionar los cargos capitalizados (BR-LOAN-006).
 # El texto del requerimiento sí se versiona; las capturas no.

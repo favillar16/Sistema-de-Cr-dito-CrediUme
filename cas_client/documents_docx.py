@@ -66,14 +66,14 @@ def _add_title(document: Document, title: str) -> None:
 
 
 def _dias_de_gracia() -> str:
-    """ "11 (once) días" -- el plazo desde el que se devenga la mora, en
+    """ "5 (cinco) días" -- el plazo desde el que se devenga la mora, en
     dígitos y letras, igual que documents.py."""
     dias = documents._TERM_MORATORY_GRACE_DAYS
     return f"{dias} ({documents._numero_en_letras(dias)}) días"
 
 
 def _cuotas_para_acelerar() -> str:
-    """ "4 (cuatro) cuotas vencidas" -- el umbral que habilita a exigir el
+    """ "3 (tres) cuotas vencidas" -- el umbral que habilita a exigir el
     total adeudado."""
     cuotas = documents._TERM_ACCELERATION_INSTALLMENTS
     return f"{cuotas} ({documents._numero_en_letras(cuotas)}) cuotas vencidas"
@@ -540,36 +540,54 @@ def liquidacion_docx(loan, client, schedule) -> Document:
 
 
 def _add_garantia_line(document: Document, loan) -> None:
-    """Línea de codeudor/garantía, mismo criterio que documents.py's
-    _garantia_linea() (BR-LOAN-005 no distingue codeudor de garantía en
-    general)."""
-    if loan.guarantee_type:
-        valor = f"{loan.guarantee_type} — Monto: {gs(loan.guarantee_amount)}"
-    else:
-        valor = "Sin garantía registrada"
-    _add_labeled_lines(document, [("Garantía / Codeudor solidario", valor)])
+    """Línea de codeudor/garantía, a partir de documents.py's
+    _garantia_label_valor() -- una sola definición para que el PDF y el DOCX
+    no puedan mostrar valores distintos (BR-LOAN-005 no distingue codeudor
+    de garantía en general)."""
+    etiqueta, valor = documents._garantia_label_valor(loan)
+    _add_labeled_lines(document, [(html.unescape(etiqueta), html.unescape(valor))])
+
+
+def _add_pagare_header(document: Document, loan) -> None:
+    """Encabezado del Pagaré, sin logo ni bloque de identidad de la entidad
+    -- imita directamente el layout de un pagaré real
+    (docs/"modelo de pagare.pdf"), mismo criterio que documents.py's
+    _pagare_header(): título a la izquierda, referencia del préstamo a la
+    derecha, sin repetir el nombre/domicilio de la entidad (ya se declaran
+    dentro del propio texto del pagaré)."""
+    table = document.add_table(rows=1, cols=2)
+    title_run = table.cell(0, 0).paragraphs[0].add_run("PAGARÉ A LA ORDEN")
+    title_run.bold = True
+    title_run.font.size = Pt(16)
+    title_run.font.color.rgb = _PRIMARY
+
+    ref_paragraph = table.cell(0, 1).paragraphs[0]
+    ref_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    ref_run = ref_paragraph.add_run(f"Préstamo N° {loan.id}")
+    ref_run.font.size = Pt(9)
+    ref_run.font.color.rgb = _TEXT_MUTED
+
+    _add_divider(document)
 
 
 def pagare_docx(loan, client) -> Document:
     document = Document()
-    _add_header(document, "Pagaré a la Orden")
-    _add_client_block(document, client)
-    _add_garantia_line(document, loan)
+    _add_pagare_header(document, loan)
 
     body = document.add_paragraph()
-    body.add_run(f"DECLARO(AMOS) ADEUDAR a {documents._COMPANY_NAME} la suma de ")
+    body.add_run(f"DECLARO(AMOS) ADEUDAR A {documents._COMPANY_NAME} la suma de ")
     amount_run = body.add_run(f"Guaraníes {gs(loan.total_credit_with_charges)}")
     amount_run.bold = True
     body.add_run(
-        f", integrada por un capital de {gs(loan.principal_amount)} y "
-        f"{gs(loan.total_charges)} en concepto de cargos y seguros "
-        "financiados, que PAGARÉ(MOS) solidariamente, a su orden, libre de "
-        "gastos y sin "
-        f"protesto, en {loan.term_months} cuotas iguales, mensuales y "
-        "consecutivas, con vencimiento la primera de ellas el día "
-        f"{fecha(loan.first_due_date)}, y las siguientes cuotas en esas mismas "
-        f"fechas de los meses subsiguientes hasta su total cancelación, en "
-        f"el domicilio de {documents._COMPANY_NAME}, sito en "
+        f"{documents.pagare_integracion_texto(loan)} que PAGARÉ(MOS) "
+        "solidariamente, a su orden, libre de gastos y sin protesto, en "
+        f"{loan.term_months} cuotas iguales, mensuales y consecutivas, con "
+        "vencimiento la primera de ellas el día "
+        f"{fecha(loan.first_due_date)}, y las siguientes cuotas en esas "
+        "mismas fechas de los meses subsiguientes, que serán abonadas junto "
+        "con los intereses compensatorios, calculados mensualmente sobre el "
+        "monto original del préstamo, hasta su total cancelación, en el "
+        f"domicilio de {documents._COMPANY_NAME}, sito en "
         f"{documents._COMPANY_ADDRESS}."
     )
 
@@ -578,16 +596,13 @@ def pagare_docx(loan, client) -> Document:
         "Queda expresamente pactado que los importes de las cuotas "
         "documentadas en este instrumento devengarán un interés "
         f"compensatorio del {rate_percent_mensual(loan.interest_rate)} "
-        "mensual, calculado sobre el monto original del préstamo."
-    )
-
-    mora_paragraph = document.add_paragraph()
-    mora_paragraph.add_run(
-        "En caso de mora se aplicará, sobre cada cuota vencida e impaga, un "
-        "interés moratorio en carácter punitorio del "
+        "mensual, calculado sobre el monto original del préstamo. En caso "
+        "de mora se aplicará, sobre cada cuota vencida e impaga, un interés "
+        "moratorio en carácter punitorio del "
         f"{documents._TERM_MORATORY_RATE}, que se devengará a partir de los "
         f"{_dias_de_gracia()} corridos contados desde la fecha de su primer "
-        "vencimiento."
+        "vencimiento y durante el período de cobro hasta la restitución de "
+        "la deuda declarada impaga."
     )
 
     acceleration_paragraph = document.add_paragraph()
@@ -606,9 +621,23 @@ def pagare_docx(loan, client) -> Document:
         f"{documents._TERM_JURISDICTION_CITY}."
     )
 
-    _add_labeled_lines(document, [("Préstamo", loan.id)])
-    _add_signature_line(document, "Firma del deudor: ______________________________")
-    _add_footer_note(document, "Lugar y fecha: ______________________________")
+    dateline = document.add_paragraph()
+    dateline.paragraph_format.space_before = Pt(16)
+    dateline.add_run(
+        f"{documents._TERM_JURISDICTION_CITY}, ____ de ________________ de " "________"
+    )
+
+    _add_labeled_lines(
+        document,
+        [
+            ("Crédito No.", loan.id),
+            ("Nombre", f"{client.first_name} {client.last_name}"),
+            ("Domicilio", client.address),
+            ("C.I. No.", client.national_id),
+        ],
+    )
+    _add_garantia_line(document, loan)
+    _add_signature_line(document, "Firma: ______________________________")
     return document
 
 
@@ -694,13 +723,7 @@ def contrato_docx(loan, client) -> Document:
             f"{documents._COMPANY_NAME} otorga al(los) Prestatario(s) un "
             f"préstamo de dinero por un capital de Guaraníes "
             f"{gs(loan.principal_amount)}, que se desembolsa a la firma del "
-            f"presente instrumento. Al capital se adicionan "
-            f"{gs(loan.total_charges)} en concepto de cargos, gastos "
-            "administrativos y seguros, que se financian junto con él, de "
-            "modo que el monto total del crédito asciende a Guaraníes "
-            f"{gs(loan.total_credit_with_charges)}, importe por el cual se "
-            "suscribe un Pagaré a la orden destinado a servir como título "
-            "de crédito.",
+            "presente instrumento. " + documents.clausula_objeto_texto_plano(loan),
         ),
         (
             "Segunda (Reembolso)",
