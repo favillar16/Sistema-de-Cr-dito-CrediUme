@@ -311,6 +311,20 @@ class ClientServiceClient:
             error_cls=ApiError,
         )
 
+    def delete_client(
+        self, access_token: str, client_id: str, reason: str
+    ) -> client_service_pb2.DeleteClientResponse:
+        """BR-CLI-008: borra un cliente cargado por error, en cascada con sus
+        préstamos. `reason` es obligatorio -- el servidor rechaza un motivo
+        vacío, porque la fila desaparece y el registro de auditoría es lo
+        único que queda."""
+        return _invoke(
+            self._stub.DeleteClient,
+            client_service_pb2.DeleteClientRequest(client_id=client_id, reason=reason),
+            access_token=access_token,
+            error_cls=ApiError,
+        )
+
 
 class LoanServiceClient:
     """Thin wrapper around the LoanService gRPC stub. Every RPC here requires

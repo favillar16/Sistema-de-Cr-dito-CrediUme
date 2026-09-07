@@ -23,6 +23,11 @@ service ClientService {
     // Cambio del documento de identidad -- BR-CLI-003 (auditado; mismo rol
     // que UpdateClient, ver rbac.py)
     rpc UpdateNationalId (UpdateNationalIdRequest) returns (UpdateNationalIdResponse);
+
+    // Eliminación definitiva de un cliente cargado por error -- BR-CLI-008.
+    // A diferencia de DeactivateClient, borra la fila en serio y en cascada
+    // (préstamos, pagos, ajustes de cuota), sin excepción por estado.
+    rpc DeleteClient (DeleteClientRequest) returns (DeleteClientResponse);
 }
 
 // Mensajes Principales
@@ -164,4 +169,20 @@ message UpdateNationalIdRequest {
 message UpdateNationalIdResponse {
     bool success = 1;
     google.protobuf.Timestamp updated_at = 2;
+}
+
+message DeleteClientRequest {
+    string client_id = 1;
+    // Motivo de la eliminación, obligatorio: la fila del cliente desaparece,
+    // así que el AuditLog es lo único que queda para explicar por qué -- un
+    // campo libre vacío haría de la auditoría un registro inútil (mismo
+    // criterio que DeleteLoanRequest.reason).
+    string reason = 2;
+}
+
+message DeleteClientResponse {
+    bool success = 1;
+    // Cuántos préstamos del cliente se borraron en cascada -- puramente
+    // informativo para el toast de confirmación en pantalla.
+    int32 deleted_loans_count = 2;
 }

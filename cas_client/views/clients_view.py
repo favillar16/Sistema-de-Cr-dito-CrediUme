@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMessageBox,
     QProgressBar,
@@ -21,7 +22,7 @@ from cas_client.formatting import (
     fecha_a_iso,
 )
 from cas_client.grpc_client import ApiError, ClientServiceClient
-from cas_client.rbac_ui import can_originate_credit, role_at_least
+from cas_client.rbac_ui import can_delete_client, can_originate_credit, role_at_least
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
 from cas_client.widgets.base_view import BaseView
@@ -555,6 +556,23 @@ class ClientsView(BaseView):
         button_column.addWidget(self._change_national_id_button)
         national_id_row.addLayout(button_column)
         actions_card.addLayout(national_id_row)
+
+        # BR-CLI-008 va en su propia fila, alineada a la derecha, y no como
+        # un botón más de "Acciones": es la única acción de esta pantalla que
+        # no se puede deshacer -- mismo criterio que "Eliminar préstamo" en
+        # loans_view.py.
+        delete_row = QHBoxLayout()
+        delete_row.addStretch()
+        self._delete_button = QPushButton("Eliminar cliente")
+        self._delete_button.setStyleSheet(theme.danger_button_style())
+        self._delete_button.setToolTip(
+            "Elimina definitivamente un cliente cargado por error, junto con "
+            "todos sus préstamos, pagos y ajustes de cuota. No se puede "
+            "deshacer."
+        )
+        self._delete_button.clicked.connect(self._on_delete_client)
+        delete_row.addWidget(self._delete_button)
+        actions_card.addLayout(delete_row)
         layout.addWidget(actions_frame)
 
         layout.addStretch()
@@ -569,6 +587,7 @@ class ClientsView(BaseView):
         puede_originar = can_originate_credit(role)
         self._new_button.setVisible(puede_originar)
         self._save_button.setVisible(puede_originar)
+        self._delete_button.setVisible(can_delete_client(role))
 
     def open_client_detail(self, client_id: str) -> None:
         """Entry point used by MainWindow when navigating here from LoansView's
@@ -758,6 +777,68 @@ class ClientsView(BaseView):
         self.view_loans_requested.emit(
             self._selected_client_id, self._detail_title.text()
         )
+
+    def _on_delete_client(self) -> None:
+        """BR-CLI-008: eliminar un cliente cargado por error.
+
+        Dos pasos a propósito, igual que "Eliminar préstamo" en
+        loans_view.py -- una confirmación que dice exactamente qué se va a
+        borrar (incluida la cascada sobre sus préstamos) y que no se puede
+        deshacer, y recién después el motivo, que el servidor exige y que
+        queda en el AuditLog como único rastro del cliente. Cancelar en
+        cualquiera de los dos aborta sin llamar al servidor.
+        """
+        if self._selected_client_id is None:
+            return
+        nombre = self._detail_title.text()
+        confirm = QMessageBox.question(
+            self,
+            "Eliminar cliente",
+            f"¿Eliminar definitivamente a {nombre}?\n\n"
+            "Esta acción no se puede deshacer: el cliente desaparece del "
+            "sistema junto con todos sus préstamos, pagos y ajustes de "
+            "cuota, sin importar su estado. Solo queda el registro de "
+            "auditoría.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        motivo, ok = QInputDialog.getText(
+            self,
+            "Motivo de la eliminación",
+            "Indique por qué se elimina este cliente (queda auditado):",
+        )
+        if not ok:
+            return
+        motivo = motivo.strip()
+        if not motivo:
+            self._toast.show_message(
+                "Debe indicar el motivo de la eliminación para continuar."
+            )
+            return
+
+        self._set_loading(True)
+        self._worker = AsyncWorker(
+            self._client.delete_client,
+            self._session.access_token,
+            self._selected_client_id,
+            motivo,
+            error_translator=_friendly_message,
+        )
+        self._worker.succeeded.connect(self._on_client_deleted)
+        self._worker.failed.connect(self._on_error)
+        self._worker.finished.connect(lambda: self._set_loading(False))
+        self._worker.start()
+
+    def _on_client_deleted(self, _response) -> None:
+        """El cliente ya no existe, así que no se puede recargar el detalle
+        como hace _on_deactivate_success -- se vuelve a la lista, que es
+        donde tiene sentido quedar parado después de borrar."""
+        self._selected_client_id = None
+        self._toast.show_message("Cliente eliminado.")
+        self._stack.setCurrentIndex(_PAGE_LIST)
 
     # ---- Helpers comunes -------------------------------------------------
 

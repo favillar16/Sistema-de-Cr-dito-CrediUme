@@ -49,6 +49,12 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     # tipeado, sin escalar. Sigue siendo su propia acción auditada
     # (CLIENTE_DOCUMENTO_CAMBIADO en el AuditLog), lo que cambió es el rol.
     "/clients.ClientService/UpdateNationalId": CREDIT_ANALYST_AND_ABOVE,
+    # BR-CLI-008: eliminación real de un cliente cargado por error. Mismo
+    # nivel que DeleteLoan (BR-LOAN-012) y por el mismo motivo: quien puede
+    # dar de alta/editar un cliente es quien nota el error y no necesita
+    # escalar para deshacerlo. El cajero queda afuera, igual que en el resto
+    # del módulo de clientes (BR-CAJA-005).
+    "/clients.ClientService/DeleteClient": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/CreateLoan": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/UpdateLoanProposal": CREDIT_ANALYST_AND_ABOVE,  # BR-LOAN-004
     "/loans.LoanService/UpdateLoanGuarantee": CREDIT_ANALYST_AND_ABOVE,  # BR-LOAN-005

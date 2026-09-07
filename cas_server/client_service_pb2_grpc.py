@@ -64,6 +64,11 @@ class ClientServiceStub(object):
                 request_serializer=client__service__pb2.UpdateNationalIdRequest.SerializeToString,
                 response_deserializer=client__service__pb2.UpdateNationalIdResponse.FromString,
                 _registered_method=True)
+        self.DeleteClient = channel.unary_unary(
+                '/clients.ClientService/DeleteClient',
+                request_serializer=client__service__pb2.DeleteClientRequest.SerializeToString,
+                response_deserializer=client__service__pb2.DeleteClientResponse.FromString,
+                _registered_method=True)
 
 
 class ClientServiceServicer(object):
@@ -112,6 +117,15 @@ class ClientServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def DeleteClient(self, request, context):
+        """Eliminación definitiva de un cliente cargado por error -- BR-CLI-008.
+        A diferencia de DeactivateClient, borra la fila en serio y en cascada
+        (préstamos, pagos, ajustes de cuota), sin excepción por estado.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ClientServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -144,6 +158,11 @@ def add_ClientServiceServicer_to_server(servicer, server):
                     servicer.UpdateNationalId,
                     request_deserializer=client__service__pb2.UpdateNationalIdRequest.FromString,
                     response_serializer=client__service__pb2.UpdateNationalIdResponse.SerializeToString,
+            ),
+            'DeleteClient': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteClient,
+                    request_deserializer=client__service__pb2.DeleteClientRequest.FromString,
+                    response_serializer=client__service__pb2.DeleteClientResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -308,6 +327,33 @@ class ClientService(object):
             '/clients.ClientService/UpdateNationalId',
             client__service__pb2.UpdateNationalIdRequest.SerializeToString,
             client__service__pb2.UpdateNationalIdResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteClient(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/clients.ClientService/DeleteClient',
+            client__service__pb2.DeleteClientRequest.SerializeToString,
+            client__service__pb2.DeleteClientResponse.FromString,
             options,
             channel_credentials,
             insecure,

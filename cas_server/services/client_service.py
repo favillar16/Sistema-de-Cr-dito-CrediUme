@@ -6,7 +6,15 @@ from sqlalchemy import or_
 import client_service_pb2
 import client_service_pb2_grpc
 from cas_server.db.base import SessionLocal
-from cas_server.db.models import AuditLog, Client, Loan, LoanStatusEnum
+from cas_server.db.models import (
+    AuditLog,
+    CashMovement,
+    Client,
+    Loan,
+    LoanInstallmentAdjustment,
+    LoanPayment,
+    LoanStatusEnum,
+)
 from cas_server.security.current_user import get_current_claims
 from cas_server.services.common import (
     analizar_decimal,
@@ -440,4 +448,101 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
 
             return client_service_pb2.UpdateNationalIdResponse(
                 success=True, updated_at=a_marca_tiempo(cliente.updated_at)
+            )
+
+    def DeleteClient(self, request, context):
+        """BR-CLI-008: elimina definitivamente un cliente cargado por error.
+
+        A diferencia de DeleteLoan (BR-LOAN-012), acá no hay estados que
+        protejan el dinero ya movido: por decisión explícita del negocio, un
+        cliente se puede borrar sin excepción, sin importar el estado de sus
+        préstamos. Eso obliga a borrar en cascada todos sus préstamos, pagos
+        y ajustes de cuota antes de poder borrar la fila del cliente -- la FK
+        Loan.client_id no admite huérfanos.
+
+        Los CashMovement generados por un cobro en efectivo (BR-CAJA-004) NO
+        se borran, solo se les limpia `loan_payment_id`: ese movimiento ya
+        está sumado en el `closing_expected_amount`/`closing_difference` de
+        un arqueo que puede estar cerrado y firmado (BR-CAJA-003), y borrarlo
+        cambiaría en silencio un cierre ya firmado. Se pierde únicamente la
+        trazabilidad hacia el pago (que de todos modos ya no existe), no el
+        monto de caja.
+        """
+        client_id = analizar_uuid(request.client_id, "client_id", context)
+        motivo = request.reason.strip()
+        if not motivo:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "reason es obligatorio: el cliente se borra y el registro de "
+                "auditoría es lo único que queda para explicar por qué",
+            )
+        ahora = datetime.now(timezone.utc)
+
+        with SessionLocal() as sesion:
+            # Mismo bloqueo que DeleteLoan y por el mismo motivo: sin él, un
+            # préstamo o pago concurrente podría entrar entre leer el estado
+            # actual y borrar todo.
+            cliente = sesion.get(Client, client_id, with_for_update=True)
+            if cliente is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Cliente no encontrado")
+
+            loan_ids = [
+                loan_id
+                for (loan_id,) in sesion.query(Loan.id)
+                .filter(Loan.client_id == cliente.id)
+                .with_for_update()
+                .all()
+            ]
+
+            payment_ids: list = []
+            if loan_ids:
+                payment_ids = [
+                    payment_id
+                    for (payment_id,) in sesion.query(LoanPayment.id)
+                    .filter(LoanPayment.loan_id.in_(loan_ids))
+                    .all()
+                ]
+
+            if payment_ids:
+                sesion.query(CashMovement).filter(
+                    CashMovement.loan_payment_id.in_(payment_ids)
+                ).update({"loan_payment_id": None}, synchronize_session=False)
+
+            if loan_ids:
+                sesion.query(LoanInstallmentAdjustment).filter(
+                    LoanInstallmentAdjustment.loan_id.in_(loan_ids)
+                ).delete(synchronize_session=False)
+                sesion.query(LoanPayment).filter(
+                    LoanPayment.loan_id.in_(loan_ids)
+                ).delete(synchronize_session=False)
+                sesion.query(Loan).filter(Loan.id.in_(loan_ids)).delete(
+                    synchronize_session=False
+                )
+
+            # Datos del cliente antes de borrarlo: una vez hecho el DELETE la
+            # fila no existe, así que el AuditLog tiene que ser autosuficiente
+            # para reconstruir qué se eliminó.
+            resumen = (
+                f"nombre={cliente.first_name} {cliente.last_name} "
+                f"documento={cliente.national_id} "
+                f"prestamos_eliminados={len(loan_ids)} "
+                f"pagos_eliminados={len(payment_ids)}"
+            )
+            sesion.delete(cliente)
+
+            sesion.add(
+                AuditLog(
+                    user_id=id_actor_actual(get_current_claims()),
+                    action=(
+                        f"CLIENTE_ELIMINADO client_id={client_id} {resumen} "
+                        f"motivo={motivo}"
+                    ),
+                    ip_address=ip_remota(context),
+                    timestamp=ahora,
+                )
+            )
+            sesion.commit()
+
+            return client_service_pb2.DeleteClientResponse(
+                success=True, deleted_loans_count=len(loan_ids)
             )

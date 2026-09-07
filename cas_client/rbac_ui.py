@@ -152,6 +152,18 @@ def can_delete_loan(role: str | None) -> bool:
     return role_at_least(role, "CREDIT_ANALYST")
 
 
+def can_delete_client(role: str | None) -> bool:
+    """BR-CLI-008: eliminar un cliente cargado por error -- mirrors rbac.py's
+    CREDIT_ANALYST_AND_ABOVE gate on DeleteClient. A propósito el mismo nivel
+    que can_originate_credit(): quien da de alta/edita un cliente es quien
+    nota el error y no necesita escalar para deshacerlo. A diferencia de
+    can_delete_loan(), no hay ningún estado que lo restrinja del lado del
+    servidor -- por decisión del negocio, un cliente se borra sin excepción
+    (y en cascada con todos sus préstamos), así que esta función es la única
+    condición que la vista necesita."""
+    return role_at_least(role, "CREDIT_ANALYST")
+
+
 def can_revert_default(role: str | None) -> bool:
     """BR-LOAN-014: levantar el incumplimiento de un préstamo -- mirrors
     rbac.py's CREDIT_ANALYST_AND_ABOVE gate on RevertDefault. Es a propósito

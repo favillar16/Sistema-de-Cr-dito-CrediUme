@@ -4,6 +4,7 @@ from cas_client.rbac_ui import (
     can_revert_default,
     FIXED_INTEREST_RATE,
     MAX_CHARGES_RATIO,
+    can_delete_client,
     can_delete_loan,
     can_edit_installment_amount,
     can_edit_interest_rate,
@@ -194,6 +195,35 @@ def test_delete_loan_matches_originating_credit():
     vuelve a moverse sin la otra, esto lo marca."""
     for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
         assert can_delete_loan(role) == can_originate_credit(role), role
+
+
+def test_delete_client_gate_matches_rbac_tables_exactly():
+    """BR-CLI-008. Misma guarda de sincronizacion que el resto: se compara
+    contra la tabla METHOD_ROLES real en vez de repetir a mano la
+    expectativa."""
+    from cas_server.security.rbac import allowed_roles
+
+    permitidos = allowed_roles("/clients.ClientService/DeleteClient")
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+        esperado = any(permitido.value == role for permitido in permitidos)
+        assert can_delete_client(role) == esperado, role
+
+
+def test_delete_client_excludes_only_the_teller():
+    """El unico rol sin el permiso es el cajero (BR-CAJA-005), que ni origina
+    ni deshace originacion de clientes."""
+    assert can_delete_client("CASHIER") is False
+    assert can_delete_client("CREDIT_ANALYST") is True
+    assert can_delete_client("MANAGER") is True
+    assert can_delete_client("ADMIN") is True
+    assert can_delete_client(None) is False
+
+
+def test_delete_client_matches_originating_credit():
+    """Mismo criterio que can_delete_loan(): quien puede dar de alta/editar
+    un cliente es quien puede deshacer su propia carga."""
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+        assert can_delete_client(role) == can_originate_credit(role), role
 
 
 def test_payment_status_report_gate_matches_rbac_tables_exactly():
