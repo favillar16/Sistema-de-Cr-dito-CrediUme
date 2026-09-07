@@ -561,6 +561,18 @@ class LoansView(BaseView):
         has_selection = bool(self._client_results_table.selectedItems())
         self._show_loans_button.setEnabled(has_selection)
         self._view_client_button.setEnabled(has_selection)
+        # "Nuevo préstamo" ya no depende de haber pasado por "Ver préstamos"
+        # primero: alcanza con elegir un cliente en los resultados de la
+        # búsqueda. Antes había que esperar el viaje al servidor de
+        # list_client_loans (que a quien solo quiere cargar un préstamo
+        # nuevo no le sirve de nada) solo para que _current_client_id
+        # quedara asignado.
+        client_id = self._selected_client_id()
+        if client_id:
+            self._current_client_id = client_id
+            self._current_client_name = self._client_results_table.item(
+                self._client_results_table.currentRow(), 0
+            ).text()
 
     def _selected_client_id(self) -> str | None:
         row = self._client_results_table.currentRow()
@@ -590,6 +602,12 @@ class LoansView(BaseView):
 
     def _on_client_search_success(self, response) -> None:
         self._client_results_table.setRowCount(0)
+        # Una búsqueda nueva invalida la selección anterior -- sin este
+        # reseteo, "Nuevo préstamo" podía quedar habilitado apuntando
+        # todavía al cliente de una búsqueda previa hasta que se
+        # seleccionara uno nuevo.
+        self._current_client_id = None
+        self._current_client_name = None
         for client in response.clients:
             row = self._client_results_table.rowCount()
             self._client_results_table.insertRow(row)
