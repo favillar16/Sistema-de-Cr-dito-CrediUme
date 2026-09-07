@@ -151,10 +151,39 @@ def _add_footer_note(document: Document, text: str) -> None:
     run.font.color.rgb = _TEXT_MUTED
 
 
-def _add_signature_line(document: Document, text: str) -> None:
-    paragraph = document.add_paragraph()
-    paragraph.paragraph_format.space_before = Pt(36)
-    paragraph.add_run(text)
+def _add_signature_block(document: Document, label: str) -> None:
+    """Espacio de firma: l&iacute;nea con borde inferior punteado (OOXML no
+    tiene una "l&iacute;nea punteada" suelta, as&iacute; que se logra con el
+    borde inferior de un p&aacute;rrafo vac&iacute;o, mismo mecanismo que
+    _add_divider() pero con val="dotted") m&aacute;s la palabra "FIRMA" bien
+    visible debajo -- en negro, sin colores ni letra chica -- identificando
+    a qui&eacute;n corresponde. Reemplaza el viejo "Firma: ______" (guiones
+    bajos literales) por un espacio de firma real, igual que documents.py's
+    _signature_block() para el HTML."""
+    line = document.add_paragraph()
+    line.paragraph_format.space_before = Pt(36)
+    # El borde de un párrafo ocupa todo el ancho de línea disponible por
+    # default; un right_indent de la mitad de ese ancho es la única forma en
+    # OOXML de acortar la línea a la mitad, ya que python-docx no expone un
+    # "width" para el borde en sí (a diferencia de la celda de tabla que usa
+    # documents.py's _signature_block() para el mismo efecto en HTML).
+    line.paragraph_format.right_indent = Inches(3.25)
+    pPr = line._p.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "dotted")
+    bottom.set(qn("w:sz"), "8")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), theme.TEXT_PRIMARY.lstrip("#"))
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+    caption = document.add_paragraph()
+    caption.paragraph_format.space_before = Pt(2)
+    caption_run = caption.add_run(label)
+    caption_run.bold = True
+    caption_run.font.size = Pt(10)
+    caption_run.font.color.rgb = _TEXT_PRIMARY
 
 
 def _add_cargos_y_garantia(document: Document, loan) -> None:
@@ -559,7 +588,7 @@ def _add_pagare_header(document: Document, loan) -> None:
     title_run = table.cell(0, 0).paragraphs[0].add_run("PAGARÉ A LA ORDEN")
     title_run.bold = True
     title_run.font.size = Pt(16)
-    title_run.font.color.rgb = _PRIMARY
+    title_run.font.color.rgb = _TEXT_PRIMARY
 
     ref_paragraph = table.cell(0, 1).paragraphs[0]
     ref_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -574,8 +603,14 @@ def pagare_docx(loan, client) -> Document:
     document = Document()
     _add_pagare_header(document, loan)
 
+    # "DECLARO(AMOS) ADEUDAR A ..." va en negrita como frase de apertura
+    # -- ya está en mayúsculas tal como se escribe (igual que el título
+    # "PAGARÉ A LA ORDEN" arriba) -- y el resto del párrafo sigue en texto
+    # normal, sin colores ni Font.all_caps.
     body = document.add_paragraph()
-    body.add_run(f"DECLARO(AMOS) ADEUDAR A {documents._COMPANY_NAME} la suma de ")
+    lead_run = body.add_run(f"DECLARO(AMOS) ADEUDAR A {documents._COMPANY_NAME}")
+    lead_run.bold = True
+    body.add_run(" la suma de ")
     amount_run = body.add_run(f"Guaraníes {gs(loan.total_credit_with_charges)}")
     amount_run.bold = True
     body.add_run(
@@ -636,8 +671,7 @@ def pagare_docx(loan, client) -> Document:
             ("C.I. No.", client.national_id),
         ],
     )
-    _add_garantia_line(document, loan)
-    _add_signature_line(document, "Firma: ______________________________")
+    _add_signature_block(document, "FIRMA")
     return document
 
 
@@ -782,8 +816,6 @@ def contrato_docx(loan, client) -> Document:
         paragraph.add_run(text)
 
     _add_labeled_lines(document, [("Préstamo", loan.id)])
-    _add_signature_line(document, "Firma del deudor: ______________________________")
-    _add_footer_note(
-        document, f"Firma de {documents._COMPANY_NAME}: ______________________________"
-    )
+    _add_signature_block(document, "FIRMA DEL CLIENTE")
+    _add_signature_block(document, f"FIRMA DE {documents._COMPANY_NAME}")
     return document

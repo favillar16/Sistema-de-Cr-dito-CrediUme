@@ -186,6 +186,31 @@ def _footer(text: str) -> str:
     return f'<p style="margin-top:24px; font-size:12px; color:{theme.TEXT_MUTED};">{text}</p>'
 
 
+def _signature_block(label: str) -> str:
+    """Espacio de firma: una l&iacute;nea con borde inferior punteado (en vez
+    de guiones bajos como texto) con la palabra "FIRMA" bien visible debajo
+    -- en negro, sin colores ni letra chica -- identificando a qui&eacute;n
+    corresponde. Reemplaza el viejo "Firma: ______" -- un solo
+    rengl&oacute;n gen&eacute;rico que no distingu&iacute;a la firma del
+    cliente de la de la entidad -- por un espacio de firma real y
+    etiquetado, compartido por el Pagar&eacute; y el Contrato.
+
+    Se arma con una tabla de una celda, no con un &lt;div&gt; de ancho fijo:
+    el subconjunto de CSS que soporta QTextDocument no respeta bien el ancho
+    de un bloque gen&eacute;rico sin contenido (queda una l&iacute;nea
+    min&uacute;scula en vez de un espacio de firma real), mientras que el
+    ancho de tabla/celda s&iacute; se respeta -- mismo recurso que ya usa
+    `_pagare_header()`."""
+    return f"""
+    <table cellspacing="0" cellpadding="0" style="margin-top:40px;">
+      <tr><td width="150" style="border-bottom: 1px dotted {theme.TEXT_PRIMARY};
+                                  height: 17px;">&nbsp;</td></tr>
+      <tr><td style="font-size:13px; font-weight:700; color:{theme.TEXT_PRIMARY};
+                     padding-top:4px;">{label}</td></tr>
+    </table>
+    """
+
+
 # BR-LOAN-006: los 4 cargos con su nombre para los documentos. Espeja
 # _CHARGE_FIELDS de loans_view.py -- se mantiene a mano igual que
 # _ESTADOS_LABEL, porque este m&oacute;dulo no importa vistas (documents_docx.py
@@ -410,7 +435,7 @@ def _pagare_header(loan) -> str:
       <tr>
         <td valign="bottom">
           <div style="font-size: 20px; font-weight: 700; text-transform: uppercase;
-                      color: {theme.PRIMARY};">
+                      color: {theme.TEXT_PRIMARY};">
             Pagar&eacute; a la Orden
           </div>
         </td>
@@ -426,11 +451,10 @@ def _pagare_header(loan) -> str:
 
 
 def pagare_html(loan, client) -> str:
-    garantia_etiqueta, garantia_valor = _garantia_label_valor(loan)
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
     {_pagare_header(loan)}
-    <p>DECLARO(AMOS) ADEUDAR A {_COMPANY_NAME} la suma de
+    <p><b>DECLARO(AMOS) ADEUDAR A {_COMPANY_NAME}</b> la suma de
     <b>Guaran&iacute;es {gs(loan.total_credit_with_charges)}</b>{pagare_integracion_texto(loan)}
     que PAGAR&Eacute;(MOS) solidariamente, a su orden, libre de gastos y sin
     protesto, en <b>{loan.term_months}</b> cuotas iguales, mensuales y
@@ -470,9 +494,8 @@ def pagare_html(loan, client) -> str:
           <td>&nbsp;&nbsp;{client.first_name} {client.last_name}</td></tr>
       <tr><td><b>Domicilio</b></td><td>&nbsp;&nbsp;{client.address}</td></tr>
       <tr><td><b>C.I. No.</b></td><td>&nbsp;&nbsp;{client.national_id}</td></tr>
-      <tr><td><b>{garantia_etiqueta}</b></td><td>&nbsp;&nbsp;{garantia_valor}</td></tr>
     </table>
-    {_footer("Firma: ______________________________")}
+    {_signature_block("FIRMA")}
     </body></html>
     """
 
@@ -1022,7 +1045,7 @@ def contrato_html(loan, client) -> str:
     este contrato se someten a la jurisdicci&oacute;n y competencia de los
     Jueces y Tribunales de <b>{_TERM_JURISDICTION_CITY}</b>.</p>
     <p><b>Pr&eacute;stamo:</b> {loan.id}</p>
-    <p style="margin-top:48px;">Firma del deudor: ______________________________</p>
-    {_footer("Firma de " + _COMPANY_NAME + ": ______________________________")}
+    {_signature_block("FIRMA DEL CLIENTE")}
+    {_signature_block("FIRMA DE " + _COMPANY_NAME)}
     </body></html>
     """

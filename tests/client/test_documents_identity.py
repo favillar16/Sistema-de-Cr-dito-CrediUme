@@ -223,7 +223,7 @@ def test_pagare_prints_the_bottom_identification_block():
     assert "Barrio San Miguel" in texto
     assert "C.I. No." in texto
     assert "5746680" in texto
-    assert "Firma:" in texto
+    assert "FIRMA" in texto
 
 
 def test_acceleration_is_a_faculty_of_the_lender_not_automatic():
