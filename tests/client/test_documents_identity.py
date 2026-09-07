@@ -291,6 +291,14 @@ def test_ficha_cliente_shows_all_client_data_and_references():
     assert "ACME S.A." in texto
 
 
+def test_ficha_cliente_shows_the_workplace():
+    """El lugar de trabajo (empleador) debe verse en Datos personales, no
+    solo en la tabla de Referencias."""
+    html = documents.ficha_cliente_html(_FakeLoanCompleto, _FakeClientCompleto)
+    texto = _texto_plano(html)
+    assert "Lugar de trabajo" in texto
+
+
 def test_ficha_cliente_shows_the_requested_loan_terms():
     html = documents.ficha_cliente_html(_FakeLoanCompleto, _FakeClientCompleto)
     texto = _texto_plano(html)

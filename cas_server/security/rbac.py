@@ -42,9 +42,13 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     "/clients.ClientService/SearchClients": CASHIER_AND_ABOVE,
     "/clients.ClientService/UpdateClient": CREDIT_ANALYST_AND_ABOVE,
     "/clients.ClientService/DeactivateClient": MANAGER_AND_ABOVE,  # BR-CLI-004
-    "/clients.ClientService/UpdateNationalId": frozenset(
-        {RoleEnum.ADMIN}
-    ),  # BR-CLI-003
+    # BR-CLI-003: corrección del documento de identidad. Antes exclusiva de
+    # ADMIN; por decisión del negocio ahora acompaña a la edición general del
+    # cliente (CREDIT_ANALYST_AND_ABOVE) -- quien puede corregir nombre,
+    # dirección o referencias también puede corregir un número de cédula mal
+    # tipeado, sin escalar. Sigue siendo su propia acción auditada
+    # (CLIENTE_DOCUMENTO_CAMBIADO en el AuditLog), lo que cambió es el rol.
+    "/clients.ClientService/UpdateNationalId": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/CreateLoan": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/UpdateLoanProposal": CREDIT_ANALYST_AND_ABOVE,  # BR-LOAN-004
     "/loans.LoanService/UpdateLoanGuarantee": CREDIT_ANALYST_AND_ABOVE,  # BR-LOAN-005

@@ -457,6 +457,24 @@ class ClientsView(BaseView):
         header.addWidget(self._detail_status)
         layout.addWidget(header_frame)
 
+        # Nombre, apellido y documento son editables acá para poder corregir
+        # un error de tipeo (BR-CLI-003 dejó de ser una acción aparte
+        # solo-Admin, ver rbac.py); el documento sigue con su propia acción
+        # auditada más abajo porque ya registra el valor anterior/nuevo.
+        identity_frame, identity = card()
+        identity.addWidget(section_label("Datos personales"))
+        identity_grid = ResponsiveGrid(min_cell_width=220)
+        first_name_field, self._detail_first_name = labeled_field(
+            "Nombre", required=True
+        )
+        identity_grid.add_widget(first_name_field)
+        last_name_field, self._detail_last_name = labeled_field(
+            "Apellido", required=True
+        )
+        identity_grid.add_widget(last_name_field)
+        identity.addWidget(identity_grid)
+        layout.addWidget(identity_frame)
+
         contact_frame, contact = card()
         contact.addWidget(section_label("Datos de contacto"))
         grid = ResponsiveGrid(min_cell_width=220)
@@ -577,6 +595,8 @@ class ClientsView(BaseView):
             f"Documento: {client.national_id} · "
             f"{'Activo' if client.is_active else 'Inactivo'}"
         )
+        self._detail_first_name.setText(client.first_name)
+        self._detail_last_name.setText(client.last_name)
         self._detail_email.setText(client.email)
         self._detail_phone.setText(client.phone_number)
         self._detail_address.setText(client.address)
@@ -594,6 +614,8 @@ class ClientsView(BaseView):
         self._detail_ref_job_seniority.setText(client.employment_reference_seniority)
 
         for widget in (
+            self._detail_first_name,
+            self._detail_last_name,
             self._detail_email,
             self._detail_phone,
             self._detail_address,
@@ -615,9 +637,11 @@ class ClientsView(BaseView):
         self._deactivate_button.setEnabled(
             client.is_active and role_at_least(role, "MANAGER")
         )
-        can_change_national_id = role_at_least(role, "ADMIN")
-        self._new_national_id_input.setEnabled(can_change_national_id)
-        self._change_national_id_button.setEnabled(can_change_national_id)
+        # BR-CLI-003: corregir el documento dejó de ser exclusivo de ADMIN,
+        # ahora acompaña al resto de la edición de clientes (ver rbac.py).
+        can_edit = can_originate_credit(role)
+        self._new_national_id_input.setEnabled(can_edit)
+        self._change_national_id_button.setEnabled(can_edit)
 
         self._stack.setCurrentIndex(_PAGE_DETAIL)
 
@@ -625,6 +649,8 @@ class ClientsView(BaseView):
         if self._selected_client_id is None:
             return
         required_fields = (
+            (self._detail_first_name, "first_name"),
+            (self._detail_last_name, "last_name"),
             (self._detail_email, "email"),
             (self._detail_phone, "phone_number"),
             (self._detail_address, "address"),
@@ -661,12 +687,16 @@ class ClientsView(BaseView):
             error_translator=_friendly_message,
             **fields,
         )
-        self._worker.succeeded.connect(
-            lambda _r: self._toast.show_message("Cambios guardados.")
-        )
+        self._worker.succeeded.connect(self._on_update_success)
         self._worker.failed.connect(self._on_error)
         self._worker.finished.connect(lambda: self._set_loading(False))
         self._worker.start()
+
+    def _on_update_success(self, _response) -> None:
+        self._toast.show_message("Cambios guardados.")
+        self._detail_title.setText(
+            f"{self._detail_first_name.text()} {self._detail_last_name.text()}"
+        )
 
     def _on_deactivate(self) -> None:
         if self._selected_client_id is None:

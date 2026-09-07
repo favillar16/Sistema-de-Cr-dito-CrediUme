@@ -316,6 +316,10 @@ def ficha_cliente_docx(loan, client) -> Document:
             ("Email", client.email),
             ("Teléfono", client.phone_number),
             ("Dirección", client.address),
+            (
+                "Lugar de trabajo",
+                client.employment_reference_employer or "No registrado",
+            ),
         ],
     )
 

@@ -737,7 +737,8 @@ def ficha_cliente_html(loan, client) -> str:
     <b>Cliente desde:</b> {fecha_hora(client.created_at.ToDatetime())}<br/>
     <b>Email:</b> {client.email}<br/>
     <b>Tel&eacute;fono:</b> {client.phone_number}<br/>
-    <b>Direcci&oacute;n:</b> {client.address}</p>
+    <b>Direcci&oacute;n:</b> {client.address}<br/>
+    <b>Lugar de trabajo:</b> {client.employment_reference_employer or "No registrado"}</p>
 
     <h3 style="color:{theme.PRIMARY};">Situaci&oacute;n financiera declarada</h3>
     <p><b>Ingreso mensual declarado:</b>

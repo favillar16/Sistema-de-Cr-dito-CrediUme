@@ -20,7 +20,8 @@ service ClientService {
     // Inhabilitación (soft delete) de un cliente -- BR-CLI-004 (Manager o superior)
     rpc DeactivateClient (DeactivateClientRequest) returns (DeactivateClientResponse);
 
-    // Cambio del documento de identidad -- BR-CLI-003 (Solo Admin, auditado)
+    // Cambio del documento de identidad -- BR-CLI-003 (auditado; mismo rol
+    // que UpdateClient, ver rbac.py)
     rpc UpdateNationalId (UpdateNationalIdRequest) returns (UpdateNationalIdResponse);
 }
 
@@ -114,6 +115,13 @@ message UpdateClientRequest {
     string email = 2;
     string phone_number = 3;
     string address = 4;
+    // Nombre y apellido -- editables acá para poder corregir un error de
+    // tipeo (mismo rol que el resto de UpdateClient). El documento de
+    // identidad sigue siendo su propia acción auditada (UpdateNationalId,
+    // BR-CLI-003), que dejó de ser solo-Admin pero se mantiene aparte porque
+    // ya tiene su propio registro de auditoría con el valor anterior/nuevo.
+    string first_name = 24;
+    string last_name = 25;
     optional string declared_monthly_income = 5;
     // Referencias personales y laboral -- obligatorias (BR-CLI-005).
     string personal_reference_1_name = 6;

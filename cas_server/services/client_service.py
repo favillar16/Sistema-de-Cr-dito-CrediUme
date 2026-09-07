@@ -246,10 +246,17 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
     def UpdateClient(self, request, context):
         client_id = analizar_uuid(request.client_id, "client_id", context)
 
-        if not (request.email and request.phone_number and request.address):
+        if not (
+            request.first_name
+            and request.last_name
+            and request.email
+            and request.phone_number
+            and request.address
+        ):
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
-                "email, phone_number y address son obligatorios",
+                "first_name, last_name, email, phone_number y address son "
+                "obligatorios",
             )
 
         referencias_requeridas = (
@@ -300,6 +307,8 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                         grpc.StatusCode.ALREADY_EXISTS, "el email ya está registrado"
                     )
 
+            cliente.first_name = request.first_name
+            cliente.last_name = request.last_name
             cliente.email = request.email
             cliente.phone_number = request.phone_number
             cliente.address = request.address

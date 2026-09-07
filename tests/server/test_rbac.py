@@ -48,10 +48,12 @@ def test_deactivate_client_is_manager_and_above():
     )
 
 
-def test_update_national_id_is_admin_only():
-    assert rbac.allowed_roles("/clients.ClientService/UpdateNationalId") == frozenset(
-        {RoleEnum.ADMIN}
-    )
+def test_update_national_id_matches_update_client():
+    # BR-CLI-003 dejó de ser exclusivo de ADMIN: acompaña al mismo rol que
+    # edita el resto de los datos del cliente.
+    assert rbac.allowed_roles(
+        "/clients.ClientService/UpdateNationalId"
+    ) == rbac.allowed_roles("/clients.ClientService/UpdateClient")
 
 
 def test_create_loan_is_credit_analyst_and_above():

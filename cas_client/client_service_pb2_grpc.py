@@ -105,7 +105,8 @@ class ClientServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def UpdateNationalId(self, request, context):
-        """Cambio del documento de identidad -- BR-CLI-003 (Solo Admin, auditado)
+        """Cambio del documento de identidad -- BR-CLI-003 (auditado; mismo rol
+        que UpdateClient, ver rbac.py)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

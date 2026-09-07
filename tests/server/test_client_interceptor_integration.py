@@ -157,28 +157,30 @@ def test_deactivate_client_requires_manager_or_above(stubs):
     assert response.success
 
 
-def test_update_national_id_requires_admin(stubs):
+def test_update_national_id_requires_credit_analyst_or_above(stubs):
+    """BR-CLI-003 dejó de ser exclusivo de ADMIN: acompaña al mismo rol que
+    edita el resto de los datos del cliente (CREDIT_ANALYST_AND_ABOVE)."""
     auth_stub, client_stub = stubs
-    _create_user("manager_n", "Passw0rd!", RoleEnum.MANAGER)
-    _create_user("admin_n", "Passw0rd!", RoleEnum.ADMIN)
+    _create_user("cashier_n", "Passw0rd!", RoleEnum.CASHIER)
+    _create_user("analyst_n", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
     client_id = _create_client_row(national_id="5000003", email="natid1@example.com")
 
-    manager_metadata = _login(auth_stub, "manager_n", "Passw0rd!")
+    cashier_metadata = _login(auth_stub, "cashier_n", "Passw0rd!")
     with pytest.raises(grpc.RpcError) as exc_info:
         client_stub.UpdateNationalId(
             client_service_pb2.UpdateNationalIdRequest(
                 client_id=str(client_id), new_national_id="5000004"
             ),
-            metadata=manager_metadata,
+            metadata=cashier_metadata,
         )
     assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
 
-    admin_metadata = _login(auth_stub, "admin_n", "Passw0rd!")
+    analyst_metadata = _login(auth_stub, "analyst_n", "Passw0rd!")
     response = client_stub.UpdateNationalId(
         client_service_pb2.UpdateNationalIdRequest(
             client_id=str(client_id), new_national_id="5000004"
         ),
-        metadata=admin_metadata,
+        metadata=analyst_metadata,
     )
     assert response.success
 

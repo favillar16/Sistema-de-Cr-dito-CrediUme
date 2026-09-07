@@ -327,6 +327,8 @@ def test_update_client_success_updates_contact_fields(servicer):
     response = servicer.UpdateClient(
         client_service_pb2.UpdateClientRequest(
             client_id=str(client_id),
+            first_name="Ana",
+            last_name="Gomez Corregida",
             email="after@example.com",
             phone_number="0987654321",
             address="Nueva Direccion",
@@ -340,6 +342,7 @@ def test_update_client_success_updates_contact_fields(servicer):
     fetched = servicer.GetClientById(
         client_service_pb2.GetClientByIdRequest(client_id=str(client_id)), FakeContext()
     )
+    assert fetched.last_name == "Gomez Corregida"
     assert fetched.email == "after@example.com"
     assert fetched.address == "Nueva Direccion"
     assert fetched.declared_monthly_income == "3000.00"
@@ -353,6 +356,8 @@ def test_update_client_email_conflict_is_already_exists(servicer):
         servicer.UpdateClient(
             client_service_pb2.UpdateClientRequest(
                 client_id=str(client_id),
+                first_name="Ana",
+                last_name="Gomez",
                 email="taken@example.com",
                 phone_number="0981000009",
                 address="Direccion X",
@@ -361,6 +366,53 @@ def test_update_client_email_conflict_is_already_exists(servicer):
             FakeContext(),
         )
     assert exc_info.value.code == grpc.StatusCode.ALREADY_EXISTS
+
+
+def test_update_client_can_correct_the_name(servicer):
+    """El nombre y apellido son editables junto con el resto de los datos del
+    cliente -- para poder corregir un error de tipeo, sin pasar por una
+    acción aparte (a diferencia del documento, ver UpdateNationalId)."""
+    client_id = _create_client(
+        first_name="Ana", last_name="Gomez", national_id="1919191"
+    )
+
+    response = servicer.UpdateClient(
+        client_service_pb2.UpdateClientRequest(
+            client_id=str(client_id),
+            first_name="Anna",
+            last_name="Gómez",
+            email="ana@example.com",
+            phone_number="0981000000",
+            address="Calle Falsa 123",
+            **_VALID_REFERENCES,
+        ),
+        FakeContext(),
+    )
+    assert response.success
+
+    fetched = servicer.GetClientById(
+        client_service_pb2.GetClientByIdRequest(client_id=str(client_id)), FakeContext()
+    )
+    assert fetched.first_name == "Anna"
+    assert fetched.last_name == "Gómez"
+
+
+def test_update_client_missing_name_is_invalid_argument(servicer):
+    client_id = _create_client(national_id="2020202", email="noname@example.com")
+
+    with pytest.raises(AbortCalled) as exc_info:
+        servicer.UpdateClient(
+            client_service_pb2.UpdateClientRequest(
+                client_id=str(client_id),
+                last_name="Gomez",
+                email="noname@example.com",
+                phone_number="0981000000",
+                address="Calle Falsa 123",
+                **_VALID_REFERENCES,
+            ),
+            FakeContext(),
+        )
+    assert exc_info.value.code == grpc.StatusCode.INVALID_ARGUMENT
 
 
 def test_deactivate_client_blocked_by_non_paid_loan(servicer):
