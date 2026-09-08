@@ -32,6 +32,11 @@ from cas_client.formatting import (
     rate_percent_mensual,
 )
 from cas_client.grpc_client import ApiError, ClientServiceClient, LoanServiceClient
+from cas_client.loan_math import (
+    CuotaInalcanzable,
+    cargo_para_cuota_objetivo,
+    cuota_estimada,
+)
 from cas_client.rbac_ui import (
     FIXED_INTEREST_RATE,
     MAX_CHARGES_RATIO,
@@ -785,6 +790,28 @@ class LoansView(BaseView):
             setattr(self, f"{prefix}{attribute}", widget)
         charges.addWidget(charges_grid)
 
+        # -- Cuota objetivo: se escribe la cuota, se calcula el cargo --
+        # El operador razona en cuotas redondas ("que pague 250.000"), no en
+        # cargos. Este campo invierte la cuenta: calcula el gasto
+        # administrativo que hace que la cuota dé ese monto, y lo escribe en
+        # el campo de arriba, que sigue siendo editable a mano.
+        target_grid = ResponsiveGrid(min_cell_width=220)
+        target_field, target_input = labeled_field(
+            "Cuota deseada (Gs) — opcional", "Ej. 250.000", input_cls=CurrencyInput
+        )
+        target_grid.add_widget(target_field)
+        setattr(self, f"{prefix}_target_installment", target_input)
+        charges.addWidget(target_grid)
+
+        target_feedback = QLabel("")
+        target_feedback.setWordWrap(True)
+        target_feedback.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        charges.addWidget(target_feedback)
+        setattr(self, f"{prefix}_target_feedback", target_feedback)
+        target_input.editingFinished.connect(
+            lambda: self._apply_target_installment(prefix)
+        )
+
         # BR-LOAN-006: sugiere el tope de "Gastos administrativos por
         # desembolso" (25% anual del capital, prorrateado por el plazo) en
         # cuanto el operador completa capital y plazo, para que no tenga que
@@ -792,6 +819,15 @@ class LoansView(BaseView):
         # servidor vuelve a validar el tope real al guardar.
         principal_input.editingFinished.connect(lambda: self._suggest_admin_fee(prefix))
         term_input.editingFinished.connect(lambda: self._suggest_admin_fee(prefix))
+        # Si cambian capital o plazo despues de fijar una cuota objetivo, el
+        # cargo calculado deja de producir esa cuota: se recalcula solo, si no
+        # el formulario mostraria una cuota que ya no es la que va a salir.
+        principal_input.editingFinished.connect(
+            lambda: self._apply_target_installment(prefix, solo_si_ya_hay=True)
+        )
+        term_input.editingFinished.connect(
+            lambda: self._apply_target_installment(prefix, solo_si_ya_hay=True)
+        )
         charges_hint = QLabel(_CHARGES_HINT)
         charges_hint.setWordWrap(True)
         charges_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
@@ -859,6 +895,86 @@ class LoansView(BaseView):
             Decimal(principal) * MAX_CHARGES_RATIO / Decimal(12) * term_months
         ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         admin_fee_input.set_amount(str(sugerido))
+
+    def _apply_target_installment(
+        self, prefix: str, solo_si_ya_hay: bool = False
+    ) -> None:
+        """Calcula el gasto administrativo que hace que la cuota dé el monto
+        que el operador escribió en "Cuota deseada".
+
+        Es la inversa de la cuenta que hace el cronograma, y existe porque el
+        operador negocia en cuotas redondas, no en cargos: sin esto tendría que
+        tantear el monto del cargo hasta que la cuota diera lo que quiere.
+
+        **El excedente entra como cargo financiado, no como interés.** La tasa
+        es fija por ley en el 20% (BR-LOAN-007) y este campo no la toca; lo que
+        sube la cuota es un gasto administrativo acotado por el tope del 25%
+        (BR-LOAN-006). Si la cuota pedida exigiera pasarse de ese tope, se
+        avisa y **no** se escribe nada: recortar en silencio dejaría al
+        operador creyendo que cargó una cuota que el servidor no va a producir.
+
+        `solo_si_ya_hay` es para los reenganches desde capital/plazo: si esos
+        cambian después de fijar una cuota objetivo, el cargo ya calculado deja
+        de producirla, así que se recalcula -- pero sin molestar cuando el
+        operador nunca usó este campo.
+        """
+        target_input = getattr(self, f"{prefix}_target_installment")
+        feedback = getattr(self, f"{prefix}_target_feedback")
+        objetivo_texto = target_input.raw_value()
+        if not objetivo_texto:
+            if not solo_si_ya_hay:
+                feedback.setText("")
+            return
+        if solo_si_ya_hay and not objetivo_texto:
+            return
+
+        principal = getattr(self, f"{prefix}_principal").raw_value()
+        term_text = getattr(self, f"{prefix}_term").text().strip()
+        if not (principal and term_text):
+            feedback.setText("Complete primero el capital y el plazo.")
+            return
+        try:
+            term_months = int(term_text)
+        except ValueError:
+            feedback.setText("El plazo debe ser un número entero de meses.")
+            return
+
+        # El tope es sobre la suma de los cuatro cargos, así que el
+        # administrativo solo puede ocupar lo que los otros tres dejan libre.
+        otros = Decimal("0")
+        for attribute, _label, _field in _CHARGE_FIELDS:
+            if attribute == "_charge_admin_fee":
+                continue
+            valor = getattr(self, f"{prefix}{attribute}").raw_value()
+            if valor:
+                otros += Decimal(valor)
+
+        try:
+            cargo = cargo_para_cuota_objetivo(
+                Decimal(principal),
+                Decimal(FIXED_INTEREST_RATE),
+                term_months,
+                Decimal(objetivo_texto),
+                otros_cargos=otros,
+                ratio_maximo=MAX_CHARGES_RATIO,
+            )
+        except CuotaInalcanzable as exc:
+            feedback.setText(str(exc))
+            feedback.setStyleSheet(f"color: {theme.ERROR}; font-size: 12px;")
+            return
+
+        getattr(self, f"{prefix}_charge_admin_fee").set_amount(str(cargo))
+        resultante = cuota_estimada(
+            Decimal(principal),
+            Decimal(FIXED_INTEREST_RATE),
+            term_months,
+            otros + cargo,
+        )
+        feedback.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        feedback.setText(
+            f"Gastos administrativos fijados en {gs(str(cargo))} para que las "
+            f"{term_months} cuotas queden en {gs(str(resultante))}."
+        )
 
     def _proposal_fields(self, prefix: str) -> dict | None:
         """Lee un formulario de propuesta y devuelve los argumentos de la RPC,
@@ -1733,13 +1849,19 @@ class LoansView(BaseView):
         # celda -- por eso quedaba a un ancho que recortaba el botón a "ust".
         # Se fija a partir del sizeHint real del mismo botón que se va a
         # insertar, en vez de un número mágico que dependa de la fuente.
+        # Una fila ajustada lleva dos botones ("Ajustar" y "Quitar",
+        # BR-LOAN-015), así que el ancho se mide sobre los dos y no sobre uno
+        # solo -- si no, en esas filas el segundo botón queda recortado.
         probe = QPushButton("Ajustar")
         probe.setStyleSheet(theme.flat_button_style())
+        probe_remove = QPushButton("Quitar")
+        probe_remove.setStyleSheet(theme.flat_button_style())
         self._schedule_table.horizontalHeader().setSectionResizeMode(
             _SCHEDULE_COL_ADJUST, QHeaderView.ResizeMode.Fixed
         )
         self._schedule_table.setColumnWidth(
-            _SCHEDULE_COL_ADJUST, probe.sizeHint().width() + 32
+            _SCHEDULE_COL_ADJUST,
+            probe.sizeHint().width() + probe_remove.sizeHint().width() + 40,
         )
         self._schedule_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
@@ -1807,11 +1929,11 @@ class LoansView(BaseView):
                 and installment.installment_number >= self._detail_loan.term_months
             )
             if can_adjust and not is_last_installment:
-                button = QPushButton("Ajustar")
-                button.setCursor(Qt.CursorShape.PointingHandCursor)
-                button.setStyleSheet(theme.flat_button_style())
-                self._connect_adjust_button(button, installment)
-                self._schedule_table.setCellWidget(row, _SCHEDULE_COL_ADJUST, button)
+                self._schedule_table.setCellWidget(
+                    row,
+                    _SCHEDULE_COL_ADJUST,
+                    self._schedule_actions_widget(installment),
+                )
 
         self._schedule_paid_value.setText(gs(response.total_paid))
         self._schedule_remaining_value.setText(gs(response.remaining_balance))
@@ -1855,6 +1977,87 @@ class LoansView(BaseView):
 
     def _on_installment_adjusted(self) -> None:
         self._toast.show_message("Cuota ajustada.")
+        self._on_view_schedule()
+
+    def _schedule_actions_widget(self, installment) -> QWidget:
+        """Celda de acciones del cronograma: siempre "Ajustar", y además
+        "Quitar" cuando esa cuota tiene un ajuste manual (BR-LOAN-015).
+
+        El botón de quitar aparece solo en las filas ajustadas porque no hay
+        nada que quitar en las demás -- misma convención de
+        ocultar-en-vez-de-deshabilitar que usa la barra lateral."""
+        container = QWidget()
+        row_layout = QHBoxLayout(container)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+
+        adjust_button = QPushButton("Ajustar")
+        adjust_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        adjust_button.setStyleSheet(theme.flat_button_style())
+        self._connect_adjust_button(adjust_button, installment)
+        row_layout.addWidget(adjust_button)
+
+        if installment.is_adjusted:
+            remove_button = QPushButton("Quitar")
+            remove_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            remove_button.setStyleSheet(theme.flat_button_style())
+            remove_button.setToolTip(
+                "Devuelve la cuota al monto calculado por el cronograma"
+            )
+            self._connect_remove_button(remove_button, installment)
+            row_layout.addWidget(remove_button)
+
+        return container
+
+    def _connect_remove_button(self, button: QPushButton, installment) -> None:
+        """Mismo truco de alcance que _connect_adjust_button: el número de
+        cuota queda capturado en un scope propio por llamada."""
+        numero = installment.installment_number
+        button.clicked.connect(
+            lambda _checked=False: self._on_remove_adjustment(numero)
+        )
+
+    def _on_remove_adjustment(self, installment_number: int) -> None:
+        """BR-LOAN-015: devuelve la cuota al monto que calcula el cronograma.
+
+        Pide el motivo (el servidor lo exige) y, como en _on_revert_default,
+        sin diálogo previo de confirmación: la acción es reversible -- se puede
+        volver a ajustar la cuota -- así que dos ventanas seguidas serían
+        ruido. Volver a tipear el monto original **no** equivale a esto: el
+        reparto del saldo se recalcula sobre los períodos restantes y la cuota
+        quedaría marcada como ajustada igual.
+        """
+        if self._selected_loan_id is None:
+            return
+        motivo, ok = QInputDialog.getText(
+            self,
+            "Quitar ajuste de cuota",
+            f"Indique por qué se quita el ajuste de la cuota "
+            f"{installment_number} (queda auditado):",
+        )
+        if not ok:
+            return
+        motivo = motivo.strip()
+        if not motivo:
+            self._toast.show_message("Debe indicar el motivo para quitar el ajuste.")
+            return
+
+        self._set_loading(True)
+        self._worker = AsyncWorker(
+            self._client.remove_installment_adjustment,
+            self._session.access_token,
+            error_translator=_friendly_message,
+            loan_id=self._selected_loan_id,
+            installment_number=installment_number,
+            reason=motivo,
+        )
+        self._worker.succeeded.connect(lambda _r: self._on_adjustment_removed())
+        self._worker.failed.connect(self._on_error)
+        self._worker.finished.connect(lambda: self._set_loading(False))
+        self._worker.start()
+
+    def _on_adjustment_removed(self) -> None:
+        self._toast.show_message("Ajuste quitado: la cuota vuelve al monto calculado.")
         self._on_view_schedule()
 
     # ---- Documentos (Liquidación / Pagaré / Contrato) ----------------------

@@ -1113,6 +1113,190 @@ def test_update_installment_amount_not_found(servicer):
     assert exc_info.value.code == grpc.StatusCode.NOT_FOUND
 
 
+def test_remove_installment_adjustment_restores_the_computed_schedule(servicer):
+    """BR-LOAN-015: quitar el ajuste tiene que devolver el cronograma exacto que
+    había antes de ajustar -- que es justamente lo que NO se logra volviendo a
+    tipear el monto original (el reparto se recalcula sobre los períodos
+    restantes y corre los centavos a las cuotas siguientes)."""
+    client_id = _create_client()
+    loan_id = _activate_loan(
+        servicer, client_id, principal="1200.00", rate="0.12", term=12
+    )
+
+    original = servicer.GetAmortizationSchedule(
+        loan_service_pb2.GetAmortizationScheduleRequest(loan_id=loan_id), FakeContext()
+    )
+    montos_originales = [fila.payment_amount for fila in original.installments]
+
+    servicer.UpdateInstallmentAmount(
+        loan_service_pb2.UpdateInstallmentAmountRequest(
+            loan_id=loan_id, installment_number=2, adjusted_amount="200.00"
+        ),
+        FakeContext(),
+    )
+    response = servicer.RemoveInstallmentAdjustment(
+        loan_service_pb2.RemoveInstallmentAdjustmentRequest(
+            loan_id=loan_id, installment_number=2, reason="cargado por error"
+        ),
+        FakeContext(),
+    )
+    assert response.success
+    assert response.status == "ACTIVE"
+
+    restaurado = servicer.GetAmortizationSchedule(
+        loan_service_pb2.GetAmortizationScheduleRequest(loan_id=loan_id), FakeContext()
+    )
+    assert [fila.payment_amount for fila in restaurado.installments] == (
+        montos_originales
+    )
+    assert all(not fila.is_adjusted for fila in restaurado.installments)
+
+    with SessionLocal() as session:
+        from cas_server.db.models import LoanInstallmentAdjustment
+
+        count = (
+            session.query(LoanInstallmentAdjustment)
+            .filter(LoanInstallmentAdjustment.loan_id == loan_id)
+            .count()
+        )
+        assert count == 0
+
+
+def test_remove_installment_adjustment_requires_a_reason(servicer):
+    client_id = _create_client()
+    loan_id = _activate_loan(
+        servicer, client_id, principal="1200.00", rate="0.12", term=12
+    )
+    servicer.UpdateInstallmentAmount(
+        loan_service_pb2.UpdateInstallmentAmountRequest(
+            loan_id=loan_id, installment_number=2, adjusted_amount="200.00"
+        ),
+        FakeContext(),
+    )
+
+    with pytest.raises(AbortCalled) as exc_info:
+        servicer.RemoveInstallmentAdjustment(
+            loan_service_pb2.RemoveInstallmentAdjustmentRequest(
+                loan_id=loan_id, installment_number=2, reason="   "
+            ),
+            FakeContext(),
+        )
+    assert exc_info.value.code == grpc.StatusCode.INVALID_ARGUMENT
+
+
+def test_remove_installment_adjustment_rejects_installment_without_adjustment(servicer):
+    client_id = _create_client()
+    loan_id = _activate_loan(
+        servicer, client_id, principal="1200.00", rate="0.12", term=12
+    )
+
+    with pytest.raises(AbortCalled) as exc_info:
+        servicer.RemoveInstallmentAdjustment(
+            loan_service_pb2.RemoveInstallmentAdjustmentRequest(
+                loan_id=loan_id, installment_number=3, reason="no existe"
+            ),
+            FakeContext(),
+        )
+    assert exc_info.value.code == grpc.StatusCode.NOT_FOUND
+
+
+def test_remove_installment_adjustment_rejects_non_active_loan(servicer):
+    client_id = _create_client()
+    loan = _create_loan(servicer, client_id)
+
+    with pytest.raises(AbortCalled) as exc_info:
+        servicer.RemoveInstallmentAdjustment(
+            loan_service_pb2.RemoveInstallmentAdjustmentRequest(
+                loan_id=loan.loan_id, installment_number=1, reason="x"
+            ),
+            FakeContext(),
+        )
+    assert exc_info.value.code == grpc.StatusCode.FAILED_PRECONDITION
+
+
+def test_remove_installment_adjustment_not_found(servicer):
+    with pytest.raises(AbortCalled) as exc_info:
+        servicer.RemoveInstallmentAdjustment(
+            loan_service_pb2.RemoveInstallmentAdjustmentRequest(
+                loan_id="00000000-0000-0000-0000-000000000000",
+                installment_number=1,
+                reason="x",
+            ),
+            FakeContext(),
+        )
+    assert exc_info.value.code == grpc.StatusCode.NOT_FOUND
+
+
+def test_remove_installment_adjustment_refuses_to_leave_a_negative_balance(servicer):
+    """Con más de un ajuste, quitar uno chico hace que esa cuota vuelva a
+    amortizar la porción normal (mayor), el saldo baja más rápido y el ajuste
+    grande que viene después puede pasarse del saldo que queda. El servidor
+    valida el cronograma resultante en vez de dejar el préstamo en un estado
+    imposible."""
+    client_id = _create_client()
+    loan_id = _activate_loan(
+        servicer, client_id, principal="1200.00", rate="0.00", term=12
+    )
+
+    # Cuota 2 chica (amortiza casi nada) y cuota 3 tan grande que solo entra
+    # gracias al saldo que la cuota 2 dejó sin amortizar.
+    servicer.UpdateInstallmentAmount(
+        loan_service_pb2.UpdateInstallmentAmountRequest(
+            loan_id=loan_id, installment_number=2, adjusted_amount="1.00"
+        ),
+        FakeContext(),
+    )
+    servicer.UpdateInstallmentAmount(
+        loan_service_pb2.UpdateInstallmentAmountRequest(
+            loan_id=loan_id, installment_number=3, adjusted_amount="1010.00"
+        ),
+        FakeContext(),
+    )
+
+    with pytest.raises(AbortCalled) as exc_info:
+        servicer.RemoveInstallmentAdjustment(
+            loan_service_pb2.RemoveInstallmentAdjustmentRequest(
+                loan_id=loan_id, installment_number=2, reason="revertir"
+            ),
+            FakeContext(),
+        )
+    assert exc_info.value.code == grpc.StatusCode.FAILED_PRECONDITION
+
+
+def test_remove_installment_adjustment_writes_an_audit_entry(servicer):
+    """La fila del ajuste se borra, así que el AuditLog es lo único que queda
+    para saber qué monto tenía y por qué se quitó."""
+    client_id = _create_client()
+    loan_id = _activate_loan(
+        servicer, client_id, principal="1200.00", rate="0.12", term=12
+    )
+    servicer.UpdateInstallmentAmount(
+        loan_service_pb2.UpdateInstallmentAmountRequest(
+            loan_id=loan_id, installment_number=2, adjusted_amount="200.00"
+        ),
+        FakeContext(),
+    )
+    servicer.RemoveInstallmentAdjustment(
+        loan_service_pb2.RemoveInstallmentAdjustmentRequest(
+            loan_id=loan_id, installment_number=2, reason="se cargó mal"
+        ),
+        FakeContext(),
+    )
+
+    with SessionLocal() as session:
+        from cas_server.db.models import AuditLog
+
+        acciones = [
+            fila.action
+            for fila in session.query(AuditLog).all()
+            if fila.action.startswith("PRESTAMO_AJUSTE_CUOTA_QUITADO")
+        ]
+    assert len(acciones) == 1
+    assert "numero=2" in acciones[0]
+    assert "monto_anterior=200.00" in acciones[0]
+    assert "se cargó mal" in acciones[0]
+
+
 def test_record_payment_respects_adjusted_total_programado(servicer):
     """El ajuste de una cuota cambia el total programado que RecordPayment usa
     (vía _totales_prestamo) para decidir la transición a PAID."""

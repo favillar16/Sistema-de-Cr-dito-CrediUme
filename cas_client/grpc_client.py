@@ -385,6 +385,16 @@ class LoanServiceClient:
             error_cls=ApiError,
         )
 
+    def remove_installment_adjustment(
+        self, access_token: str, **fields
+    ) -> loan_service_pb2.RemoveInstallmentAdjustmentResponse:
+        return _invoke(
+            self._stub.RemoveInstallmentAdjustment,
+            loan_service_pb2.RemoveInstallmentAdjustmentRequest(**fields),
+            access_token=access_token,
+            error_cls=ApiError,
+        )
+
     def get_loan_by_id(
         self, access_token: str, loan_id: str
     ) -> loan_service_pb2.GetLoanByIdResponse:
