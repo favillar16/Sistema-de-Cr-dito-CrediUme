@@ -397,9 +397,9 @@ def test_charges_are_capitalized_into_what_the_borrower_must_repay(servicer):
     dejar los cargos fuera del cronograma, falle acá y no en la caja.
     """
     client_id = _create_client()
-    # BR-LOAN-006 (revisado 2026-08-28): los 4 cargos, sumados, no pueden
-    # superar el 25% anual del capital prorrateado por el plazo -- acá
-    # 1200.00 * 0.25 * 12/12 = 300.00, así que se reparten 200.00 en total
+    # BR-LOAN-006 (revisado 2026-09-08): los 4 cargos, sumados, no pueden
+    # superar el 40% anual del capital prorrateado por el plazo -- acá
+    # 1200.00 * 0.40 * 12/12 = 480.00, así que se reparten 200.00 en total
     # (bien por debajo del tope) para no ejercitar esa validación en un test
     # que lo que protege es otra cosa: que los cargos capitalizados sí mueven
     # el payoff.
@@ -451,11 +451,11 @@ def test_charges_are_capitalized_into_what_the_borrower_must_repay(servicer):
 
 
 def test_charges_can_be_loaded_with_the_loan_in_one_call(servicer):
-    """La propuesta entra completa en CreateLoan: sin esto el tope del 40% se
-    validaba sobre una cuota que todavía no incluía los cargos."""
+    """La propuesta entra completa en CreateLoan: sin esto el tope del 40% de
+    ingreso se validaba sobre una cuota que todavía no incluía los cargos."""
     client_id = _create_client()
-    # BR-LOAN-006 (revisado 2026-08-28): tope de 1200.00 * 0.25 * 12/12 =
-    # 300.00 -- los 200.00 de acá quedan por debajo.
+    # BR-LOAN-006 (revisado 2026-09-08): tope de 1200.00 * 0.40 * 12/12 =
+    # 480.00 -- los 200.00 de acá quedan por debajo.
     loan = _create_loan(
         servicer,
         client_id,
@@ -478,11 +478,11 @@ def test_charges_can_be_loaded_with_the_loan_in_one_call(servicer):
 
 
 def test_create_loan_rejects_charges_over_the_cap(servicer):
-    """BR-LOAN-006 (revisado 2026-08-28): los 4 cargos, sumados, no pueden
-    superar el 25% anual del capital prorrateado por el plazo -- el
-    complemento del interés legal del 20% (BR-LOAN-007) para llegar al 45%
-    anual pactado como costo total. Acá el tope es 1000.00 * 0.25 * 12/12 =
-    250.00; 260.00 lo supera por 10.00."""
+    """BR-LOAN-006 (revisado 2026-09-08): los 4 cargos, sumados, no pueden
+    superar el 40% anual del capital prorrateado por el plazo -- el
+    complemento del interés legal del 20% (BR-LOAN-007) para llegar al 60%
+    anual pactado como costo total. Acá el tope es 1000.00 * 0.40 * 12/12 =
+    400.00; 410.00 lo supera por 10.00."""
     client_id = _create_client()
 
     with pytest.raises(AbortCalled) as exc_info:
@@ -491,7 +491,7 @@ def test_create_loan_rejects_charges_over_the_cap(servicer):
                 client_id=str(client_id),
                 principal_amount="1000.00",
                 term_months=12,
-                charge_admin_fee="260.00",
+                charge_admin_fee="410.00",
             ),
             FakeContext(),
         )
@@ -499,8 +499,8 @@ def test_create_loan_rejects_charges_over_the_cap(servicer):
 
 
 def test_create_loan_accepts_charges_exactly_at_the_cap(servicer):
-    """El tope es un límite superior inclusivo: cargar exactamente el 25%
-    (250.00 sobre 1000.00 a 12 meses) no debe rechazarse."""
+    """El tope es un límite superior inclusivo: cargar exactamente el 40%
+    (400.00 sobre 1000.00 a 12 meses) no debe rechazarse."""
     client_id = _create_client()
 
     creado = servicer.CreateLoan(
@@ -508,20 +508,20 @@ def test_create_loan_accepts_charges_exactly_at_the_cap(servicer):
             client_id=str(client_id),
             principal_amount="1000.00",
             term_months=12,
-            charge_admin_fee="250.00",
+            charge_admin_fee="400.00",
         ),
         FakeContext(),
     )
     detalle = servicer.GetLoanById(
         loan_service_pb2.GetLoanByIdRequest(loan_id=creado.loan_id), FakeContext()
     )
-    assert detalle.total_charges == "250.00"
+    assert detalle.total_charges == "400.00"
 
 
 def test_update_loan_proposal_rejects_charges_over_the_cap(servicer):
     """Mismo tope, ejercitado por el otro camino de escritura de cargos:
     UpdateLoanProposal reemplaza la propuesta completa (BR-LOAN-004), así que
-    también puede ser la vía por la que se intente exceder el 25%."""
+    también puede ser la vía por la que se intente exceder el 40%."""
     client_id = _create_client()
     loan = _create_loan(servicer, client_id, principal="1000.00", term=12)
 
@@ -532,7 +532,7 @@ def test_update_loan_proposal_rejects_charges_over_the_cap(servicer):
                 principal_amount="1000.00",
                 term_months=12,
                 first_due_date="2026-09-01",
-                charge_admin_fee="260.00",
+                charge_admin_fee="410.00",
             ),
             FakeContext(),
         )
@@ -547,7 +547,7 @@ def test_update_loan_charges_rejects_charges_over_the_cap(servicer):
     with pytest.raises(AbortCalled) as exc_info:
         servicer.UpdateLoanCharges(
             loan_service_pb2.UpdateLoanChargesRequest(
-                loan_id=loan.loan_id, charge_admin_fee="260.00"
+                loan_id=loan.loan_id, charge_admin_fee="410.00"
             ),
             FakeContext(),
         )
@@ -593,14 +593,17 @@ def test_create_loan_without_a_rate_uses_the_fixed_one(servicer):
 
 
 def test_update_loan_charges_rejects_charges_that_break_the_income_cap(servicer):
-    """El tope del 40% pasó a depender de los cargos, así que UpdateLoanCharges
-    es un camino nuevo por el que se lo podía violar.
+    """El tope del 40% de ingreso (BR-LOAN-002) pasó a depender de los
+    cargos, así que UpdateLoanCharges es un camino nuevo por el que se lo
+    podía violar.
 
-    BR-LOAN-006 (revisado 2026-08-28) le puso un tope propio a los cargos
-    (25% anual del capital, acá 1960.00 * 0.25 * 12/12 = 490.00), así que el
-    monto elegido (460.00) se queda deliberadamente por debajo de ESE tope
-    -- si no, la llamada abortaría por el tope de cargos (INVALID_ARGUMENT)
-    antes de llegar a ejercitar el del 40% de ingreso que este test protege.
+    BR-LOAN-006 (revisado 2026-09-08) le puso un tope propio a los cargos
+    (40% anual del capital, acá 1960.00 * 0.40 * 12/12 = 784.00 -- un tope
+    distinto del de ingreso, pese a coincidir hoy en el mismo 40%), así que
+    el monto elegido (460.00) se queda deliberadamente por debajo de ESE
+    tope -- si no, la llamada abortaría por el tope de cargos
+    (INVALID_ARGUMENT) antes de llegar a ejercitar el de ingreso que este
+    test protege.
     """
     client_id = _create_client(declared_monthly_income=Decimal("500.00"))
     loan = _create_loan(servicer, client_id, principal="1960.00", rate="0.00", term=12)

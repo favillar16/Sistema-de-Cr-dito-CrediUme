@@ -765,10 +765,11 @@ class LoansView(BaseView):
         # que siga estando a la vista de quien arma la propuesta, pero no hay
         # nada que tipear ni un rol que la desbloquee. Revisado 2026-08-28: ya
         # no se llama "45%" a esto -- por ley el interés no puede superar el
-        # 20%, así que el resto hasta el 45% pactado se cobra como cargo
-        # administrativo financiado (ver la tarjeta de cargos, abajo), no
-        # como interés. El detalle de porcentajes no se explica en pantalla
-        # (queda en specs/loans/README) -- solo se avisa dónde está.
+        # 20%, así que el resto hasta el 60% pactado (revisado 2026-09-08,
+        # antes 45%) se cobra como cargo administrativo financiado (ver la
+        # tarjeta de cargos, abajo), no como interés. El detalle de
+        # porcentajes no se explica en pantalla (queda en
+        # specs/loans/README) -- solo se avisa dónde está.
         rate_line = QLabel(
             f"Interés legal: {fixed_interest_rate_percent()}% anual "
             f"({rate_percent_mensual(FIXED_INTEREST_RATE)} mensual sobre el "
@@ -828,7 +829,7 @@ class LoansView(BaseView):
         )
 
         # BR-LOAN-006: sugiere el tope de "Gastos administrativos por
-        # desembolso" (25% anual del capital, prorrateado por el plazo) en
+        # desembolso" (40% anual del capital, prorrateado por el plazo) en
         # cuanto el operador completa capital y plazo, para que no tenga que
         # calcularlo a mano. Solo sugiere -- no pisa un valor ya cargado, y el
         # servidor vuelve a validar el tope real al guardar.
@@ -900,7 +901,7 @@ class LoansView(BaseView):
 
     def _suggest_admin_fee(self, prefix: str) -> None:
         """BR-LOAN-006: sugiere "Gastos administrativos por desembolso" con
-        el tope de cargos (25% anual del capital, prorrateado por el plazo),
+        el tope de cargos (40% anual del capital, prorrateado por el plazo),
         para que el operador no tenga que calcularlo a mano.
 
         No pisa un monto ya cargado -- ni el que el operador haya tipeado, ni
@@ -939,7 +940,7 @@ class LoansView(BaseView):
 
         **El excedente entra como cargo financiado, no como interés.** La tasa
         es fija por ley en el 20% (BR-LOAN-007) y este campo no la toca; lo que
-        sube la cuota es un gasto administrativo acotado por el tope del 25%
+        sube la cuota es un gasto administrativo acotado por el tope del 40%
         (BR-LOAN-006). Si la cuota pedida exigiera pasarse de ese tope, se
         avisa y **no** se escribe nada: recortar en silencio dejaría al
         operador creyendo que cargó una cuota que el servidor no va a producir.

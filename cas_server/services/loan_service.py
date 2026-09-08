@@ -229,8 +229,9 @@ def _tope_cargos(capital: Decimal, plazo_meses: int) -> Decimal:
     Se mide sobre `principal_amount` (el capital solicitado), no sobre el
     monto financiado -- éste ya incluiría los cargos que el tope está
     limitando. Es el complemento de `LOAN_FIXED_INTEREST_RATE` (20% anual, el
-    máximo legal de interés) para llegar al 45% anual que la entidad fija
-    como costo total del crédito.
+    máximo legal de interés) para llegar al 60% anual que la entidad fija
+    como costo total del crédito (subió de 45% cuando el tope de cargos pasó
+    de 25% a 40%, 2026-09-08).
     """
     return (
         capital * config.LOAN_MAX_CHARGES_RATIO / Decimal(12) * plazo_meses
@@ -244,10 +245,12 @@ def _validar_tope_cargos(
 
     Los 4 cargos (BR-LOAN-006) siguen siendo de monto libre -- el operador
     los escribe a mano -- pero, desde que existe un interés legal fijo
-    (BR-LOAN-007, 20%) separado del costo total pactado (45%), la única
-    forma de no dejar que un cargo cargado a mano exceda el 25% que le
+    (BR-LOAN-007, 20%) separado del costo total pactado (60%), la única
+    forma de no dejar que un cargo cargado a mano exceda el 40% que le
     corresponde es validarlo acá, en el mismo punto donde ya se valida el
-    tope del 40% de BR-LOAN-002.
+    tope del 40% de ingreso de BR-LOAN-002 (dos topes del 40% distintos --
+    uno sobre el capital solicitado, el otro sobre el ingreso declarado del
+    cliente -- que coincidan en el número es casualidad, no la misma regla).
     """
     tope = _tope_cargos(capital, plazo_meses)
     if total_cargos > tope:

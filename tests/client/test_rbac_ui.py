@@ -89,11 +89,12 @@ def test_fixed_interest_rate_matches_server_side_constant():
 
 
 def test_max_charges_ratio_matches_server_side_constant():
-    # BR-LOAN-006 (revisado 2026-08-28): cas_server/config.py's
+    # BR-LOAN-006 (revisado 2026-09-08): cas_server/config.py's
     # LOAN_MAX_CHARGES_RATIO must stay in sync with this UI-side constant by
-    # hand, same caveat as FIXED_INTEREST_RATE above. 25% is the complement of
-    # the 20% legal interest cap to reach the entity's 45% total.
-    assert MAX_CHARGES_RATIO == Decimal("0.25")
+    # hand, same caveat as FIXED_INTEREST_RATE above. 40% is the complement of
+    # the 20% legal interest cap to reach the entity's 60% total (subió de
+    # 25%/45% por decisión del negocio).
+    assert MAX_CHARGES_RATIO == Decimal("0.40")
 
 
 def test_is_teller_only_matches_the_cashier_role():

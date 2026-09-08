@@ -57,7 +57,7 @@ def cargo_para_cuota_objetivo(
     plazo_meses: int,
     cuota_objetivo: Decimal,
     otros_cargos: Decimal = Decimal("0"),
-    ratio_maximo: Decimal = Decimal("0.25"),
+    ratio_maximo: Decimal = Decimal("0.40"),
 ) -> Decimal:
     """Cargo administrativo que hace que la cuota dé `cuota_objetivo`.
 
@@ -67,11 +67,13 @@ def cargo_para_cuota_objetivo(
 
     **El excedente entra como cargo, nunca como interés.** La tasa está fijada
     por ley en el 20% (BR-LOAN-007) y no se toca; lo que sube la cuota es un
-    gasto administrativo financiado, acotado por el tope del 25%
-    (BR-LOAN-006) -- que es exactamente el margen que la entidad ya usa. Por
-    eso el resultado se valida contra `tope_cargos` y no se recorta en
-    silencio: devolver un cargo que el servidor va a rechazar sería peor que
-    decir que la cuota pedida no se puede.
+    gasto administrativo financiado, acotado por el tope del 40%
+    (BR-LOAN-006, subido de 25% el 2026-09-08) -- que es exactamente el
+    margen que la entidad ya usa. Por eso el resultado se valida contra
+    `tope_cargos` y no se recorta en silencio: devolver un cargo que el
+    servidor va a rechazar sería peor que decir que la cuota pedida no se
+    puede. El valor por defecto acompaña a `rbac_ui.MAX_CHARGES_RATIO`; los
+    llamadores reales (`loans_view.py`) igual lo pasan explícito.
 
     `otros_cargos` son los otros tres cargos ya cargados en el formulario: el
     tope es sobre la *suma*, así que el administrativo solo puede ocupar lo

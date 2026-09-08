@@ -77,9 +77,13 @@ def test_respeta_los_otros_cargos_ya_cargados():
     assert _cuota_real(capital, TASA, plazo, cargo + otros) == Decimal("250000.00")
 
 
-def test_rechaza_una_cuota_por_encima_del_tope_del_25_por_ciento():
+def test_rechaza_una_cuota_por_encima_del_tope_del_40_por_ciento():
     """No recorta en silencio: un cargo por encima del tope lo rechazaría el
-    servidor (BR-LOAN-006), así que es mejor decirlo acá y nombrar el máximo."""
+    servidor (BR-LOAN-006), así que es mejor decirlo acá y nombrar el máximo.
+
+    2.348.590 Gs a 12 meses da un techo de 939.436 Gs de cargos (40% del
+    capital, BR-LOAN-006 revisado 2026-09-08); una cuota de 400.000 exigiría
+    939.436 (financiado 4.000.000, muy por encima)."""
     capital, plazo = Decimal("2348590"), 12
     with pytest.raises(CuotaInalcanzable) as exc:
         cargo_para_cuota_objetivo(capital, TASA, plazo, Decimal("400000"))
@@ -90,13 +94,14 @@ def test_la_cuota_maxima_que_anuncia_el_error_es_realmente_alcanzable():
     """El mensaje nombra un máximo: ese número tiene que ser cierto contra el
     cronograma real, si no manda al operador a probar algo que tampoco entra."""
     capital, plazo = Decimal("2348590"), 12
-    techo = tope_cargos(capital, Decimal("0.25"), plazo)
+    ratio = Decimal("0.40")  # cas_server/config.py's LOAN_MAX_CHARGES_RATIO
+    techo = tope_cargos(capital, ratio, plazo)
     maxima = cuota_estimada(capital, TASA, plazo, techo)
     assert _cuota_real(capital, TASA, plazo, techo) == maxima
     # y pedir exactamente esa cuota tiene que entrar sin pasarse del tope
-    # (redondear el cargo hacia arriba lo habría cruzado por 0,50 Gs y el
-    # servidor lo habría rechazado con INVALID_ARGUMENT)
-    cargo = cargo_para_cuota_objetivo(capital, TASA, plazo, maxima)
+    # (redondear el cargo hacia arriba lo cruzaría por unos céntimos y el
+    # servidor lo rechazaría con INVALID_ARGUMENT)
+    cargo = cargo_para_cuota_objetivo(capital, TASA, plazo, maxima, ratio_maximo=ratio)
     assert cargo <= techo
 
 
