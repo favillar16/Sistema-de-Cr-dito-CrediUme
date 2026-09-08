@@ -104,6 +104,11 @@ class LoanServiceStub(object):
                 request_serializer=loan__service__pb2.UpdateInstallmentAmountRequest.SerializeToString,
                 response_deserializer=loan__service__pb2.UpdateInstallmentAmountResponse.FromString,
                 _registered_method=True)
+        self.RemoveInstallmentAdjustment = channel.unary_unary(
+                '/loans.LoanService/RemoveInstallmentAdjustment',
+                request_serializer=loan__service__pb2.RemoveInstallmentAdjustmentRequest.SerializeToString,
+                response_deserializer=loan__service__pb2.RemoveInstallmentAdjustmentResponse.FromString,
+                _registered_method=True)
         self.DeleteLoan = channel.unary_unary(
                 '/loans.LoanService/DeleteLoan',
                 request_serializer=loan__service__pb2.DeleteLoanRequest.SerializeToString,
@@ -214,7 +219,17 @@ class LoanServiceServicer(object):
     def UpdateInstallmentAmount(self, request, context):
         """Ajuste manual del monto de una cuota puntual de un préstamo ACTIVE
         (Agente de Créditos o Administrador) -- no afecta la última cuota, que
-        siempre salda el remanente exacto.
+        siempre salda el remanente exacto. Se deshace con
+        RemoveInstallmentAdjustment, no re-enviando el monto original.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RemoveInstallmentAdjustment(self, request, context):
+        """Quita un ajuste manual y devuelve la cuota a su monto calculado --
+        BR-LOAN-015. Mismo rango que UpdateInstallmentAmount: quien puede fijar
+        el monto puede volver atras. Exige un motivo, que queda auditado.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -302,6 +317,11 @@ def add_LoanServiceServicer_to_server(servicer, server):
                     servicer.UpdateInstallmentAmount,
                     request_deserializer=loan__service__pb2.UpdateInstallmentAmountRequest.FromString,
                     response_serializer=loan__service__pb2.UpdateInstallmentAmountResponse.SerializeToString,
+            ),
+            'RemoveInstallmentAdjustment': grpc.unary_unary_rpc_method_handler(
+                    servicer.RemoveInstallmentAdjustment,
+                    request_deserializer=loan__service__pb2.RemoveInstallmentAdjustmentRequest.FromString,
+                    response_serializer=loan__service__pb2.RemoveInstallmentAdjustmentResponse.SerializeToString,
             ),
             'DeleteLoan': grpc.unary_unary_rpc_method_handler(
                     servicer.DeleteLoan,
@@ -687,6 +707,33 @@ class LoanService(object):
             '/loans.LoanService/UpdateInstallmentAmount',
             loan__service__pb2.UpdateInstallmentAmountRequest.SerializeToString,
             loan__service__pb2.UpdateInstallmentAmountResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RemoveInstallmentAdjustment(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loans.LoanService/RemoveInstallmentAdjustment',
+            loan__service__pb2.RemoveInstallmentAdjustmentRequest.SerializeToString,
+            loan__service__pb2.RemoveInstallmentAdjustmentResponse.FromString,
             options,
             channel_credentials,
             insecure,

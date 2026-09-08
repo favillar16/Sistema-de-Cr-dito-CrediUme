@@ -241,3 +241,28 @@ def test_revert_default_is_gated_exactly_like_mark_defaulted():
     assert allowed_roles("/loans.LoanService/RevertDefault") == allowed_roles(
         "/loans.LoanService/MarkDefaulted"
     )
+
+
+def test_remove_installment_adjustment_is_gated_exactly_like_updating_it():
+    """BR-LOAN-015: quien puede fijar el monto de una cuota puede devolverla al
+    calculado. Si los dos gates se separaran, un operador podría ajustar una
+    cuota y quedar sin poder deshacerlo -- el mismo callejón sin salida que
+    BR-LOAN-014 cerró para el incumplimiento, y la razón de existir de esta
+    RPC."""
+    from cas_server.security.rbac import allowed_roles
+
+    assert allowed_roles(
+        "/loans.LoanService/RemoveInstallmentAdjustment"
+    ) == allowed_roles("/loans.LoanService/UpdateInstallmentAmount")
+
+
+def test_remove_installment_adjustment_gate_matches_rbac_tables_exactly():
+    """El botón "Quitar" del cronograma se muestra bajo la misma condición que
+    "Ajustar" (can_edit_installment_amount), así que esa función tiene que
+    seguir coincidiendo con la tabla METHOD_ROLES real de la RPC nueva."""
+    from cas_server.security.rbac import allowed_roles
+
+    permitidos = allowed_roles("/loans.LoanService/RemoveInstallmentAdjustment")
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+        esperado = any(permitido.value == role for permitido in permitidos)
+        assert can_edit_installment_amount(role) == esperado, role

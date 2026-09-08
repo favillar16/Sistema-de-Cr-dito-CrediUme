@@ -59,6 +59,9 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     "/loans.LoanService/RecordPayment": CASHIER_AND_ABOVE,
     "/loans.LoanService/GetAmortizationSchedule": CASHIER_AND_ABOVE,
     "/loans.LoanService/UpdateInstallmentAmount": MANAGER_AND_ABOVE,
+    # BR-LOAN-015: simétrica con UpdateInstallmentAmount a propósito --
+    # quien puede fijar el monto de una cuota puede devolverla al calculado.
+    "/loans.LoanService/RemoveInstallmentAdjustment": MANAGER_AND_ABOVE,
     "/loans.LoanService/ApproveLoan": CREDIT_ANALYST_AND_ABOVE,
     "/loans.LoanService/MarkDefaulted": CREDIT_ANALYST_AND_ABOVE,
     # BR-LOAN-014: simétrica con MarkDefaulted a propósito -- quien puede poner

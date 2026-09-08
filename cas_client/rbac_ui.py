@@ -164,6 +164,12 @@ def can_revert_default(role: str | None) -> bool:
 
 def can_edit_installment_amount(role: str | None) -> bool:
     """Only Agente de Créditos (MANAGER) and Administrador (ADMIN) can adjust
-    an individual installment's amount (UpdateInstallmentAmount) -- mirrors
-    rbac.py's MANAGER_AND_ABOVE gate on that RPC server-side."""
+    an individual installment's amount -- mirrors rbac.py's MANAGER_AND_ABOVE
+    gate server-side.
+
+    Gates both directions of the flow: UpdateInstallmentAmount (BR-LOAN-008)
+    and RemoveInstallmentAdjustment (BR-LOAN-015), which rbac.py deliberately
+    keeps at the same tier so whoever can set an installment's amount can also
+    put it back. Don't split this into two functions without splitting that
+    tier first -- tests/client/test_rbac_ui.py pins the two RPCs as equal."""
     return role_at_least(role, "MANAGER")

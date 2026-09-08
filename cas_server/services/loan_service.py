@@ -1431,6 +1431,108 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 success=True, status=prestamo.status.value
             )
 
+    def RemoveInstallmentAdjustment(self, request, context):
+        """BR-LOAN-015: quita un ajuste manual y devuelve la cuota al monto
+        calculado por el cronograma.
+
+        Sin esta operación un ajuste no tiene vuelta atrás. Volver a tipear el
+        monto original **no** alcanza: el reparto del saldo restante se
+        recalcula sobre los períodos que faltan, así que los centavos se
+        corren a las cuotas siguientes y el cronograma no vuelve a ser el que
+        era; además la fila queda marcada "ajustada" para siempre y la
+        auditoría registra un segundo ajuste que nunca ocurrió. Es el mismo
+        callejón sin salida que BR-LOAN-014 resolvió para el incumplimiento.
+
+        Exige `ACTIVE` como `UpdateInstallmentAmount`: es el único estado en el
+        que el cronograma todavía se está cobrando, y no se reescribe el
+        reparto de un préstamo ya cancelado o incumplido.
+
+        El `reason` es obligatorio aunque el préstamo no cambie de estado: se
+        deshace la decisión de otro operador sobre cuánto debía pagar el
+        cliente ese mes, y la fila del ajuste se borra -- el AuditLog, que
+        guarda el monto que tenía, es lo único que queda para explicarlo.
+
+        Se toma `with_for_update` sobre el préstamo por la misma razón que
+        `UpdateInstallmentAmount`: quitar un ajuste recalcula el reparto de
+        todas las cuotas posteriores, así que no puede correr en paralelo con
+        otro ajuste del mismo préstamo.
+        """
+        loan_id = analizar_uuid(request.loan_id, "loan_id", context)
+        motivo = request.reason.strip()
+        if not motivo:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "Debe indicarse el motivo por el que se quita el ajuste",
+            )
+
+        with SessionLocal() as sesion:
+            prestamo = sesion.get(Loan, loan_id, with_for_update=True)
+            if prestamo is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Préstamo no encontrado")
+
+            if prestamo.status != LoanStatusEnum.ACTIVE:
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "Solo se pueden ajustar cuotas de un préstamo ACTIVE "
+                    f"(estado actual: {prestamo.status.value})",
+                )
+
+            numero = request.installment_number
+            ajuste = (
+                sesion.query(LoanInstallmentAdjustment)
+                .filter(
+                    LoanInstallmentAdjustment.loan_id == prestamo.id,
+                    LoanInstallmentAdjustment.installment_number == numero,
+                )
+                .one_or_none()
+            )
+            if ajuste is None:
+                context.abort(
+                    grpc.StatusCode.NOT_FOUND,
+                    f"La cuota {numero} no tiene un ajuste registrado",
+                )
+
+            # Quitar un ajuste puede dejar saldo negativo cuando quedan otros:
+            # si el ajuste que se quita era chico, esa cuota vuelve a amortizar
+            # la porción normal (mayor), el saldo baja más rápido y un ajuste
+            # posterior más grande puede pasarse del saldo que queda. Se valida
+            # el cronograma resultante igual que en UpdateInstallmentAmount.
+            ajustes_tentativos = dict(_ajustes_prestamo(prestamo))
+            ajustes_tentativos.pop(numero, None)
+            cronograma_tentativo = calcular_cronograma(
+                _monto_financiado(prestamo),
+                prestamo.interest_rate,
+                prestamo.term_months,
+                ajustes=ajustes_tentativos,
+            )
+            if any(fila.saldo < CERO for fila in cronograma_tentativo):
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "Quitar este ajuste dejaría saldo negativo en cuotas "
+                    "posteriores; revise primero los otros ajustes del préstamo",
+                )
+
+            monto_anterior = ajuste.adjusted_amount
+            sesion.delete(ajuste)
+
+            sesion.add(
+                AuditLog(
+                    user_id=id_actor_actual(get_current_claims()),
+                    action=(
+                        f"PRESTAMO_AJUSTE_CUOTA_QUITADO loan_id={prestamo.id} "
+                        f"numero={numero} monto_anterior={monto_anterior} "
+                        f"motivo={motivo}"
+                    ),
+                    ip_address=ip_remota(context),
+                    timestamp=datetime.now(timezone.utc),
+                )
+            )
+            sesion.commit()
+
+            return loan_service_pb2.RemoveInstallmentAdjustmentResponse(
+                success=True, status=prestamo.status.value
+            )
+
     def DeleteLoan(self, request, context):
         """BR-LOAN-012: elimina definitivamente un préstamo cargado por error.
 

@@ -378,6 +378,47 @@ def test_update_installment_amount_requires_manager_or_above(stubs):
     assert response.success
 
 
+def test_remove_installment_adjustment_requires_manager_or_above(stubs):
+    """BR-LOAN-015: mismo rango que UpdateInstallmentAmount -- si el analista
+    pudiera quitar ajustes sin poder ponerlos (o al revés) el flujo quedaría
+    con una sola dirección otra vez."""
+    auth_stub, loan_stub = stubs
+    _create_user("analyst_r", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
+    _create_user("manager_r", "Passw0rd!", RoleEnum.MANAGER)
+    client_id = _create_client_row(
+        national_id="7000011", email="removeadjust@example.com"
+    )
+    loan_id = _create_loan_row(
+        client_id, LoanStatusEnum.ACTIVE, approved_at=datetime.now(timezone.utc)
+    )
+
+    manager_metadata = _login(auth_stub, "manager_r", "Passw0rd!")
+    loan_stub.UpdateInstallmentAmount(
+        loan_service_pb2.UpdateInstallmentAmountRequest(
+            loan_id=str(loan_id), installment_number=1, adjusted_amount="150.00"
+        ),
+        metadata=manager_metadata,
+    )
+
+    analyst_metadata = _login(auth_stub, "analyst_r", "Passw0rd!")
+    with pytest.raises(grpc.RpcError) as exc_info:
+        loan_stub.RemoveInstallmentAdjustment(
+            loan_service_pb2.RemoveInstallmentAdjustmentRequest(
+                loan_id=str(loan_id), installment_number=1, reason="prueba"
+            ),
+            metadata=analyst_metadata,
+        )
+    assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+
+    response = loan_stub.RemoveInstallmentAdjustment(
+        loan_service_pb2.RemoveInstallmentAdjustmentRequest(
+            loan_id=str(loan_id), installment_number=1, reason="prueba"
+        ),
+        metadata=manager_metadata,
+    )
+    assert response.success
+
+
 def test_get_loan_by_id_reports_creating_advisor(stubs):
     """created_by_username is set from whoever authenticated CreateLoan --
     used by the client to print an advisor name on the cronograma de pago

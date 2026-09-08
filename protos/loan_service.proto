@@ -52,8 +52,14 @@ service LoanService {
 
     // Ajuste manual del monto de una cuota puntual de un préstamo ACTIVE
     // (Agente de Créditos o Administrador) -- no afecta la última cuota, que
-    // siempre salda el remanente exacto.
+    // siempre salda el remanente exacto. Se deshace con
+    // RemoveInstallmentAdjustment, no re-enviando el monto original.
     rpc UpdateInstallmentAmount (UpdateInstallmentAmountRequest) returns (UpdateInstallmentAmountResponse);
+
+    // Quita un ajuste manual y devuelve la cuota a su monto calculado --
+    // BR-LOAN-015. Mismo rango que UpdateInstallmentAmount: quien puede fijar
+    // el monto puede volver atras. Exige un motivo, que queda auditado.
+    rpc RemoveInstallmentAdjustment (RemoveInstallmentAdjustmentRequest) returns (RemoveInstallmentAdjustmentResponse);
 
     // Eliminación definitiva de un préstamo cargado por error -- BR-LOAN-012.
     // Analista de Crédito o superior (todos menos el cajero), y solo mientras
@@ -364,6 +370,20 @@ message UpdateInstallmentAmountRequest {
 message UpdateInstallmentAmountResponse {
     bool success = 1;
     string status = 2; // Estado del préstamo (sin cambios, siempre ACTIVE)
+}
+
+message RemoveInstallmentAdjustmentRequest {
+    string loan_id = 1;
+    int32 installment_number = 2; // 1-based; debe tener un ajuste registrado
+    // Motivo, obligatorio: quitar el ajuste revierte una decision de otro
+    // operador sobre cuanto debia pagar el cliente ese mes, y la fila del
+    // ajuste se borra -- el AuditLog es lo unico que queda para explicarlo.
+    string reason = 3;
+}
+
+message RemoveInstallmentAdjustmentResponse {
+    bool success = 1;
+    string status = 2; // Estado del prestamo (sin cambios, siempre ACTIVE)
 }
 
 message DeleteLoanRequest {
