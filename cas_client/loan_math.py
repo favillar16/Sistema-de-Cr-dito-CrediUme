@@ -8,6 +8,7 @@ discrepan, manda el servidor -- por eso `tests/client/test_loan_math.py` compara
 esta inversa contra el cronograma real en vez de contra números escritos a mano.
 """
 
+from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 
 from cas_client.formatting import gs
@@ -56,7 +57,7 @@ def cargo_para_cuota_objetivo(
     plazo_meses: int,
     cuota_objetivo: Decimal,
     otros_cargos: Decimal = Decimal("0"),
-    ratio_maximo: Decimal = Decimal("0.25"),
+    ratio_maximo: Decimal = Decimal("0.40"),
 ) -> Decimal:
     """Cargo administrativo que hace que la cuota dé `cuota_objetivo`.
 
@@ -66,11 +67,13 @@ def cargo_para_cuota_objetivo(
 
     **El excedente entra como cargo, nunca como interés.** La tasa está fijada
     por ley en el 20% (BR-LOAN-007) y no se toca; lo que sube la cuota es un
-    gasto administrativo financiado, acotado por el tope del 25%
-    (BR-LOAN-006) -- que es exactamente el margen que la entidad ya usa. Por
-    eso el resultado se valida contra `tope_cargos` y no se recorta en
-    silencio: devolver un cargo que el servidor va a rechazar sería peor que
-    decir que la cuota pedida no se puede.
+    gasto administrativo financiado, acotado por el tope del 40%
+    (BR-LOAN-006, subido de 25% el 2026-09-08) -- que es exactamente el
+    margen que la entidad ya usa. Por eso el resultado se valida contra
+    `tope_cargos` y no se recorta en silencio: devolver un cargo que el
+    servidor va a rechazar sería peor que decir que la cuota pedida no se
+    puede. El valor por defecto acompaña a `rbac_ui.MAX_CHARGES_RATIO`; los
+    llamadores reales (`loans_view.py`) igual lo pasan explícito.
 
     `otros_cargos` son los otros tres cargos ya cargados en el formulario: el
     tope es sobre la *suma*, así que el administrativo solo puede ocupar lo
@@ -106,3 +109,64 @@ def cargo_para_cuota_objetivo(
     # el objetivo o unos céntimos por debajo -- invisible en guaraníes, que no
     # usan centavos.
     return (cargos_totales - otros_cargos).quantize(Decimal("1"), rounding=ROUND_DOWN)
+
+
+@dataclass(frozen=True)
+class CuotaEstimada:
+    numero: int
+    capital: Decimal
+    interes: Decimal
+    cuota: Decimal
+    saldo: Decimal
+
+
+def cronograma_estimado(
+    capital: Decimal,
+    tasa_anual: Decimal,
+    plazo_meses: int,
+    total_cargos: Decimal = Decimal("0"),
+) -> list[CuotaEstimada]:
+    """Vista previa del cronograma completo de una propuesta que todavía no
+    existe como préstamo -- por eso no puede pedirse con GetAmortizationSchedule,
+    que necesita un `loan_id` ya guardado. Existe para que el operador vea el
+    efecto de tocar capital/plazo/cargos sin tener que guardar la propuesta,
+    volver atrás y volver a entrar para revisar la cuota resultante.
+
+    Reproduce BR-LOAN-013 (capital e interés constantes cuota a cuota, interés
+    calculado una sola vez sobre el monto financiado original -- nunca sobre
+    el saldo -- y la última cuota absorbiendo el redondeo) tal como
+    `cas_server/services/amortization.calcular_cronograma` la calcula sobre un
+    préstamo real, sin `ajustes` (BR-LOAN-008 sólo existe una vez que el
+    préstamo está ACTIVE) ni fechas de vencimiento (el primer vencimiento
+    puede no estar cargado todavía en el formulario). `total_cargos` es la
+    suma de los cuatro cargos capitalizados (BR-LOAN-006): igual que en el
+    servidor, se financian junto con el capital.
+    """
+    if plazo_meses <= 0:
+        raise CuotaInalcanzable("El plazo debe ser mayor a cero.")
+    if capital <= 0:
+        raise CuotaInalcanzable("El capital debe ser mayor a cero.")
+
+    financiado = capital + total_cargos
+    interes = (financiado * tasa_anual / Decimal(12)).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    amortizacion = (financiado / Decimal(plazo_meses)).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+
+    filas: list[CuotaEstimada] = []
+    saldo = financiado
+    for numero in range(1, plazo_meses + 1):
+        capital_cuota = saldo if numero == plazo_meses else amortizacion
+        saldo -= capital_cuota
+        filas.append(
+            CuotaEstimada(
+                numero=numero,
+                capital=capital_cuota,
+                interes=interes,
+                cuota=capital_cuota + interes,
+                saldo=saldo,
+            )
+        )
+    return filas

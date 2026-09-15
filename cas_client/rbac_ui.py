@@ -48,8 +48,8 @@ def tier_label(role: str | None) -> str:
 # Revisado 2026-08-28: bajó de 0.45 a 0.20 porque, por ley, el interés en sí
 # no puede superar el 20% anual -- el 45% de antes mezclaba interés y gastos
 # administrativos en una sola tasa. Ver MAX_CHARGES_RATIO abajo para el
-# complemento (25%) que ahora se cobra como cargo financiado, no como
-# interés.
+# complemento (40% desde 2026-09-08) que ahora se cobra como cargo
+# financiado, no como interés.
 FIXED_INTEREST_RATE = "0.20"  # decimal fraction, sistema alemán -- ver loans_view.py
 # 20% nominal anual = el máximo que la ley permite cobrar como interés
 # (1,667% mensual sobre el monto original del préstamo -- la tasa
@@ -70,16 +70,17 @@ def fixed_interest_rate_percent() -> str:
     return text
 
 
-# BR-LOAN-006 (revisado 2026-08-28). Tope conjunto de los 4 cargos
+# BR-LOAN-006 (revisado 2026-09-08). Tope conjunto de los 4 cargos
 # financiados (impuesto s/intereses, gastos administrativos por desembolso,
-# seguro de cancelación, seguros contratados): 25% anual del capital
+# seguro de cancelación, seguros contratados): 40% anual del capital
 # solicitado, prorrateado por el plazo igual que el interés. Es el
-# complemento de FIXED_INTEREST_RATE para llegar al 45% anual que la entidad
-# fija como costo total del crédito (20% de interés legal + hasta 25% de
-# gastos administrativos = 45%). Debe mantenerse igual a
-# cas_server/config.py's LOAN_MAX_CHARGES_RATIO, por la misma razón que
-# FIXED_INTEREST_RATE (no hay fuente compartida entre los dos procesos).
-MAX_CHARGES_RATIO = Decimal("0.25")
+# complemento de FIXED_INTEREST_RATE para llegar al 60% anual que la entidad
+# fija como costo total del crédito (20% de interés legal + hasta 40% de
+# gastos administrativos = 60%; subió de 25%/45% por decisión del negocio).
+# Debe mantenerse igual a cas_server/config.py's LOAN_MAX_CHARGES_RATIO, por
+# la misma razón que FIXED_INTEREST_RATE (no hay fuente compartida entre los
+# dos procesos).
+MAX_CHARGES_RATIO = Decimal("0.40")
 
 
 def can_edit_interest_rate(role: str | None) -> bool:

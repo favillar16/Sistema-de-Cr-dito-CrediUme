@@ -6,6 +6,8 @@ from PySide6.QtGui import QColor, QTextDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -35,6 +37,7 @@ from cas_client.grpc_client import ApiError, ClientServiceClient, LoanServiceCli
 from cas_client.loan_math import (
     CuotaInalcanzable,
     cargo_para_cuota_objetivo,
+    cronograma_estimado,
     cuota_estimada,
 )
 from cas_client.rbac_ui import (
@@ -110,6 +113,18 @@ _SCHEDULE_TABLE_HEADERS = (
     "",
 )
 _SCHEDULE_COL_ADJUST = len(_SCHEDULE_TABLE_HEADERS) - 1
+
+# Vista previa de cronograma en el formulario de propuesta (antes de guardar,
+# por lo tanto sin fecha de vencimiento -- no hay loan_id con el que pedirle
+# el cronograma real al servidor -- ni columna de ajuste -- BR-LOAN-008 solo
+# existe sobre un préstamo ACTIVE).
+_PREVIEW_TABLE_HEADERS = (
+    "Cuota",
+    "Capital (Gs)",
+    "Interés (Gs)",
+    "Cuota total (Gs)",
+    "Saldo restante (Gs)",
+)
 
 _ESTADOS_LABEL = {
     "PENDING": "Pendiente",
@@ -798,10 +813,11 @@ class LoansView(BaseView):
         # que siga estando a la vista de quien arma la propuesta, pero no hay
         # nada que tipear ni un rol que la desbloquee. Revisado 2026-08-28: ya
         # no se llama "45%" a esto -- por ley el interés no puede superar el
-        # 20%, así que el resto hasta el 45% pactado se cobra como cargo
-        # administrativo financiado (ver la tarjeta de cargos, abajo), no
-        # como interés. El detalle de porcentajes no se explica en pantalla
-        # (queda en specs/loans/README) -- solo se avisa dónde está.
+        # 20%, así que el resto hasta el 60% pactado (revisado 2026-09-08,
+        # antes 45%) se cobra como cargo administrativo financiado (ver la
+        # tarjeta de cargos, abajo), no como interés. El detalle de
+        # porcentajes no se explica en pantalla (queda en
+        # specs/loans/README) -- solo se avisa dónde está.
         rate_line = QLabel(
             f"Interés legal: {fixed_interest_rate_percent()}% anual "
             f"({rate_percent_mensual(FIXED_INTEREST_RATE)} mensual sobre el "
@@ -861,7 +877,7 @@ class LoansView(BaseView):
         )
 
         # BR-LOAN-006: sugiere el tope de "Gastos administrativos por
-        # desembolso" (25% anual del capital, prorrateado por el plazo) en
+        # desembolso" (40% anual del capital, prorrateado por el plazo) en
         # cuanto el operador completa capital y plazo, para que no tenga que
         # calcularlo a mano. Solo sugiere -- no pisa un valor ya cargado, y el
         # servidor vuelve a validar el tope real al guardar.
@@ -880,6 +896,22 @@ class LoansView(BaseView):
         charges_hint.setWordWrap(True)
         charges_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
         charges.addWidget(charges_hint)
+
+        # Vista previa del cronograma completo con los valores actuales del
+        # formulario, sin guardar nada: para ajustar la cuota (a mano o vía
+        # "Cuota deseada") hace falta ver más que el primer monto que ya
+        # muestra target_feedback -- en particular cómo evoluciona el saldo y
+        # si la última cuota queda razonable. No llama al servidor porque el
+        # préstamo todavía no existe.
+        preview_row = QHBoxLayout()
+        preview_row.addStretch()
+        preview_button = QPushButton("Ver cronograma estimado")
+        preview_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        preview_button.setStyleSheet(theme.secondary_button_style())
+        preview_button.clicked.connect(lambda: self._on_preview_schedule(prefix))
+        preview_row.addWidget(preview_button)
+        charges.addLayout(preview_row)
+
         layout.addWidget(charges_frame)
 
         # -- Garantía (BR-LOAN-005) --
@@ -917,7 +949,7 @@ class LoansView(BaseView):
 
     def _suggest_admin_fee(self, prefix: str) -> None:
         """BR-LOAN-006: sugiere "Gastos administrativos por desembolso" con
-        el tope de cargos (25% anual del capital, prorrateado por el plazo),
+        el tope de cargos (40% anual del capital, prorrateado por el plazo),
         para que el operador no tenga que calcularlo a mano.
 
         No pisa un monto ya cargado -- ni el que el operador haya tipeado, ni
@@ -956,7 +988,7 @@ class LoansView(BaseView):
 
         **El excedente entra como cargo financiado, no como interés.** La tasa
         es fija por ley en el 20% (BR-LOAN-007) y este campo no la toca; lo que
-        sube la cuota es un gasto administrativo acotado por el tope del 25%
+        sube la cuota es un gasto administrativo acotado por el tope del 40%
         (BR-LOAN-006). Si la cuota pedida exigiera pasarse de ese tope, se
         avisa y **no** se escribe nada: recortar en silencio dejaría al
         operador creyendo que cargó una cuota que el servidor no va a producir.
@@ -1023,6 +1055,91 @@ class LoansView(BaseView):
             f"Gastos administrativos fijados en {gs(str(cargo))} para que las "
             f"{term_months} cuotas queden en {gs(str(resultante))}."
         )
+
+    def _on_preview_schedule(self, prefix: str) -> None:
+        """Muestra el cronograma completo que resultaría de guardar la
+        propuesta *tal como está el formulario ahora mismo*, sin guardar nada.
+
+        Existe para que ajustar la cuota (a mano, o vía "Cuota deseada") no
+        obligue a guardar la propuesta, entrar al detalle del préstamo y
+        abrir su cronograma para ver si el resultado es razonable -- todo eso
+        vivía necesariamente *después* de guardar porque
+        `GetAmortizationSchedule` necesita un `loan_id` que a esta altura
+        todavía no existe. `loan_math.cronograma_estimado` recalcula la
+        misma fórmula en el cliente para poder mostrarlo antes.
+        """
+        principal = getattr(self, f"{prefix}_principal").raw_value()
+        term_text = getattr(self, f"{prefix}_term").text().strip()
+        if not (principal and term_text):
+            self._toast.show_message(
+                "Complete el capital y el plazo para ver el cronograma."
+            )
+            return
+        try:
+            term_months = int(term_text)
+        except ValueError:
+            self._toast.show_message("El plazo debe ser un número entero de meses.")
+            return
+
+        total_cargos = Decimal("0")
+        for attribute, _label, _field in _CHARGE_FIELDS:
+            valor = getattr(self, f"{prefix}{attribute}").raw_value()
+            if valor:
+                total_cargos += Decimal(valor)
+
+        try:
+            cuotas = cronograma_estimado(
+                Decimal(principal),
+                Decimal(FIXED_INTEREST_RATE),
+                term_months,
+                total_cargos,
+            )
+        except CuotaInalcanzable as exc:
+            self._toast.show_message(str(exc))
+            return
+
+        self._show_schedule_preview_dialog(cuotas)
+
+    def _show_schedule_preview_dialog(self, cuotas) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Cronograma estimado")
+        dialog.resize(560, 420)
+        layout = QVBoxLayout(dialog)
+
+        note = QLabel(
+            "Vista previa calculada con los datos actuales del formulario -- "
+            "todavía no se guardó nada. El servidor recalcula el cronograma "
+            "real (y vuelve a validar el tope de cargos) al guardar la "
+            "propuesta."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        layout.addWidget(note)
+
+        table = QTableWidget(0, len(_PREVIEW_TABLE_HEADERS))
+        table.setHorizontalHeaderLabels(_PREVIEW_TABLE_HEADERS)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for cuota in cuotas:
+            row = table.rowCount()
+            table.insertRow(row)
+            values = (
+                str(cuota.numero),
+                gs(str(cuota.capital)),
+                gs(str(cuota.interes)),
+                gs(str(cuota.cuota)),
+                gs(str(cuota.saldo)),
+            )
+            for col, value in enumerate(values):
+                table.setItem(row, col, QTableWidgetItem(value))
+        size_columns(table, stretch_column=0)
+        style_table(table)
+        layout.addWidget(table, stretch=1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog.exec()
 
     def _proposal_fields(self, prefix: str) -> dict | None:
         """Lee un formulario de propuesta y devuelve los argumentos de la RPC,

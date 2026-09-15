@@ -14,6 +14,7 @@ import pytest
 from cas_client.loan_math import (
     CuotaInalcanzable,
     cargo_para_cuota_objetivo,
+    cronograma_estimado,
     cuota_estimada,
     tope_cargos,
 )
@@ -76,9 +77,13 @@ def test_respeta_los_otros_cargos_ya_cargados():
     assert _cuota_real(capital, TASA, plazo, cargo + otros) == Decimal("250000.00")
 
 
-def test_rechaza_una_cuota_por_encima_del_tope_del_25_por_ciento():
+def test_rechaza_una_cuota_por_encima_del_tope_del_40_por_ciento():
     """No recorta en silencio: un cargo por encima del tope lo rechazaría el
-    servidor (BR-LOAN-006), así que es mejor decirlo acá y nombrar el máximo."""
+    servidor (BR-LOAN-006), así que es mejor decirlo acá y nombrar el máximo.
+
+    2.348.590 Gs a 12 meses da un techo de 939.436 Gs de cargos (40% del
+    capital, BR-LOAN-006 revisado 2026-09-08); una cuota de 400.000 exigiría
+    939.436 (financiado 4.000.000, muy por encima)."""
     capital, plazo = Decimal("2348590"), 12
     with pytest.raises(CuotaInalcanzable) as exc:
         cargo_para_cuota_objetivo(capital, TASA, plazo, Decimal("400000"))
@@ -89,13 +94,14 @@ def test_la_cuota_maxima_que_anuncia_el_error_es_realmente_alcanzable():
     """El mensaje nombra un máximo: ese número tiene que ser cierto contra el
     cronograma real, si no manda al operador a probar algo que tampoco entra."""
     capital, plazo = Decimal("2348590"), 12
-    techo = tope_cargos(capital, Decimal("0.25"), plazo)
+    ratio = Decimal("0.40")  # cas_server/config.py's LOAN_MAX_CHARGES_RATIO
+    techo = tope_cargos(capital, ratio, plazo)
     maxima = cuota_estimada(capital, TASA, plazo, techo)
     assert _cuota_real(capital, TASA, plazo, techo) == maxima
     # y pedir exactamente esa cuota tiene que entrar sin pasarse del tope
-    # (redondear el cargo hacia arriba lo habría cruzado por 0,50 Gs y el
-    # servidor lo habría rechazado con INVALID_ARGUMENT)
-    cargo = cargo_para_cuota_objetivo(capital, TASA, plazo, maxima)
+    # (redondear el cargo hacia arriba lo cruzaría por unos céntimos y el
+    # servidor lo rechazaría con INVALID_ARGUMENT)
+    cargo = cargo_para_cuota_objetivo(capital, TASA, plazo, maxima, ratio_maximo=ratio)
     assert cargo <= techo
 
 
@@ -120,3 +126,45 @@ def test_plazo_o_capital_invalidos_no_revientan():
         cargo_para_cuota_objetivo(Decimal("1000"), TASA, 0, Decimal("100"))
     with pytest.raises(CuotaInalcanzable):
         cargo_para_cuota_objetivo(Decimal("0"), TASA, 12, Decimal("100"))
+
+
+@pytest.mark.parametrize(
+    "capital,plazo,cargos",
+    [
+        ("2348590", 12, "0"),
+        ("7000000", 12, "0"),
+        ("2348590", 12, "151410"),
+        ("1000000", 6, "50000"),
+        ("5000000", 24, "0"),
+    ],
+)
+def test_cronograma_estimado_coincide_fila_a_fila_con_el_cronograma_real(
+    capital, plazo, cargos
+):
+    """La vista previa de la propuesta (antes de que el préstamo exista) tiene
+    que ser exactamente la misma tabla que el servidor arma después de
+    guardarla -- si no, el operador ajustaría la cuota mirando un número que
+    luego no es el real."""
+    capital, cargos = Decimal(capital), Decimal(cargos)
+    estimado = cronograma_estimado(capital, TASA, plazo, cargos)
+    real = calcular_cronograma(capital + cargos, TASA, plazo)
+
+    assert len(estimado) == len(real) == plazo
+    for fila_estimada, fila_real in zip(estimado, real):
+        assert fila_estimada.numero == fila_real.numero
+        assert fila_estimada.capital == fila_real.capital
+        assert fila_estimada.interes == fila_real.interes
+        assert fila_estimada.cuota == fila_real.monto_cuota
+        assert fila_estimada.saldo == fila_real.saldo
+
+    # Todas las cuotas son iguales salvo la última (BR-LOAN-013), y el saldo
+    # llega exactamente a cero -- lo que el operador ve en la vista previa.
+    assert all(f.cuota == estimado[0].cuota for f in estimado[:-1])
+    assert estimado[-1].saldo == Decimal("0.00")
+
+
+def test_cronograma_estimado_rechaza_plazo_o_capital_invalidos():
+    with pytest.raises(CuotaInalcanzable):
+        cronograma_estimado(Decimal("1000"), TASA, 0)
+    with pytest.raises(CuotaInalcanzable):
+        cronograma_estimado(Decimal("0"), TASA, 12)

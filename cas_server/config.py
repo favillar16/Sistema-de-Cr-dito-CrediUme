@@ -104,13 +104,17 @@ LOAN_DEFAULT_FIRST_DUE_DAYS = 30  # BR-LOAN-004
 # cas_client/documents.py.
 LOAN_FIXED_INTEREST_RATE = Decimal("0.20")  # 20% anual, tope legal de interés
 
-# BR-LOAN-006 (revisado 2026-08-28). Tope conjunto de los 4 cargos
+# BR-LOAN-006 (revisado 2026-09-08). Tope conjunto de los 4 cargos
 # financiados (impuesto s/intereses, gastos administrativos por desembolso,
-# seguro de cancelación, seguros contratados): 25% anual del **capital
+# seguro de cancelación, seguros contratados): 40% anual del **capital
 # solicitado**, prorrateado por el plazo con la misma mecánica que el interés
 # (`capital * LOAN_MAX_CHARGES_RATIO / 12 * term_months`, ver
 # loan_service.py's `_tope_cargos`). Es el complemento de
-# LOAN_FIXED_INTEREST_RATE: 20% de interés legal + hasta 25% de gastos
-# administrativos = el 45% anual que la entidad fija como costo total del
-# crédito, sin que el interés en sí supere el máximo legal.
-LOAN_MAX_CHARGES_RATIO = Decimal("0.25")  # 25% anual, tope de cargos financiados
+# LOAN_FIXED_INTEREST_RATE: 20% de interés legal + hasta 40% de gastos
+# administrativos = el 60% anual que la entidad fija como costo total del
+# crédito, sin que el interés en sí supere el máximo legal. Subió de 25% a
+# 40% (era 20%+25%=45%) por decisión del negocio -- el Pagaré/Contrato siguen
+# declarando el monto real (capital + cargos + interés) sin recortar ni
+# ocultar ninguna cifra: lo que cambia es sólo el tope, no la transparencia
+# del documento firmado.
+LOAN_MAX_CHARGES_RATIO = Decimal("0.40")  # 40% anual, tope de cargos financiados

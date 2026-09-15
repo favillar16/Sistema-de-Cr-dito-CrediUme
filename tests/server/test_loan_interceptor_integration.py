@@ -211,8 +211,8 @@ def test_create_loan_stores_the_charges_sent_with_the_proposal(stubs):
     )
     metadata = _login(auth_stub, "analyst_c", "Passw0rd!")
 
-    # BR-LOAN-006 (revisado 2026-08-28): tope de 1000.00 * 0.25 * 6/12 =
-    # 125.00 -- los 120.00 de acá quedan por debajo.
+    # BR-LOAN-006 (revisado 2026-09-08): tope de 1000.00 * 0.40 * 6/12 =
+    # 200.00 -- los 120.00 de acá quedan por debajo.
     creado = loan_stub.CreateLoan(
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),

@@ -68,15 +68,28 @@ Two consequences that are easy to get wrong when touching this:
     different, cheaper calculation than the schedule the same borrower
     signs. Guarded by `tests/client/test_documents_identity.py`.
 
-The rate is `config.LOAN_FIXED_INTEREST_RATE` — **45% nominal annual =
-3,75% monthly on the original financed amount** (`BR-LOAN-007`) — and it
-is fixed for **every** role, ADMIN included, since 2026-08-28. There is
-no rate field in the form; `CreateLoan` takes an empty `interest_rate`
-or exactly this value and rejects anything else rather than silently
-substituting. Changing it is a commercial/legal decision, not a code
-tweak: it also moves `cas_client/rbac_ui.py`'s `FIXED_INTEREST_RATE` (no
-shared source between the two processes) and the interest clause in
+The rate is `config.LOAN_FIXED_INTEREST_RATE` — **20% nominal annual =
+1,667% monthly on the original financed amount** (`BR-LOAN-007`), the
+legal ceiling on interest itself — and it is fixed for **every** role,
+ADMIN included, since 2026-08-28. There is no rate field in the form;
+`CreateLoan` takes an empty `interest_rate` or exactly this value and
+rejects anything else rather than silently substituting. Changing it is
+a commercial/legal decision, not a code tweak: it also moves
+`cas_client/rbac_ui.py`'s `FIXED_INTEREST_RATE` (no shared source
+between the two processes) and the interest clause in
 `cas_client/documents.py`.
+
+The complement is `config.LOAN_MAX_CHARGES_RATIO` — **40% anual del
+capital solicitado** (`BR-LOAN-006`, subió de 25% el 2026-09-08), a cap
+on the sum of the 4 financed charges, prorated by term the same way as
+interest. 20% legal interest + up to 40% financed charges = the 60%
+annual total cost of credit the entity sets — up from 45% (20%+25%)
+before 2026-09-08. This is validated separately from, and is unrelated
+to, BR-LOAN-002's own 40%-of-income cap (a different ceiling on a
+different quantity that happens to share the same number today). The
+Pagaré/Contrato keep declaring the real total (capital + charges +
+interest) in full — raising this cap changes what may be charged, not
+what the signed document discloses.
 
 ## Required validation areas
 
