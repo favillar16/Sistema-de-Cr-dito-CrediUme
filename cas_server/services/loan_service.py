@@ -994,6 +994,11 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 )
 
             prestamo.status = LoanStatusEnum.ACTIVE
+            # BR-DASH-002: el status dice que está desembolsado, pero no
+            # cuándo -- y sin la fecha no hay forma de totalizar lo desembolsado
+            # en un período. Se guarda el mismo `ahora` que va al AuditLog para
+            # que las dos fuentes no puedan diferir en unos milisegundos.
+            prestamo.disbursed_at = ahora
 
             sesion.add(
                 AuditLog(

@@ -71,6 +71,16 @@ message GetPeriodReportResponse {
     string principal_created = 6;      // Capital solicitado en los préstamos creados
     string principal_approved = 7;     // Capital de los préstamos aprobados
 
+    // Desembolsos ocurridos dentro del período (Loan.disbursed_at en el rango).
+    // Es el dinero que realmente salió de la entidad, y es lo único de este
+    // bloque que lo mide: `principal_approved` es una decisión, no una salida
+    // de caja -- un préstamo aprobado puede no desembolsarse nunca (BR-LOAN-003
+    // lo vence a los 30 días). Los préstamos desembolsados antes de que
+    // existiera Loan.disbursed_at no tienen la marca y no entran en ningún
+    // período; ver la nota de la migración.
+    int32 loans_disbursed = 15;
+    string principal_disbursed = 16;   // Capital entregado al cliente
+
     // Cobranza ocurrida dentro del período
     int32 payments_count = 8;          // LoanPayment.paid_at dentro del rango
     string payments_total = 9;         // Suma de LoanPayment.amount

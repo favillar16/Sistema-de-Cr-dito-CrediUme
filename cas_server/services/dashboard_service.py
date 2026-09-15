@@ -127,8 +127,16 @@ class DashboardServicer(dashboard_service_pb2_grpc.DashboardServiceServicer):
         """BR-DASH-002: cierre de período. Mezcla dos cosas distintas a
         propósito, y las nombra distinto en la respuesta para que no se
         confundan: lo que *ocurrió* dentro del rango (altas, aprobaciones,
-        cobranza) y la *foto al cierre* (cartera activa, saldo, mora), que se
-        mide al momento de generar el reporte y no depende del rango."""
+        desembolsos, cobranza) y la *foto al cierre* (cartera activa, saldo,
+        mora), que se mide al momento de generar el reporte y no depende del
+        rango.
+
+        Los tres renglones de capital del primer bloque miden cosas distintas
+        y no tienen por qué coincidir: `principal_created` es lo pedido,
+        `principal_approved` lo autorizado y `principal_disbursed` lo
+        efectivamente entregado. Un préstamo puede aparecer en el primero de
+        un mes y en el tercero del siguiente, o no llegar nunca al tercero si
+        la aprobación caduca (BR-LOAN-003)."""
         fecha_inicio = analizar_fecha(request.start_date, "start_date", context)
         fecha_fin = analizar_fecha(request.end_date, "end_date", context)
         if fecha_fin < fecha_inicio:
@@ -156,8 +164,10 @@ class DashboardServicer(dashboard_service_pb2_grpc.DashboardServiceServicer):
 
             prestamos_creados = 0
             prestamos_aprobados = 0
+            prestamos_desembolsados = 0
             capital_creado = CERO
             capital_aprobado = CERO
+            capital_desembolsado = CERO
             prestamos_pagados = 0
             activos_al_cierre = 0
             saldo_al_cierre = CERO
@@ -172,6 +182,15 @@ class DashboardServicer(dashboard_service_pb2_grpc.DashboardServiceServicer):
                 if _en_rango(prestamo.approved_at, desde, hasta):
                     prestamos_aprobados += 1
                     capital_aprobado += prestamo.principal_amount
+                # El único renglón del bloque que mide plata que salió: se
+                # cuenta por `disbursed_at` y no por el estado del préstamo,
+                # porque un ACTIVE/PAID/DEFAULTED de hoy puede haberse
+                # desembolsado en cualquier período anterior. Se desembolsa
+                # `principal_amount` (lo que el cliente recibe en mano), no el
+                # monto financiado: los cargos se capitalizan, no se entregan.
+                if _en_rango(prestamo.disbursed_at, desde, hasta):
+                    prestamos_desembolsados += 1
+                    capital_desembolsado += prestamo.principal_amount
 
                 # Un préstamo PAID no guarda su propia fecha de cancelación --
                 # se la atribuye al último pago recibido, que es el hecho que
@@ -206,6 +225,8 @@ class DashboardServicer(dashboard_service_pb2_grpc.DashboardServiceServicer):
                 loans_approved=prestamos_aprobados,
                 principal_created=str(capital_creado),
                 principal_approved=str(capital_aprobado),
+                loans_disbursed=prestamos_desembolsados,
+                principal_disbursed=str(capital_desembolsado),
                 payments_count=len(pagos),
                 payments_total=str(total_cobrado),
                 loans_paid=prestamos_pagados,

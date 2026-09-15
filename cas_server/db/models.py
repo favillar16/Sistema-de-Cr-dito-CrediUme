@@ -266,6 +266,22 @@ class Loan(Base):
     approved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Momento del desembolso -- lo que convierte una aprobación en una salida
+    # real de dinero. No es redundante con `status == ACTIVE`: ese dice que el
+    # préstamo está desembolsado, pero no *cuándo*, y sin esa fecha no hay
+    # forma de totalizar lo desembolsado en un período (BR-DASH-002).
+    # `approved_at` tampoco sirve para eso: aprobar es una decisión, desembolsar
+    # es entregar la plata, y entre las dos pueden pasar hasta 30 días
+    # (BR-LOAN-003) o no pasar nunca.
+    #
+    # Nullable y sin backfill, mismo criterio que created_by_user_id: los
+    # préstamos desembolsados antes de que existiera esta columna no tienen una
+    # fecha que se pueda inventar. Un ACTIVE/PAID/DEFAULTED con disbursed_at en
+    # NULL es exactamente eso, y el reporte de período lo deja fuera de todo
+    # rango en vez de atribuirlo a uno equivocado.
+    disbursed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     client: Mapped["Client"] = relationship(back_populates="loans")
     payments: Mapped[list["LoanPayment"]] = relationship(back_populates="loan")

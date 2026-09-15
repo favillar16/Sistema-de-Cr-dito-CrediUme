@@ -46,6 +46,7 @@ from cas_client.rbac_ui import (
     can_originate_credit,
     fixed_interest_rate_percent,
     role_at_least,
+    tier_label,
 )
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
@@ -205,6 +206,53 @@ _CHARGES_HINT = (
 # vuelve a verificarlo, esto solo evita ofrecer un botón que respondería
 # FAILED_PRECONDITION.
 _DELETABLE_STATUSES = ("PENDING", "APPROVED", "EXPIRED")
+
+
+def _apply_action_gate(
+    button,
+    *,
+    statuses: tuple[str, ...],
+    tier: str,
+    loan_status: str,
+    role: str,
+    role_ok: bool,
+) -> str:
+    """Habilita un botón de acción y, cuando queda deshabilitado, le pone en el
+    tooltip *por qué*.
+
+    Un botón gris sin explicación se lee como "la opción no está" -- el
+    operador no tiene forma de distinguir "este préstamo todavía no llegó a
+    ese estado" de "tu usuario no tiene el nivel" de "el sistema está fallando",
+    y las tres se resuelven de manera muy distinta (aprobar primero, pedírselo
+    a un superior, o avisar que algo anda mal).
+
+    El nivel se nombra con tier_label() y no con el rol del backend, para que
+    el mensaje use las mismas palabras que la pantalla de Usuarios y el
+    encabezado ("Agente de Créditos", no "MANAGER").
+
+    Devuelve el texto del tooltip ("" si la acción está disponible), para que
+    el llamador pueda reusarlo si además quiere mostrarlo en otro lado.
+    """
+    status_ok = loan_status in statuses
+    button.setEnabled(status_ok and role_ok)
+    if status_ok and role_ok:
+        button.setToolTip("")
+        return ""
+    motivos = []
+    if not status_ok:
+        etiquetas = ", ".join(_ESTADOS_LABEL.get(e, e) for e in statuses)
+        motivos.append(
+            f"este préstamo está {_ESTADOS_LABEL.get(loan_status, loan_status)} "
+            f"y la acción solo aplica a: {etiquetas}"
+        )
+    if not role_ok:
+        motivos.append(
+            f"requiere nivel {tier_label(tier)} o superior "
+            f"(su nivel es {tier_label(role)})"
+        )
+    tooltip = "No disponible: " + "; ".join(motivos) + "."
+    button.setToolTip(tooltip)
+    return tooltip
 
 
 def _charges_breakdown_text(loan) -> str:
@@ -1511,22 +1559,52 @@ class LoansView(BaseView):
             print_button.setEnabled(enabled)
 
         role = self._session.role
-        self._edit_proposal_button.setEnabled(
-            loan.status == "PENDING" and can_originate_credit(role)
+        # Cada acción del grid dice en su tooltip por qué está deshabilitada:
+        # ver _apply_action_gate(). "Desembolsar" es el caso que más se
+        # confunde con una opción ausente -- necesita el préstamo Aprobado
+        # *y* nivel Agente de Créditos, y un Estándar que acaba de aprobarlo
+        # se queda mirando un botón gris sin saber cuál de las dos le falta.
+        _apply_action_gate(
+            self._edit_proposal_button,
+            statuses=("PENDING",),
+            tier="CREDIT_ANALYST",
+            loan_status=loan.status,
+            role=role,
+            role_ok=can_originate_credit(role),
         )
-        self._approve_button.setEnabled(
-            loan.status == "PENDING" and role_at_least(role, "CREDIT_ANALYST")
+        _apply_action_gate(
+            self._approve_button,
+            statuses=("PENDING",),
+            tier="CREDIT_ANALYST",
+            loan_status=loan.status,
+            role=role,
+            role_ok=role_at_least(role, "CREDIT_ANALYST"),
         )
-        self._disburse_button.setEnabled(
-            loan.status == "APPROVED" and role_at_least(role, "MANAGER")
+        _apply_action_gate(
+            self._disburse_button,
+            statuses=("APPROVED",),
+            tier="MANAGER",
+            loan_status=loan.status,
+            role=role,
+            role_ok=role_at_least(role, "MANAGER"),
         )
-        self._default_button.setEnabled(
-            loan.status == "ACTIVE" and role_at_least(role, "CREDIT_ANALYST")
+        _apply_action_gate(
+            self._default_button,
+            statuses=("ACTIVE",),
+            tier="CREDIT_ANALYST",
+            loan_status=loan.status,
+            role=role,
+            role_ok=role_at_least(role, "CREDIT_ANALYST"),
         )
         # BR-LOAN-014. Se deshabilita (no se oculta) como el resto del grid de
         # acciones: sólo el borrado, que es irreversible, se esconde por rol.
-        self._revert_default_button.setEnabled(
-            loan.status == "DEFAULTED" and can_revert_default(role)
+        _apply_action_gate(
+            self._revert_default_button,
+            statuses=("DEFAULTED",),
+            tier="CREDIT_ANALYST",
+            loan_status=loan.status,
+            role=role,
+            role_ok=can_revert_default(role),
         )
         # BR-LOAN-012. Se oculta (no se deshabilita) para quien no tiene el
         # rol, misma convención que el ítem "Usuarios" del sidebar; para quien

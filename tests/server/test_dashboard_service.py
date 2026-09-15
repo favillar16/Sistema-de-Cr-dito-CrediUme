@@ -47,6 +47,7 @@ def _create_loan(
     rate="0.12",
     term=6,
     approved_at=None,
+    disbursed_at=None,
     first_due_date=None,
     created_at=None,
 ):
@@ -60,6 +61,7 @@ def _create_loan(
             status=status,
             created_at=created_at or datetime.now(timezone.utc),
             approved_at=approved_at,
+            disbursed_at=disbursed_at,
         )
         session.add(loan)
         session.commit()
@@ -204,6 +206,93 @@ def test_period_report_counts_only_events_inside_the_range(servicer):
     assert Decimal(response.principal_approved) == Decimal("1000.00")
     # La foto al cierre ignora el rango: ambos préstamos siguen ACTIVE hoy.
     assert response.active_loans_at_close == 2
+
+
+def test_period_report_totals_what_was_disbursed_in_the_range(servicer):
+    """BR-DASH-002: el desembolso se cuenta por Loan.disbursed_at y no por el
+    estado, porque un ACTIVE de hoy puede haberse desembolsado en cualquier
+    período anterior.
+
+    Es lo único del bloque que mide plata que salió: `principal_approved` es
+    una decisión, no una salida de caja.
+    """
+    client_id = _create_client("8000031", "dash_disb@example.com")
+    hoy = datetime.now(timezone.utc)
+    dentro = hoy - timedelta(days=2)
+    fuera = hoy - timedelta(days=90)
+
+    _create_loan(
+        client_id,
+        LoanStatusEnum.ACTIVE,
+        created_at=fuera,
+        approved_at=fuera,
+        disbursed_at=dentro,
+        principal="3000.00",
+    )
+    # Desembolsado hace meses: sigue ACTIVE, pero no es de este período.
+    _create_loan(
+        client_id,
+        LoanStatusEnum.ACTIVE,
+        created_at=fuera,
+        approved_at=fuera,
+        disbursed_at=fuera,
+        principal="5000.00",
+    )
+    # Aprobado dentro del rango pero todavía sin desembolsar: cuenta como
+    # aprobación, no como desembolso. Esa es exactamente la distinción que el
+    # reporte no podía hacer antes de que existiera disbursed_at.
+    _create_loan(
+        client_id,
+        LoanStatusEnum.APPROVED,
+        created_at=dentro,
+        approved_at=dentro,
+        principal="9000.00",
+    )
+
+    response = servicer.GetPeriodReport(
+        dashboard_service_pb2.GetPeriodReportRequest(
+            start_date=(hoy - timedelta(days=7)).date().isoformat(),
+            end_date=hoy.date().isoformat(),
+        ),
+        FakeContext(),
+    )
+
+    assert response.loans_disbursed == 1
+    assert Decimal(response.principal_disbursed) == Decimal("3000.00")
+    assert response.loans_approved == 2
+    assert Decimal(response.principal_approved) == Decimal("12000.00")
+
+
+def test_period_report_ignores_loans_disbursed_before_the_column_existed(servicer):
+    """La migración no hace backfill: un préstamo desembolsado antes de que
+    existiera disbursed_at queda en NULL. Se lo deja fuera de todo período en
+    vez de atribuirlo a uno inventado -- el total histórico sigue estando en
+    GetDashboardStats.total_disbursed, que no depende de esta columna."""
+    client_id = _create_client("8000032", "dash_disb_null@example.com")
+    hoy = datetime.now(timezone.utc)
+    _create_loan(
+        client_id,
+        LoanStatusEnum.ACTIVE,
+        created_at=hoy - timedelta(days=1),
+        approved_at=hoy - timedelta(days=1),
+        disbursed_at=None,
+        principal="4000.00",
+    )
+
+    response = servicer.GetPeriodReport(
+        dashboard_service_pb2.GetPeriodReportRequest(
+            start_date=(hoy - timedelta(days=7)).date().isoformat(),
+            end_date=hoy.date().isoformat(),
+        ),
+        FakeContext(),
+    )
+    assert response.loans_disbursed == 0
+    assert Decimal(response.principal_disbursed) == Decimal("0.00")
+    # Pero sigue contando en la cartera desembolsada histórica del panel.
+    stats = servicer.GetDashboardStats(
+        dashboard_service_pb2.GetDashboardStatsRequest(), FakeContext()
+    )
+    assert Decimal(stats.total_disbursed) == Decimal("4000.00")
 
 
 def test_period_report_totals_payments_received_in_range(servicer):

@@ -169,9 +169,57 @@ secuencia es de arriba hacia abajo, igual que la atención real:
 4.  **Elegir el medio**. Acá **Efectivo va primero**, al revés que en
     `LoansView`: esta pantalla *es* la caja, así que el cobro en ventanilla es el
     caso normal. Con Efectivo el campo de referencia se deshabilita.
-5.  **Registrar el cobro** y **emitir el Comprobante de Pago** (PDF, DOCX o
-    impresión). Los botones del comprobante se habilitan recién después del
-    cobro, porque el documento describe *ese* pago (BR-LOAN-011).
+5.  **Registrar el cobro** y **emitir el comprobante**. Los botones se habilitan
+    recién después del cobro, porque el documento describe *ese* pago
+    (BR-LOAN-011). Hay dos formatos, y el primero es el normal en ventanilla:
+
+    *   **Ticket de cobro (80 mm)** — "Imprimir ticket", el papel que se le
+        entrega al cliente en la mano, impreso en la térmica de la caja (FTX
+        FTXP 80W). Lleva la entidad, el cliente, el pago, las cuotas abonadas,
+        el cajero que cobró y un espacio de sello y firma. Ver abajo.
+    *   **Comprobante de Pago A4** (PDF, DOCX o impresión) — el mismo hecho en
+        formato carta, para archivar o enviar.
+
+### Ticket de cobro en impresora térmica (80 mm)
+
+`documents.ticket_cobro_html()` arma el ticket y `cas_client/printing.py` la
+página. Sale de la **misma respuesta de `RecordPayment`** que el comprobante A4
+y comparte sus helpers (`cuotas_cubiertas_texto`, `filas_medio_de_pago`,
+`responsable`), así que el papelito y el A4 no pueden decir cosas distintas del
+mismo cobro. Lleva, además de lo que trae el A4, los **datos del cajero** y un
+**espacio de sello y firma**: es el respaldo físico que el cliente se lleva.
+
+Tres decisiones que no conviene "corregir" después:
+
+*   **La altura de la página se mide, no se fija.** Un rollo térmico no tiene
+    páginas: el driver corta al final del trabajo. Declararle el formulario
+    típico de estas impresoras ("80 x 297 mm") gastaría casi 30 cm de papel en
+    blanco por ticket. `printing.content_height_mm()` dispone el HTML contra el
+    ancho útil y arma la página de ese alto más la cola del corte
+    (`TICKET_TAIL_MM`), que existe porque la cuchilla queda unos milímetros por
+    encima de la cabeza térmica.
+*   **La página se configura *después* del diálogo de impresión.** Al aceptar el
+    `QPrintDialog`, Qt reemplaza el page layout por el de la impresora elegida;
+    configurarlo antes se pierde y el ticket vuelve a salir en el formulario por
+    defecto del driver.
+*   **El cierre no menciona variaciones de montos.** El Comprobante A4 termina
+    con "el saldo restante puede variar por cargos o ajustes posteriores"; en el
+    ticket la entidad pidió sacarlo. Es el papel que el cliente se lleva de
+    ventanilla, y una salvedad sobre costos o precios que pueden cambiar se lee
+    como una reserva sobre el cobro recién hecho, justo al pie de un documento
+    cuyo sentido es dejar constancia de que pagó. Cierra con "¡Gracias por su
+    pago! / Conserve este comprobante como constancia de la operación." más el
+    nombre y el teléfono de la entidad. La salvedad sigue en el A4, que es la
+    copia de archivo.
+*   **Sin logo y sin color.** Una térmica es monocromática: un bitmap a color
+    sale tramado y lento, y varios drivers de estas impresoras directamente no
+    lo imprimen. La entidad queda identificada por el bloque de texto del
+    encabezado. `tests/client/test_ticket_cobro.py` lo verifica.
+
+El número de ticket se deriva del préstamo más la marca de tiempo del cobro
+(`documents.numero_ticket`): el contrato no devuelve un id de pago, y dos pagos
+del mismo préstamo en el mismo segundo no existen porque `RecordPayment` los
+serializa con `with_for_update` sobre la fila del préstamo.
 
 Tras el cobro la vista recarga el préstamo y el cronograma —así el saldo y las
 cuotas pendientes quedan al día— y vuelve a pedir el estado de la caja, que

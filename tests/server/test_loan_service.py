@@ -769,6 +769,37 @@ def test_disburse_loan_success_transitions_to_active(servicer):
     assert response.status == "ACTIVE"
 
 
+def test_disburse_loan_records_when_the_money_left(servicer):
+    """BR-DASH-002: el estado ACTIVE dice que el préstamo está desembolsado,
+    pero no cuándo -- y sin la fecha el reporte de cierre de período no puede
+    totalizar la plata que salió de la entidad en el mes.
+
+    `approved_at` no sirve para eso: aprobar es una decisión y desembolsar es
+    entregar el dinero, y entre las dos pueden pasar hasta 30 días
+    (BR-LOAN-003) o no pasar nunca.
+    """
+    client_id = _create_client()
+    loan = _create_loan(servicer, client_id)
+    servicer.ApproveLoan(
+        loan_service_pb2.ApproveLoanRequest(loan_id=loan.loan_id), FakeContext()
+    )
+    with SessionLocal() as session:
+        assert session.get(Loan, uuid.UUID(loan.loan_id)).disbursed_at is None
+
+    antes = datetime.now(timezone.utc)
+    servicer.DisburseLoan(
+        loan_service_pb2.DisburseLoanRequest(loan_id=loan.loan_id), FakeContext()
+    )
+    despues = datetime.now(timezone.utc)
+
+    with SessionLocal() as session:
+        prestamo = session.get(Loan, uuid.UUID(loan.loan_id))
+        assert prestamo.disbursed_at is not None
+        assert antes <= prestamo.disbursed_at <= despues
+        # Es un hecho posterior a la aprobación, no el mismo instante.
+        assert prestamo.disbursed_at >= prestamo.approved_at
+
+
 def test_disburse_loan_rejects_expired_approval(servicer):
     client_id = _create_client()
     loan = _create_loan(servicer, client_id)

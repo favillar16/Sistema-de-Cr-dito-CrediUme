@@ -64,6 +64,11 @@ class _FakeReport:
     loans_approved = 4
     principal_created = "15000000.00"
     principal_approved = "12000000.00"
+    # BR-DASH-002: lo efectivamente entregado en el período. Menor que lo
+    # aprobado a propósito -- aprobar no es desembolsar, y el reporte los
+    # informa por separado justamente porque no tienen por qué coincidir.
+    loans_disbursed = 3
+    principal_disbursed = "9000000.00"
     payments_count = 9
     payments_total = "4500000.00"
     loans_paid = 1
@@ -71,6 +76,19 @@ class _FakeReport:
     outstanding_at_close = "30000000.00"
     overdue_at_close = "1200000.00"
     overdue_loans_at_close = 2
+
+
+def test_period_report_totals_what_was_actually_disbursed():
+    """Sin este renglón el reporte de cierre no dice cuánta plata salió de la
+    entidad en el período: "capital aprobado" es una decisión, no una salida
+    de caja, y un préstamo aprobado puede no desembolsarse nunca (BR-LOAN-003
+    lo vence a los 30 días)."""
+    filas = documents._filas_reporte(_FakeReport())
+    conceptos = {concepto: valor for _seccion, concepto, valor in filas}
+    assert conceptos["Préstamos desembolsados"] == "3"
+    assert conceptos["Capital desembolsado"] == "9.000.000 Gs"
+    # Y llega a los dos formatos, no solo a la pantalla.
+    assert "Capital desembolsado" in documents.reporte_periodo_html(_FakeReport())
 
 
 def test_period_report_renders_dates_as_day_month_year():

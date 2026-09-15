@@ -34,6 +34,7 @@ from decimal import Decimal, InvalidOperation
 
 from cas_client import assets, theme
 from cas_client.formatting import (
+    a_hora_local,
     fecha,
     fecha_hora,
     gs,
@@ -674,6 +675,219 @@ def comprobante_pago_html(loan, client, payment) -> str:
     """
 
 
+# ---- Ticket de cobro para impresora t&eacute;rmica (80 mm) ----------------
+#
+# Formato de rollo de la FTX FTXP 80W de la entidad: 80 mm de papel, de los
+# cuales la cabeza t&eacute;rmica imprime unos 72 mm. Por eso el ancho y los
+# m&aacute;rgenes viven ac&aacute; y no en la vista que dispara la impresi&oacute;n: son una
+# caracter&iacute;stica del papel, no de la pantalla. cas_client/printing.py los
+# usa para armar la p&aacute;gina; este m&oacute;dulo solo arma el HTML que entra en ese
+# ancho.
+TICKET_WIDTH_MM = 80.0
+TICKET_MARGIN_MM = 4.0
+# Papel que se deja correr despu&eacute;s de la &uacute;ltima l&iacute;nea. No es est&eacute;tico:
+# en una t&eacute;rmica la cuchilla queda algunos mil&iacute;metros por encima de la
+# cabeza, as&iacute; que sin esta cola el corte se lleva el pie del ticket. Se
+# ampli&oacute; de 14 a 24 mm a pedido de la entidad: el ticket sal&iacute;a corto y el
+# corte quedaba pegado al pie.
+TICKET_TAIL_MM = 24.0
+
+# Todo el ticket va en negro, no en theme.PRIMARY como el resto de los
+# documentos: una t&eacute;rmica es monocrom&aacute;tica y cualquier color termina
+# rendereado como un tramado gris que se lee peor que el negro pleno.
+_TICKET_INK = "#000000"
+_TICKET_FONT = "Arial, 'Segoe UI', sans-serif"
+
+
+def _ticket_separador() -> str:
+    """L&iacute;nea divisoria del ticket.
+
+    Es una celda de tabla con borde inferior y no un &lt;hr&gt;: el subconjunto
+    de CSS que soporta QTextDocument ignora `border-top` sobre un &lt;hr&gt; con
+    `border:none` -- se ve el aire que deja el margen, pero no la l&iacute;nea.
+    Mismo recurso que ya usa _signature_block() por la misma limitaci&oacute;n.
+    """
+    return (
+        '<table width="100%" cellspacing="0" cellpadding="3" border="0">'
+        f'<tr><td style="border-bottom:1px solid {_TICKET_INK}; '
+        'font-size:3pt;">&nbsp;</td></tr>'
+        "</table>"
+    )
+
+
+def _ticket_filas(filas: list, *, destacar_ultima: bool = False) -> str:
+    """Tabla de dos columnas (concepto a la izquierda, valor a la derecha) sin
+    bordes, que es como se lee un ticket de caja.
+
+    Se arma con una tabla y no alineando texto a mano porque el ancho
+    &uacute;til son ~72 mm: con una fuente proporcional, rellenar con espacios para
+    alinear la columna derecha se desalinea en cuanto cambia un d&iacute;gito.
+    """
+    html = []
+    for indice, (concepto, valor) in enumerate(filas):
+        ultima = destacar_ultima and indice == len(filas) - 1
+        peso = "700" if ultima else "400"
+        html.append(
+            f'<tr><td style="font-size:8pt; font-weight:{peso};">{concepto}</td>'
+            f'<td align="right" style="font-size:8pt; font-weight:{peso};">'
+            f"{valor}</td></tr>"
+        )
+    return (
+        '<table width="100%" cellspacing="0" cellpadding="1" border="0">'
+        + "".join(html)
+        + "</table>"
+    )
+
+
+def _ticket_sello_y_firma() -> str:
+    """Espacio de sello y firma del ticket.
+
+    Se arma con una tabla de una celda alta y no con _signature_block(): ese
+    es un espacio de firma pensado para un A4 (150 px de ancho, 40 px de aire
+    arriba) que en 72 mm de papel queda descentrado y se come media cola del
+    rollo. Ac&aacute; hace falta un rengl&oacute;n que ocupe el ancho del ticket y deje
+    lugar para el sello de goma de la entidad adem&aacute;s de la firma.
+
+    El alto del espacio se fuerza con &lt;br/&gt; dentro de la celda y no con un
+    atributo `height`: QTextDocument lo ignora, la celda colapsa y la
+    l&iacute;nea de firma queda pegada al rengl&oacute;n de arriba, sin lugar para firmar.
+    """
+    return f"""
+    <table width="100%" cellspacing="0" cellpadding="0" border="0">
+      <tr><td style="border-bottom:1px solid {_TICKET_INK}; font-size:9pt;">
+        <br/>&nbsp;<br/>&nbsp;<br/>&nbsp;<br/>&nbsp;<br/>&nbsp;<br/>&nbsp;
+      </td></tr>
+      <tr><td align="center" style="font-size:8pt; font-weight:700;">
+        SELLO Y FIRMA
+      </td></tr>
+    </table>
+    """
+
+
+def numero_ticket(loan, payment) -> str:
+    """N&uacute;mero visible del ticket, derivado del pr&eacute;stamo y del instante en
+    que qued&oacute; registrado el pago.
+
+    El servidor no devuelve un id de pago (RecordPaymentResponse no lo trae),
+    as&iacute; que en vez de agregar un campo al contrato se usa lo que ya
+    identifica al cobro un&iacute;vocamente: el pr&eacute;stamo m&aacute;s su marca de tiempo.
+    Dos pagos del mismo pr&eacute;stamo en el mismo segundo no existen --
+    RecordPayment los serializa con with_for_update sobre la fila del
+    pr&eacute;stamo.
+    """
+    momento = a_hora_local(payment.paid_at.ToDatetime())
+    return f"{loan.id[:8].upper()}-{momento.strftime('%Y%m%d-%H%M%S')}"
+
+
+def ticket_cobro_html(loan, client, payment) -> str:
+    """Ticket de cobro de 80 mm para la impresora t&eacute;rmica de la caja.
+
+    Documenta el mismo hecho que el Comprobante de Pago (BR-LOAN-011), en el
+    formato que se entrega en mano en ventanilla: mismo origen de datos (la
+    respuesta de RecordPayment, no lo que el cliente crey&oacute; haber enviado) y
+    los mismos helpers compartidos -- cuotas_cubiertas_texto(),
+    filas_medio_de_pago(), responsable() --, as&iacute; que el papelito y el A4 no
+    pueden decir cosas distintas del mismo cobro.
+
+    Lo que el comprobante A4 no tiene y ac&aacute; es obligatorio: los datos del
+    cajero que cobr&oacute; y un espacio de sello y firma, porque este ticket es el
+    respaldo f&iacute;sico que el cliente se lleva de ventanilla.
+
+    Deliberadamente **sin logo**: un bitmap a color en una t&eacute;rmica sale
+    tramado y lento, y varios drivers de estas impresoras directamente no lo
+    imprimen. La entidad queda identificada por el bloque de texto del
+    encabezado, que es lo que se lee.
+
+    loan: loan_service_pb2.GetLoanByIdResponse
+    client: client_service_pb2.GetClientByIdResponse
+    payment: loan_service_pb2.RecordPaymentResponse"""
+    cuotas = cuotas_cubiertas_texto(
+        payment.covered_installments, payment.total_installments
+    )
+    cajero = responsable(payment.recorded_by_name, payment.recorded_by_national_id)
+    # fecha_hora() y no un strftime propio, por la misma raz&oacute;n que el
+    # comprobante A4: paid_at viaja como un naive en UTC y el ticket tiene que
+    # decir la hora a la que el cliente pag&oacute;.
+    fecha_pago = fecha_hora(payment.paid_at.ToDatetime())
+
+    datos_cliente = _ticket_filas(
+        [
+            ("Cliente", f"{client.first_name} {client.last_name}"),
+            ("C.I.", client.national_id),
+            ("Tel&eacute;fono", client.phone_number),
+        ]
+    )
+    datos_prestamo = _ticket_filas(
+        [
+            ("Pr&eacute;stamo N&deg;", loan.id[:8].upper()),
+            ("Cuotas abonadas", cuotas),
+            ("Fecha y hora", fecha_pago),
+        ]
+    )
+    detalle_pago = _ticket_filas(
+        list(filas_medio_de_pago(payment))
+        + [
+            ("Total pagado del pr&eacute;stamo", gs(payment.total_paid)),
+            ("Saldo restante", gs(payment.remaining_balance)),
+        ],
+        destacar_ultima=True,
+    )
+    cierre = (
+        '<p style="text-align:center; font-size:8pt; font-weight:700; '
+        'margin:6px 0 0 0;">PR&Eacute;STAMO TOTALMENTE CANCELADO</p>'
+        if payment.status == "PAID"
+        else ""
+    )
+
+    return f"""
+    <html><body style="font-family:{_TICKET_FONT}; color:{_TICKET_INK};
+                       font-size:8pt;">
+    <div style="margin:0; text-align:center; font-size:12pt; font-weight:700;">
+      {_COMPANY_NAME}
+    </div>
+    <div style="margin:0; text-align:center; font-size:8pt;">RUC: {_COMPANY_RUC}</div>
+    <div style="margin:0; text-align:center; font-size:8pt;">{_COMPANY_ADDRESS}</div>
+    <div style="margin:0; text-align:center; font-size:8pt;">Cel: {_COMPANY_PHONE}</div>
+    {_ticket_separador()}
+    <div style="margin:0; text-align:center; font-size:10pt; font-weight:700;">
+      RECIBO DE COBRO
+    </div>
+    <div style="margin:0; text-align:center; font-size:8pt;">
+      N&deg; {numero_ticket(loan, payment)}
+    </div>
+    {_ticket_separador()}
+    {datos_cliente}
+    {_ticket_separador()}
+    {datos_prestamo}
+    {_ticket_separador()}
+    <table width="100%" cellspacing="0" cellpadding="1" border="0">
+      <tr>
+        <td style="font-size:10pt; font-weight:700;">MONTO ABONADO</td>
+        <td align="right" style="font-size:13pt; font-weight:700;">
+          {gs(payment.amount_paid)}
+        </td>
+      </tr>
+    </table>
+    {_ticket_separador()}
+    {detalle_pago}
+    {cierre}
+    {_ticket_separador()}
+    {_ticket_filas([("Cajero/a", cajero)])}
+    {_ticket_sello_y_firma()}
+    <p style="text-align:center; font-size:9pt; font-weight:700;
+              margin:14px 0 0 0;">
+      &iexcl;Gracias por su pago!
+    </p>
+    <p style="text-align:center; font-size:8pt; margin:4px 0 0 0;">
+      Conserve este comprobante como constancia de la operaci&oacute;n.
+    </p>
+    <p style="text-align:center; font-size:8pt; margin:4px 0 0 0;">
+      {_COMPANY_NAME} &mdash; Cel: {_COMPANY_PHONE}
+    </p>
+    </body></html>
+    """
+
+
 def _relacion_cuota_ingreso(loan, client) -> tuple[str, bool]:
     """(texto, excede_tope) -- la cuota mensual como % del ingreso mensual
     declarado del cliente, para que quien decide una aprobación vea de un
@@ -809,6 +1023,21 @@ def _filas_reporte(report) -> list[tuple[str, str, str]]:
             "Movimiento del período",
             "Capital aprobado",
             gs(report.principal_approved),
+        ),
+        # Los desembolsos van al final del bloque y no al lado de las
+        # aprobaciones porque son el último paso de la secuencia (se pide, se
+        # aprueba, se desembolsa) y, sobre todo, porque es el único renglón de
+        # acá que mide plata efectivamente entregada: "capital aprobado" es una
+        # decisión, no una salida de caja.
+        (
+            "Movimiento del período",
+            "Préstamos desembolsados",
+            str(report.loans_disbursed),
+        ),
+        (
+            "Movimiento del período",
+            "Capital desembolsado",
+            gs(report.principal_disbursed),
         ),
         ("Cobranza del período", "Pagos recibidos", str(report.payments_count)),
         ("Cobranza del período", "Total cobrado", gs(report.payments_total)),

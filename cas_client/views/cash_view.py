@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cas_client import documents, documents_docx, theme
+from cas_client import documents, documents_docx, printing, theme
 from cas_client.formatting import (
     DISPLAY_DATE_PLACEHOLDER,
     es_fecha_valida,
@@ -378,18 +378,29 @@ class CashView(BaseView):
         self._loan_summary.setWordWrap(True)
         detail_layout.addWidget(self._loan_summary)
 
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
+        # ResponsiveGrid y no un QHBoxLayout: con el botón del ticket son 5
+        # controles fijos en una fila, y esta tarjeta pasaba de 550 a 667 px de
+        # mínimo contra un viewport de ~608 px en la ventana mínima de la app
+        # (900x560). wrap_scrollable() tiene el scroll horizontal desactivado a
+        # propósito, así que el último botón no quedaba apretado: quedaba
+        # recortado y sin forma de llegar a él -- el mismo defecto que ya se
+        # arregló una vez en la página de detalle de loans_view.py.
+        actions = ResponsiveGrid(min_cell_width=160, spacing=8)
         self._collect_button = QPushButton("Registrar cobro")
         self._collect_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._collect_button.setStyleSheet(theme.accent_button_style())
         self._collect_button.clicked.connect(self._on_collect)
-        actions.addWidget(self._collect_button)
+        actions.add_widget(self._collect_button)
 
         # BR-LOAN-011: se habilitan recién cuando hay un pago registrado en
         # esta sesión -- el comprobante describe ese pago, no el préstamo.
         self._receipt_buttons: list[QPushButton] = []
         for label, handler in (
+            # El ticket va primero y no al final de la fila: en ventanilla el
+            # papelito de la térmica es lo normal, y el A4 (PDF/DOCX) la
+            # excepción -- es lo que se emite cuando hay que archivarlo o
+            # mandarlo por mail, no lo que se le da al cliente en la mano.
+            ("Imprimir ticket", self._on_ticket_print),
             ("Comprobante PDF", self._on_receipt_pdf),
             ("Comprobante DOCX", self._on_receipt_docx),
             ("Imprimir comprobante", self._on_receipt_print),
@@ -399,10 +410,13 @@ class CashView(BaseView):
             button.setStyleSheet(theme.secondary_button_style())
             button.clicked.connect(handler)
             button.setEnabled(False)
-            actions.addWidget(button)
+            actions.add_widget(button)
             self._receipt_buttons.append(button)
-        actions.addStretch()
-        detail_layout.addLayout(actions)
+        self._ticket_button = self._receipt_buttons[0]
+        self._ticket_button.setToolTip(
+            "Imprime el ticket de 80 mm en la impresora térmica de la caja."
+        )
+        detail_layout.addWidget(actions)
 
         self._collection_detail.setVisible(False)
         layout.addWidget(self._collection_detail)
@@ -1058,6 +1072,33 @@ class CashView(BaseView):
 
     def _receipt_name(self, extension: str) -> str:
         return f"comprobante_{self._selected_loan.id[:8]}.{extension}"
+
+    def _on_ticket_print(self) -> None:
+        """Ticket de 80 mm en la impresora térmica de la caja.
+
+        Se muestra el diálogo de impresión igual que en el resto de la app:
+        la térmica no es necesariamente la impresora por defecto de la PC, y
+        mandar el ticket a ciegas a la que esté configurada sacaría un papel
+        de 80 mm de ancho por una A4. El armado de la página va *después* de
+        aceptar el diálogo -- ver apply_ticket_page().
+        """
+        if self._last_payment is None:
+            return
+        html = documents.ticket_cobro_html(
+            self._selected_loan, self._selected_client, self._last_payment
+        )
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printing.apply_ticket_page(printer, html)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("Imprimir ticket de cobro")
+        if dialog.exec() != QPrintDialog.DialogCode.Accepted:
+            return
+        try:
+            printing.render_ticket(printer, html)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Ticket enviado a la impresora.")
 
     def _on_receipt_pdf(self) -> None:
         if self._last_payment is None:
