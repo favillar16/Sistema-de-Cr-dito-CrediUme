@@ -105,6 +105,11 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     "/dashboard.DashboardService/GetClientPaymentStatusReport": (
         CREDIT_ANALYST_AND_ABOVE
     ),
+    # Al revés que GetClientPaymentStatusReport: esto se pide desde la propia
+    # pantalla de Caja, así que el cajero tiene que poder llamarlo -- mira
+    # hacia adelante (cuotas por vencer) en vez de gestionar cartera ya
+    # atrasada, mismo criterio de "consulta operativa" que GetDashboardStats.
+    "/dashboard.DashboardService/GetUpcomingDueReport": CASHIER_AND_ABOVE,
     # BR-CAJA-*. Todas son CASHIER_AND_ABOVE porque el turno sobre el que
     # operan se resuelve desde el token, no desde el request: cada rol opera
     # su propia caja. Las dos asimetrías por rol (un Gerente puede cerrar la

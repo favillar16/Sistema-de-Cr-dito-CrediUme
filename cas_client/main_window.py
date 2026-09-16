@@ -277,13 +277,22 @@ class MainWindow(QMainWindow):
         # LoansView.
         client_service = ClientServiceClient()
         loan_service = LoanServiceClient()
+        # Compartida con CashView además de DashboardView: el reporte de
+        # cartera por vencer (documents_xlsx.py) agrega sobre préstamos y
+        # clientes igual que el resto de DashboardService, aunque se pida
+        # desde la pantalla de Caja.
+        dashboard_service = DashboardServiceClient()
         clients_view = ClientsView(client_service, self._session)
         clients_view.view_loans_requested.connect(self._on_view_loans_requested)
         loans_view = LoansView(loan_service, client_service, self._session)
         loans_view.view_client_requested.connect(self._on_view_client_requested)
-        dashboard_view = DashboardView(DashboardServiceClient(), self._session)
+        dashboard_view = DashboardView(dashboard_service, self._session)
         cash_view = CashView(
-            CashServiceClient(), client_service, loan_service, self._session
+            CashServiceClient(),
+            client_service,
+            loan_service,
+            dashboard_service,
+            self._session,
         )
         users_view = UsersView(self._auth_client, self._session)
 

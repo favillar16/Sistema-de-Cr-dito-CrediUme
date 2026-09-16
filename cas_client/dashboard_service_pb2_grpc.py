@@ -49,6 +49,11 @@ class DashboardServiceStub(object):
                 request_serializer=dashboard__service__pb2.GetClientPaymentStatusReportRequest.SerializeToString,
                 response_deserializer=dashboard__service__pb2.GetClientPaymentStatusReportResponse.FromString,
                 _registered_method=True)
+        self.GetUpcomingDueReport = channel.unary_unary(
+                '/dashboard.DashboardService/GetUpcomingDueReport',
+                request_serializer=dashboard__service__pb2.GetUpcomingDueReportRequest.SerializeToString,
+                response_deserializer=dashboard__service__pb2.GetUpcomingDueReportResponse.FromString,
+                _registered_method=True)
 
 
 class DashboardServiceServicer(object):
@@ -82,6 +87,19 @@ class DashboardServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetUpcomingDueReport(self, request, context):
+        """Cartera por vencer, pensado para pedirse desde la pantalla de Caja:
+        cuotas de préstamos ACTIVE que vencen dentro de los próximos N días
+        (hoy incluido) y todavía no están cubiertas. A diferencia de
+        GetClientPaymentStatusReport (que mira lo YA vencido), esto mira hacia
+        ADELANTE -- para que el cajero le recuerde el vencimiento al cliente
+        antes de que entre en mora. Se exporta únicamente como planilla Excel
+        del lado del cliente; no tiene versión PDF/DOCX.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_DashboardServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -99,6 +117,11 @@ def add_DashboardServiceServicer_to_server(servicer, server):
                     servicer.GetClientPaymentStatusReport,
                     request_deserializer=dashboard__service__pb2.GetClientPaymentStatusReportRequest.FromString,
                     response_serializer=dashboard__service__pb2.GetClientPaymentStatusReportResponse.SerializeToString,
+            ),
+            'GetUpcomingDueReport': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetUpcomingDueReport,
+                    request_deserializer=dashboard__service__pb2.GetUpcomingDueReportRequest.FromString,
+                    response_serializer=dashboard__service__pb2.GetUpcomingDueReportResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -182,6 +205,33 @@ class DashboardService(object):
             '/dashboard.DashboardService/GetClientPaymentStatusReport',
             dashboard__service__pb2.GetClientPaymentStatusReportRequest.SerializeToString,
             dashboard__service__pb2.GetClientPaymentStatusReportResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetUpcomingDueReport(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dashboard.DashboardService/GetUpcomingDueReport',
+            dashboard__service__pb2.GetUpcomingDueReportRequest.SerializeToString,
+            dashboard__service__pb2.GetUpcomingDueReportResponse.FromString,
             options,
             channel_credentials,
             insecure,

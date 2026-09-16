@@ -158,3 +158,30 @@ def test_payment_status_report_without_token_is_unauthenticated(stubs):
     with pytest.raises(grpc.RpcError) as exc_info:
         dashboard_stub.GetClientPaymentStatusReport(_payment_status_request())
     assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+
+def _upcoming_due_request(days_ahead=7):
+    return dashboard_service_pb2.GetUpcomingDueReportRequest(days_ahead=days_ahead)
+
+
+def test_get_upcoming_due_report_allows_every_role(stubs):
+    """Al revés que GetClientPaymentStatusReport (que excluye al cajero,
+    BR-DASH-003): este reporte se pide desde la propia pantalla de Caja, así
+    que el cajero tiene que poder llamarlo."""
+    auth_stub, dashboard_stub = stubs
+    for role in RoleEnum:
+        username = f"upcoming_{role.value.lower()}"
+        _create_user(username, "Passw0rd!", role)
+        metadata = _login(auth_stub, username, "Passw0rd!")
+        response = dashboard_stub.GetUpcomingDueReport(
+            _upcoming_due_request(), metadata=metadata
+        )
+        assert response.days_ahead == 7
+        assert list(response.rows) == []
+
+
+def test_get_upcoming_due_report_without_token_is_unauthenticated(stubs):
+    _, dashboard_stub = stubs
+    with pytest.raises(grpc.RpcError) as exc_info:
+        dashboard_stub.GetUpcomingDueReport(_upcoming_due_request())
+    assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED

@@ -352,3 +352,75 @@ class DashboardServicer(dashboard_service_pb2_grpc.DashboardServiceServicer):
                 total_outstanding=str(total_saldo),
                 total_overdue=str(total_mora),
             )
+
+    def GetUpcomingDueReport(self, request, context):
+        """Cartera por vencer (pantalla de Caja): cuotas de préstamos ACTIVE
+        que vencen dentro de los próximos `days_ahead` días (hoy incluido) y
+        todavía no están cubiertas.
+
+        Mira hacia ADELANTE, al revés de GetClientPaymentStatusReport (que
+        mira lo YA vencido, BR-DASH-003): esto es para que el cajero le
+        recuerde el vencimiento al cliente que tiene delante antes de que
+        entre en mora, no para gestionar la cartera que ya está atrasada. Por
+        eso no exige only_overdue ni nada equivalente -- todas las filas son,
+        por definición, cuotas que todavía no vencieron.
+
+        Una fila por CUOTA dentro de la ventana, no por cliente ni por
+        préstamo: un cliente con dos préstamos ACTIVE, cada uno con una cuota
+        próxima, aparece dos veces -- cada fila es una factura distinta con
+        su propio monto y su propio conteo de cuotas ya abonadas.
+        """
+        dias = request.days_ahead if request.days_ahead > 0 else 7
+        ahora = datetime.now(timezone.utc)
+        hoy = ahora.date()
+        limite = hoy + timedelta(days=dias)
+
+        with SessionLocal() as sesion:
+            prestamos = sesion.query(Loan).all()
+            _, vencidos = _vencer_atrasados_y_contar_activos(prestamos, ahora)
+            if vencidos:
+                _auditar_vencidos(sesion, vencidos, context, ahora)
+                sesion.commit()
+
+            clientes = {c.id: c for c in sesion.query(Client).all()}
+
+            filas = []
+            for prestamo in prestamos:
+                if prestamo.status != LoanStatusEnum.ACTIVE:
+                    continue
+                cliente = clientes.get(prestamo.client_id)
+                if cliente is None:
+                    continue
+
+                cronograma = _cronograma_con_pendientes(prestamo)
+                cuotas_pagadas = sum(1 for _f, _p, pagada in cronograma if pagada)
+
+                for fila, pendiente, pagada in cronograma:
+                    if pagada or fila.fecha_vencimiento is None:
+                        continue
+                    if not (hoy <= fila.fecha_vencimiento <= limite):
+                        continue
+                    filas.append(
+                        dashboard_service_pb2.UpcomingDueRow(
+                            client_id=str(cliente.id),
+                            client_name=f"{cliente.first_name} {cliente.last_name}",
+                            phone_number=cliente.phone_number,
+                            loan_id=str(prestamo.id),
+                            installment_number=fila.numero,
+                            due_date=fila.fecha_vencimiento.isoformat(),
+                            due_amount=str(pendiente),
+                            installments_paid_count=cuotas_pagadas,
+                            term_months=prestamo.term_months,
+                        )
+                    )
+
+            # Vencimiento más próximo primero y, a igual fecha, por nombre --
+            # mismo criterio de estabilidad que GetClientPaymentStatusReport,
+            # para que dos ejecuciones seguidas den el mismo orden.
+            filas.sort(key=lambda f: (f.due_date, f.client_name))
+
+            return dashboard_service_pb2.GetUpcomingDueReportResponse(
+                generated_at=a_marca_tiempo(ahora),
+                days_ahead=dias,
+                rows=filas,
+            )

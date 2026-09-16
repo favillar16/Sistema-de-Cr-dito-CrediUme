@@ -570,3 +570,141 @@ def test_payment_status_expires_stale_approved_loans_lazily(servicer):
 
     with SessionLocal() as session:
         assert session.get(Loan, loan_id).status == LoanStatusEnum.EXPIRED
+
+
+# ---- Cartera por vencer (pantalla de Caja) --------------------------------
+
+
+def _cartera_por_vencer(servicer, days_ahead=7):
+    return servicer.GetUpcomingDueReport(
+        dashboard_service_pb2.GetUpcomingDueReportRequest(days_ahead=days_ahead),
+        FakeContext(),
+    )
+
+
+def test_upcoming_due_lists_an_installment_due_within_the_window(servicer):
+    client_id = _create_client("8200001", "up_dentro@example.com")
+    vencimiento = datetime.now(timezone.utc).date() + timedelta(days=3)
+    loan_id = _create_loan(client_id, LoanStatusEnum.ACTIVE, first_due_date=vencimiento)
+
+    (fila,) = _cartera_por_vencer(servicer).rows
+
+    assert fila.client_id == str(client_id)
+    assert fila.loan_id == str(loan_id)
+    assert fila.installment_number == 1
+    assert fila.due_date == vencimiento.isoformat()
+    assert Decimal(fila.due_amount) == _primeras_cuotas(1)
+    assert fila.installments_paid_count == 0
+    assert fila.term_months == 6
+
+
+def test_upcoming_due_excludes_installments_outside_the_window(servicer):
+    client_id = _create_client("8200002", "up_afuera@example.com")
+    # Vence en 20 días: fuera de la ventana de 7.
+    lejos = datetime.now(timezone.utc).date() + timedelta(days=20)
+    _create_loan(client_id, LoanStatusEnum.ACTIVE, first_due_date=lejos)
+
+    assert list(_cartera_por_vencer(servicer).rows) == []
+
+
+def test_upcoming_due_excludes_installments_already_overdue(servicer):
+    """ "Por vencer" no es "vencida" -- eso ya lo cubre BR-DASH-003
+    (GetClientPaymentStatusReport). Una cuota que ya pasó su fecha no
+    pertenece a este reporte, aunque siga impaga."""
+    client_id = _create_client("8200003", "up_vencida@example.com")
+    atrasado = datetime.now(timezone.utc).date() - timedelta(days=5)
+    _create_loan(client_id, LoanStatusEnum.ACTIVE, first_due_date=atrasado)
+
+    assert list(_cartera_por_vencer(servicer).rows) == []
+
+
+def test_upcoming_due_includes_the_boundary_day(servicer):
+    """Ventana inclusiva en el extremo: una cuota que vence justo al día
+    número `days_ahead` cuenta como "por vencer"."""
+    client_id = _create_client("8200004", "up_limite@example.com")
+    limite = datetime.now(timezone.utc).date() + timedelta(days=7)
+    _create_loan(client_id, LoanStatusEnum.ACTIVE, first_due_date=limite)
+
+    (fila,) = _cartera_por_vencer(servicer, days_ahead=7).rows
+    assert fila.due_date == limite.isoformat()
+
+
+def test_upcoming_due_only_considers_active_loans(servicer):
+    """PENDING/APPROVED todavía no tienen cuotas exigibles y DEFAULTED ya no
+    las tiene -- mismo criterio que _COBRABLE del lado del cliente."""
+    client_id = _create_client("8200005", "up_estado@example.com")
+    pronto = datetime.now(timezone.utc).date() + timedelta(days=2)
+    _create_loan(client_id, LoanStatusEnum.PENDING, first_due_date=pronto)
+    _create_loan(client_id, LoanStatusEnum.APPROVED, first_due_date=pronto)
+    _create_loan(client_id, LoanStatusEnum.DEFAULTED, first_due_date=pronto)
+
+    assert list(_cartera_por_vencer(servicer).rows) == []
+
+
+def test_upcoming_due_excludes_an_installment_already_paid(servicer):
+    client_id = _create_client("8200006", "up_pagada@example.com")
+    vencimiento = datetime.now(timezone.utc).date() + timedelta(days=2)
+    loan_id = _create_loan(client_id, LoanStatusEnum.ACTIVE, first_due_date=vencimiento)
+    _record_payment(loan_id, str(_primeras_cuotas(1)))
+
+    assert list(_cartera_por_vencer(servicer).rows) == []
+
+
+def test_upcoming_due_reports_how_many_installments_are_already_paid(servicer):
+    """El conteo tiene que reflejar lo YA cubierto del préstamo, no solo de
+    la cuota que está por vencer -- por eso se ancla en el cronograma real en
+    vez de asumir una fecha de vencimiento de memoria."""
+    client_id = _create_client("8200007", "up_conteo@example.com")
+    # 25 días atrás: sea cual sea el mes, la cuota 2 (un mes después) cae
+    # entre 3 y 6 días en el futuro (28 a 31 días de mes, menos 25).
+    primer_vencimiento = datetime.now(timezone.utc).date() - timedelta(days=25)
+    loan_id = _create_loan(
+        client_id, LoanStatusEnum.ACTIVE, first_due_date=primer_vencimiento
+    )
+    _record_payment(loan_id, str(_primeras_cuotas(1)))
+
+    cronograma = calcular_cronograma(
+        Decimal("1000.00"),
+        Decimal("0.12"),
+        6,
+        fecha_primer_vencimiento=primer_vencimiento,
+    )
+    segundo_vencimiento = cronograma[1].fecha_vencimiento
+    dias = (segundo_vencimiento - datetime.now(timezone.utc).date()).days
+
+    (fila,) = _cartera_por_vencer(servicer, days_ahead=dias).rows
+
+    assert fila.installment_number == 2
+    assert fila.installments_paid_count == 1
+    assert fila.due_date == segundo_vencimiento.isoformat()
+
+
+def test_upcoming_due_defaults_to_seven_days_when_unspecified(servicer):
+    client_id = _create_client("8200008", "up_default@example.com")
+    vencimiento = datetime.now(timezone.utc).date() + timedelta(days=6)
+    _create_loan(client_id, LoanStatusEnum.ACTIVE, first_due_date=vencimiento)
+
+    response = servicer.GetUpcomingDueReport(
+        dashboard_service_pb2.GetUpcomingDueReportRequest(), FakeContext()
+    )
+    assert response.days_ahead == 7
+    assert len(response.rows) == 1
+
+
+def test_upcoming_due_orders_rows_by_due_date(servicer):
+    lejos = _create_client("8200009", "up_orden_lejos@example.com")
+    _create_loan(
+        lejos,
+        LoanStatusEnum.ACTIVE,
+        first_due_date=datetime.now(timezone.utc).date() + timedelta(days=6),
+    )
+    cerca = _create_client("8200010", "up_orden_cerca@example.com")
+    _create_loan(
+        cerca,
+        LoanStatusEnum.ACTIVE,
+        first_due_date=datetime.now(timezone.utc).date() + timedelta(days=1),
+    )
+
+    filas = _cartera_por_vencer(servicer).rows
+
+    assert [fila.client_id for fila in filas] == [str(cerca), str(lejos)]

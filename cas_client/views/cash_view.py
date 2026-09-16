@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cas_client import documents, documents_docx, printing, theme
+from cas_client import documents, documents_docx, documents_xlsx, printing, theme
 from cas_client.formatting import (
     DISPLAY_DATE_PLACEHOLDER,
     es_fecha_valida,
@@ -43,6 +43,7 @@ from cas_client.grpc_client import (
     ApiError,
     CashServiceClient,
     ClientServiceClient,
+    DashboardServiceClient,
     LoanServiceClient,
 )
 from cas_client.rbac_ui import can_supervise_cash_sessions
@@ -101,6 +102,12 @@ _PAYMENT_METHODS = (
 # Solo se cobra sobre préstamos en curso: un PENDING/APPROVED todavía no tiene
 # cuotas exigibles y un PAID/DEFAULTED/EXPIRED ya no las tiene.
 _COBRABLE = "ACTIVE"
+
+# Ventana del reporte "cartera por vencer" (ver documents_xlsx.py). Fija en
+# 7 días por pedido explícito -- el campo del lado del servidor queda abierto
+# (GetUpcomingDueReportRequest.days_ahead) por si algún día se necesita otra
+# ventana, pero esta pantalla siempre pide la misma.
+_UPCOMING_DUE_DAYS = 7
 
 
 def _friendly_message(exc: Exception) -> str:
@@ -172,6 +179,7 @@ class CashView(BaseView):
         client: CashServiceClient,
         clients_client: ClientServiceClient,
         loans_client: LoanServiceClient,
+        dashboard_client: DashboardServiceClient,
         session: Session,
         parent: QWidget | None = None,
     ):
@@ -183,10 +191,16 @@ class CashView(BaseView):
         # ClientsView/LoansView en vez de abrir canales nuevos.
         self._clients_client = clients_client
         self._loans_client = loans_client
+        # Reporte de cartera por vencer (ver _build_upcoming_due_card): vive
+        # en DashboardService, no en CashService, porque agrega sobre
+        # préstamos/clientes igual que GetClientPaymentStatusReport -- pero se
+        # pide desde acá porque es la pantalla del cajero.
+        self._dashboard_client = dashboard_client
         self._session = session
         self._worker: AsyncWorker | None = None
         self._history_worker: AsyncWorker | None = None
         self._collection_worker: AsyncWorker | None = None
+        self._upcoming_worker: AsyncWorker | None = None
         # Cliente y préstamo elegidos para el cobro en curso, y el último pago
         # registrado (BR-LOAN-011: el comprobante describe UN pago concreto y
         # el servidor no expone historial de pagos, así que solo se puede
@@ -263,6 +277,15 @@ class CashView(BaseView):
         self.content_layout.addWidget(section_label("Historial de arqueos"))
         self._history_card = self._build_history_card()
         self.content_layout.addWidget(self._history_card)
+
+        # Reporte independiente del turno (no depende de que la caja esté
+        # abierta): va al final, después de todo lo que sí es tarea de
+        # ventanilla del momento.
+        self.content_layout.addWidget(
+            section_label("Cartera por vencer (próximos 7 días)")
+        )
+        self._upcoming_card = self._build_upcoming_due_card()
+        self.content_layout.addWidget(self._upcoming_card)
 
         self.content_layout.addStretch()
 
@@ -622,6 +645,41 @@ class CashView(BaseView):
             "Elija un rango de fechas y presione «Buscar arqueos».",
         )
         layout.addWidget(self._history_table)
+
+        return frame
+
+    def _build_upcoming_due_card(self) -> QWidget:
+        """Reporte "solamente Excel" (sin PDF/DOCX/impresión, ver
+        documents_xlsx.py): la lista de clientes con una cuota por vencer en
+        los próximos 7 días, para que el cajero les recuerde el pago antes de
+        que entren en mora. No depende de que la caja esté abierta -- es un
+        listado de cartera, no un movimiento del turno."""
+        frame, layout = card()
+
+        intro = QLabel(
+            "Descargue una planilla Excel con los clientes que tienen una "
+            "cuota por vencer dentro de los próximos 7 días, con el nombre, "
+            "el celular, el monto de la cuota y cuántas cuotas ya abonaron."
+        )
+        intro.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        actions = QHBoxLayout()
+        download_button = QPushButton("Descargar Excel")
+        download_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        download_button.setStyleSheet(theme.secondary_button_style())
+        download_button.clicked.connect(self._on_upcoming_due_clicked)
+        actions.addWidget(download_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        self._upcoming_progress = QProgressBar()
+        self._upcoming_progress.setRange(0, 0)
+        self._upcoming_progress.setTextVisible(False)
+        self._upcoming_progress.setFixedHeight(4)
+        self._upcoming_progress.hide()
+        layout.addWidget(self._upcoming_progress)
 
         return frame
 
@@ -1405,3 +1463,54 @@ class CashView(BaseView):
                 self._history_table.setItem(row, col, item)
         if not response.sessions:
             self._toast.show_message("No hay arqueos en ese rango.")
+
+    # ---- Cartera por vencer (Excel) ---------------------------------------
+
+    def _on_upcoming_due_clicked(self) -> None:
+        if not self._session.access_token:
+            return
+        self._upcoming_progress.setRange(0, 0)
+        self._upcoming_progress.show()
+        self._upcoming_worker = AsyncWorker(
+            self._dashboard_client.get_upcoming_due_report,
+            self._session.access_token,
+            _UPCOMING_DUE_DAYS,
+            error_translator=_friendly_message,
+        )
+        self._upcoming_worker.succeeded.connect(self._on_upcoming_due_loaded)
+        self._upcoming_worker.failed.connect(self._toast.show_message)
+        self._upcoming_worker.finished.connect(self._hide_upcoming_progress)
+        self._upcoming_worker.start()
+
+    def _hide_upcoming_progress(self) -> None:
+        self._upcoming_progress.hide()
+        self._upcoming_progress.setRange(0, 1)
+        self._upcoming_progress.setValue(0)
+
+    def _on_upcoming_due_loaded(self, response) -> None:
+        # El diálogo de guardado va DESPUÉS de traer los datos, no antes: así
+        # el cajero no elige dónde guardar un reporte que después falla por
+        # un problema de conexión, mismo orden que el resto de los documentos
+        # descargables de la app.
+        path, _filtro = QFileDialog.getSaveFileName(
+            self,
+            "Guardar cartera por vencer",
+            "cartera_por_vencer.xlsx",
+            "Excel (*.xlsx)",
+        )
+        if not path:
+            return
+        try:
+            documents_xlsx.reporte_cartera_por_vencer_workbook(response).save(path)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        if response.rows:
+            self._toast.show_message(
+                f"Reporte guardado con {len(response.rows)} cuota(s) por vencer."
+            )
+        else:
+            self._toast.show_message(
+                "Reporte guardado. No hay cuotas por vencer en los próximos "
+                f"{_UPCOMING_DUE_DAYS} días."
+            )

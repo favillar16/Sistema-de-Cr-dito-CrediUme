@@ -592,6 +592,19 @@ class DashboardServiceClient:
             error_cls=ApiError,
         )
 
+    def get_upcoming_due_report(
+        self, access_token: str, days_ahead: int = 7
+    ) -> dashboard_service_pb2.GetUpcomingDueReportResponse:
+        """Cartera por vencer (pantalla de Caja): cuotas ACTIVE que vencen
+        dentro de `days_ahead` días y todavía no están cubiertas. Se exporta
+        únicamente como Excel del lado del cliente (documents_xlsx.py)."""
+        return _invoke(
+            self._stub.GetUpcomingDueReport,
+            dashboard_service_pb2.GetUpcomingDueReportRequest(days_ahead=days_ahead),
+            access_token=access_token,
+            error_cls=ApiError,
+        )
+
 
 class CashServiceClient:
     """Thin wrapper around the CashService gRPC stub (BR-CAJA-*).

@@ -78,6 +78,7 @@ def view(app):
         client=_StubClient(),
         clients_client=_StubClient(),
         loans_client=_StubClient(),
+        dashboard_client=_StubClient(),
         session=session,
     )
     # El cobro, la carga del cronograma y el refresco de la caja salen por

@@ -21,6 +21,16 @@ service DashboardService {
     // debe, para llamar/gestionar la cobranza.
     rpc GetClientPaymentStatusReport (GetClientPaymentStatusReportRequest)
         returns (GetClientPaymentStatusReportResponse);
+
+    // Cartera por vencer, pensado para pedirse desde la pantalla de Caja:
+    // cuotas de préstamos ACTIVE que vencen dentro de los próximos N días
+    // (hoy incluido) y todavía no están cubiertas. A diferencia de
+    // GetClientPaymentStatusReport (que mira lo YA vencido), esto mira hacia
+    // ADELANTE -- para que el cajero le recuerde el vencimiento al cliente
+    // antes de que entre en mora. Se exporta únicamente como planilla Excel
+    // del lado del cliente; no tiene versión PDF/DOCX.
+    rpc GetUpcomingDueReport (GetUpcomingDueReportRequest)
+        returns (GetUpcomingDueReportResponse);
 }
 
 message GetDashboardStatsRequest {
@@ -140,4 +150,38 @@ message GetClientPaymentStatusReportResponse {
     int32 overdue_clients_count = 5;
     string total_outstanding = 6;
     string total_overdue = 7;
+}
+
+message GetUpcomingDueReportRequest {
+    // Días hacia adelante desde hoy (inclusive) a considerar. El cliente
+    // siempre manda 7 hoy, pero el campo queda abierto en vez de hardcodear
+    // la ventana en el servidor.
+    int32 days_ahead = 1;
+}
+
+// Una fila por CUOTA próxima a vencer, no por cliente ni por préstamo: un
+// cliente con dos préstamos activos, cada uno con una cuota dentro de la
+// ventana, aparece dos veces -- cada fila es una factura distinta.
+message UpcomingDueRow {
+    string client_id = 1;
+    string client_name = 2;      // "Nombre Apellido"
+    string phone_number = 3;
+    string loan_id = 4;
+    int32 installment_number = 5;
+    string due_date = 6;         // YYYY-MM-DD
+    // Pendiente de esa cuota específica (no el total del préstamo), mismo
+    // cálculo FIFO que BR-LOAN-009/BR-LOAN-010.
+    string due_amount = 7;
+    // Cuotas ya abonadas de ESE préstamo hasta ahora (para dar contexto de
+    // cumplimiento junto al monto que se le va a cobrar).
+    int32 installments_paid_count = 8;
+    int32 term_months = 9;
+}
+
+message GetUpcomingDueReportResponse {
+    // Momento en que se midió -- igual que BR-DASH-003, es una foto de
+    // "ahora", no de un período.
+    google.protobuf.Timestamp generated_at = 1;
+    int32 days_ahead = 2;        // eco de la ventana efectivamente aplicada
+    repeated UpcomingDueRow rows = 3;
 }
