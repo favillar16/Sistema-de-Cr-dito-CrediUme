@@ -23,12 +23,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cas_client import documents, documents_docx, theme
+from cas_client import documents, documents_docx, printing, theme
 from cas_client.formatting import (
     DISPLAY_DATE_PLACEHOLDER,
     es_fecha_valida,
     fecha,
     fecha_a_iso,
+    fecha_hora,
     gs,
     rate_percent,
     rate_percent_mensual,
@@ -84,6 +85,9 @@ _PAYMENT_METHODS = (
     ("Transferencia / descuento", "TRANSFERENCIA"),
     ("Efectivo (caja)", "EFECTIVO"),
 )
+# El mismo par, invertido, para leer el medio que devuelve el servidor en el
+# historial de cobros (BR-LOAN-016) sin repetir las etiquetas.
+_PAYMENT_METHOD_LABELS = {valor: etiqueta for etiqueta, valor in _PAYMENT_METHODS}
 
 _LOANS_TABLE_HEADERS = (
     "Estado",
@@ -124,6 +128,16 @@ _PREVIEW_TABLE_HEADERS = (
     "Interés (Gs)",
     "Cuota total (Gs)",
     "Saldo restante (Gs)",
+)
+
+# Historial de cobros del préstamo (BR-LOAN-016). "Registrado por" estira:
+# es la columna de ancho más variable (nombre y apellido del operador).
+_PAYMENT_HEADERS = (
+    "Fecha y hora",
+    "Monto (Gs)",
+    "Medio",
+    "Cuota(s)",
+    "Registrado por",
 )
 
 _ESTADOS_LABEL = {
@@ -360,6 +374,13 @@ class LoansView(BaseView):
         self._last_payment = None
         self._last_payment_loan_id: str | None = None
         self._pending_schedule_after_create = False
+        # BR-LOAN-016: historial de cobros del préstamo abierto. Vive aparte
+        # de _last_payment porque no es "lo que registré yo recién" sino "lo
+        # que registró cualquiera": es lo que hace visible un cobro para el
+        # resto del personal.
+        self._payments_worker: AsyncWorker | None = None
+        self._payment_entries: list = []
+        self._payments_total_installments = 0
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 0)
@@ -385,8 +406,34 @@ class LoansView(BaseView):
         cobros, pero no origina crédito -- CreateLoan/UpdateLoanProposal son
         CREDIT_ANALYST_AND_ABOVE en rbac.py. Los botones por estado
         (Aprobar/Desembolsar/Marcar incumplido) ya se resuelven por rol en
-        _load_detail(); acá solo va lo que vive fuera del detalle."""
+        _load_detail(); acá solo va lo que vive fuera del detalle.
+
+        MainWindow llama a esto en cada cambio de operador (login, logout y
+        expiración de sesión), así que es también el punto donde se borra lo
+        que quedó de la sesión anterior."""
+        self.clear_session_state()
         self._new_button.setVisible(can_originate_credit(role))
+
+    def clear_session_state(self) -> None:
+        """Borra lo que pertenece a la sesión del operador anterior.
+
+        La vista se construye una sola vez y sobrevive al logout: sin esto, el
+        siguiente operador entraba a una pantalla que seguía mostrando el
+        préstamo y el cliente del anterior, y con el Comprobante de Pago
+        habilitado sobre un cobro que no registró él (BR-LOAN-011: el
+        comprobante sólo existe para el pago de la sesión en curso)."""
+        self._last_payment = None
+        self._last_payment_loan_id = None
+        self._selected_loan_id = None
+        self._detail_loan = None
+        self._current_client_id = None
+        self._current_client_name = None
+        self._payment_entries = []
+        self._payments_total_installments = 0
+        self._payments_table.setRowCount(0)
+        self._client_search_input.clear()
+        self._client_results_table.setRowCount(0)
+        self._stack.setCurrentIndex(_PAGE_SEARCH)
 
     def load_client(self, client_id: str, display_name: str) -> None:
         """Entry point used by MainWindow when navigating here from ClientsView."""
@@ -454,8 +501,14 @@ class LoansView(BaseView):
         search_section_layout.setContentsMargins(0, 0, 0, 0)
         search_section_layout.setSpacing(8)
 
-        self._client_results_table = QTableWidget(0, 2)
-        self._client_results_table.setHorizontalHeaderLabels(("Nombre", "Documento"))
+        # Con "Estado": la búsqueda devuelve también clientes dados de baja
+        # (BR-CLI-004), y sin la columna un operador elegía uno inactivo y se
+        # encontraba con que el servidor le rechazaba el préstamo sin que la
+        # pantalla hubiera dicho nunca por qué.
+        self._client_results_table = QTableWidget(0, 3)
+        self._client_results_table.setHorizontalHeaderLabels(
+            ("Nombre", "Documento", "Estado")
+        )
         size_columns(self._client_results_table, stretch_column=0)
         self._client_results_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
@@ -680,7 +733,8 @@ class LoansView(BaseView):
             row = self._client_results_table.rowCount()
             self._client_results_table.insertRow(row)
             full_name = f"{client.first_name} {client.last_name}"
-            for col, value in enumerate((full_name, client.national_id)):
+            estado = "Activo" if client.is_active else "Inactivo"
+            for col, value in enumerate((full_name, client.national_id, estado)):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.ItemDataRole.UserRole, client.id)
                 self._client_results_table.setItem(row, col, item)
@@ -1527,6 +1581,26 @@ class LoansView(BaseView):
         self._record_payment_button.clicked.connect(self._on_record_payment)
         button_column.addWidget(self._record_payment_button)
         payment_row.add_widget(button_wrapper)
+
+        # Ticket térmico del cobro recién hecho. Vive en el grid (que reflota)
+        # y no en la fila de Documentos, que ya tiene 4 controles fijos por
+        # documento y no admite un quinto sin recortarse en la ventana mínima.
+        ticket_wrapper = QWidget()
+        ticket_column = QVBoxLayout(ticket_wrapper)
+        ticket_column.setContentsMargins(0, 0, 0, 0)
+        ticket_column.setSpacing(4)
+        ticket_column.addWidget(QLabel(""))
+        self._ticket_button = QPushButton("Imprimir ticket")
+        self._ticket_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ticket_button.setStyleSheet(theme.secondary_button_style())
+        self._ticket_button.setToolTip(
+            "Imprime el ticket de 80 mm del último cobro registrado en esta "
+            "sesión, en la impresora térmica."
+        )
+        self._ticket_button.setEnabled(False)
+        self._ticket_button.clicked.connect(self._on_print_fresh_ticket)
+        ticket_column.addWidget(self._ticket_button)
+        payment_row.add_widget(ticket_wrapper)
         actions_card.addWidget(payment_row)
 
         # Se puebla DESPUÉS de que existe el campo de referencia: el primer
@@ -1549,6 +1623,63 @@ class LoansView(BaseView):
         payment_hint.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
         actions_card.addWidget(payment_hint)
         layout.addWidget(actions_frame)
+
+        # -- Tarjeta de cobros registrados (BR-LOAN-016) --
+        #
+        # Hasta que existió esta tarjeta, un cobro solo lo veía quien lo
+        # registraba y solo hasta cambiar de pantalla: el resto del personal
+        # tenía que pedirle el papel o mirar el saldo y deducir. Acá queda el
+        # historial completo del préstamo, y desde acá se reimprime el
+        # comprobante de cualquier cobro anterior.
+        payments_frame, payments_card = card()
+        payments_card.addWidget(section_label("Cobros registrados"))
+        self._payments_caption = QLabel("")
+        self._payments_caption.setWordWrap(True)
+        self._payments_caption.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 12px;"
+        )
+        payments_card.addWidget(self._payments_caption)
+
+        self._payments_table = QTableWidget(0, len(_PAYMENT_HEADERS))
+        self._payments_table.setHorizontalHeaderLabels(_PAYMENT_HEADERS)
+        size_columns(self._payments_table, stretch_column=4)
+        self._payments_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._payments_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._payments_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._payments_table.itemSelectionChanged.connect(self._on_payment_row_selected)
+        self._payments_table.setMaximumHeight(180)
+        style_table(self._payments_table)
+        set_empty_message(
+            self._payments_table,
+            "Este préstamo todavía no tiene cobros registrados.",
+        )
+        payments_card.addWidget(self._payments_table)
+
+        # Botones fuera de la tabla y no un widget por fila: una celda con
+        # widget no se puede medir con ResizeToContents (la trampa que ya
+        # documenta la columna "Ajustar" del cronograma), y acá serían dos por
+        # fila. Se elige la fila y se reimprime.
+        reprint_row = ResponsiveGrid(min_cell_width=200, spacing=8)
+        self._reprint_ticket_button = QPushButton("Reimprimir ticket (80 mm)")
+        self._reprint_ticket_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reprint_ticket_button.setStyleSheet(theme.secondary_button_style())
+        self._reprint_ticket_button.clicked.connect(self._on_reprint_ticket)
+        reprint_row.add_widget(self._reprint_ticket_button)
+
+        self._reprint_receipt_button = QPushButton("Reimprimir comprobante A4")
+        self._reprint_receipt_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reprint_receipt_button.setStyleSheet(theme.secondary_button_style())
+        self._reprint_receipt_button.clicked.connect(self._on_reprint_receipt)
+        reprint_row.add_widget(self._reprint_receipt_button)
+        payments_card.addWidget(reprint_row)
+        self._on_payment_row_selected()
+        layout.addWidget(payments_frame)
 
         # -- Tarjeta de documentos: Liquidación / Pagaré / Contrato --
         docs_frame, docs_card = card()
@@ -1614,6 +1745,9 @@ class LoansView(BaseView):
     def _on_detail_loaded(self, loan) -> None:
         self._selected_loan_id = loan.id
         self._detail_loan = loan
+        # El historial se pide junto con el detalle, así que un cobro que
+        # registró otro operador aparece con solo abrir el préstamo.
+        self._load_payments(loan.id)
         self._detail_title.setText(f"Préstamo {loan.id[:8]}…")
         _apply_status_badge(self._detail_badge, loan.status)
         if loan.payment_status:
@@ -1645,6 +1779,12 @@ class LoansView(BaseView):
         puede_pagare_contrato = loan.status in ("APPROVED", "ACTIVE", "PAID")
         total_pagado = Decimal(loan.total_paid) if loan.total_paid else Decimal("0")
         puede_liquidacion = loan.status == "PAID" or total_pagado > 0
+        # El ticket térmico es para el cobro recién registrado (sin marca de
+        # reimpresión); los anteriores se reimprimen desde la tabla de cobros.
+        hay_cobro_reciente = (
+            self._last_payment is not None and self._last_payment_loan_id == loan.id
+        )
+        self._ticket_button.setEnabled(hay_cobro_reciente)
         for kind, (
             download_button,
             docx_button,
@@ -2000,6 +2140,165 @@ class LoansView(BaseView):
     def _on_action_success(self, message: str) -> None:
         self._toast.show_message(message)
         self._load_detail(self._selected_loan_id)
+
+    # ---- Cobros registrados (BR-LOAN-016) --------------------------------
+
+    def _load_payments(self, loan_id: str) -> None:
+        """Historial de cobros del préstamo abierto.
+
+        Se pide en cada carga del detalle (y por lo tanto también después de
+        registrar un pago, que recarga el detalle): es la forma en que un
+        cobro hecho por otro operador aparece en esta pantalla sin que nadie
+        tenga que avisar.
+        """
+        self._payments_worker = AsyncWorker(
+            self._client.list_loan_payments,
+            self._session.access_token,
+            loan_id,
+            error_translator=_friendly_message,
+        )
+        self._payments_worker.succeeded.connect(self._on_payments_loaded)
+        # Un fallo acá no debe tapar el detalle, que sí cargó: se informa y la
+        # tabla queda vacía con su mensaje.
+        self._payments_worker.failed.connect(self._on_error)
+        self._payments_worker.start()
+
+    def _on_payments_loaded(self, response) -> None:
+        self._payment_entries = list(response.payments)
+        self._payments_total_installments = response.total_installments
+        self._payments_table.setRowCount(0)
+        for entry in self._payment_entries:
+            row = self._payments_table.rowCount()
+            self._payments_table.insertRow(row)
+            celdas = (
+                fecha_hora(entry.paid_at.ToDatetime()),
+                gs(entry.amount),
+                _PAYMENT_METHOD_LABELS.get(entry.payment_method, entry.payment_method),
+                documents.cuotas_cubiertas_texto(
+                    entry.covered_installments, response.total_installments
+                ),
+                entry.recorded_by_name or "No registrado",
+            )
+            for col, texto in enumerate(celdas):
+                self._payments_table.setItem(row, col, QTableWidgetItem(texto))
+        if self._payment_entries:
+            self._payments_caption.setText(
+                f"{len(self._payment_entries)} cobro(s) · Total pagado "
+                f"{gs(response.total_paid)} · Saldo {gs(response.remaining_balance)}. "
+                "Elegí un cobro para volver a imprimir su comprobante."
+            )
+        else:
+            self._payments_caption.setText(
+                "Todo cobro registrado por cualquier operador aparece acá."
+            )
+        self._on_payment_row_selected()
+
+    def _on_payment_row_selected(self) -> None:
+        hay_seleccion = self._selected_payment_entry() is not None
+        self._reprint_ticket_button.setEnabled(hay_seleccion)
+        self._reprint_receipt_button.setEnabled(hay_seleccion)
+
+    def _selected_payment_entry(self):
+        fila = self._payments_table.currentRow()
+        if fila < 0 or fila >= len(self._payment_entries):
+            return None
+        return self._payment_entries[fila]
+
+    def _on_reprint_ticket(self) -> None:
+        self._start_reprint("ticket")
+
+    def _on_reprint_receipt(self) -> None:
+        self._start_reprint("comprobante")
+
+    def _start_reprint(self, formato: str) -> None:
+        """Reimprime el cobro elegido. Necesita los datos del cliente, que el
+        préstamo no trae -- mismo camino que la tarjeta de Documentos."""
+        entry = self._selected_payment_entry()
+        if entry is None or self._detail_loan is None:
+            return
+        pago = documents.CobroHistorico(entry, self._payments_total_installments)
+        self._set_loading(True)
+        self._worker = AsyncWorker(
+            self._client_service.get_client_by_id,
+            self._session.access_token,
+            self._detail_loan.client_id,
+            error_translator=_friendly_message,
+        )
+        self._worker.succeeded.connect(
+            lambda client: self._render_reprint(formato, client, pago)
+        )
+        self._worker.failed.connect(self._on_error)
+        self._worker.finished.connect(lambda: self._set_loading(False))
+        self._worker.start()
+
+    def _render_reprint(self, formato: str, client, pago) -> None:
+        loan = self._detail_loan
+        if formato == "ticket":
+            self._print_ticket(loan, client, pago)
+            return
+        html = documents.comprobante_pago_html(loan, client, pago)
+        self._print_html(html, "Reimprimir comprobante de pago")
+
+    def _on_print_fresh_ticket(self) -> None:
+        """Ticket del cobro que se acaba de registrar -- no lleva marca de
+        reimpresión porque es el primer papel de ese cobro."""
+        if self._detail_loan is None or self._last_payment is None:
+            return
+        if self._last_payment_loan_id != self._detail_loan.id:
+            return
+        pago = self._last_payment
+        self._set_loading(True)
+        self._worker = AsyncWorker(
+            self._client_service.get_client_by_id,
+            self._session.access_token,
+            self._detail_loan.client_id,
+            error_translator=_friendly_message,
+        )
+        self._worker.succeeded.connect(
+            lambda client: self._print_ticket(self._detail_loan, client, pago)
+        )
+        self._worker.failed.connect(self._on_error)
+        self._worker.finished.connect(lambda: self._set_loading(False))
+        self._worker.start()
+
+    def _print_ticket(self, loan, client, payment) -> None:
+        """Ticket de 80 mm en la impresora térmica.
+
+        Mismo camino que cash_view: el diálogo se muestra siempre (la térmica
+        no es la impresora por defecto de la PC) y la página se arma *después*
+        de aceptarlo, porque al aceptar Qt reemplaza el page layout por el de
+        la impresora elegida -- ver printing.apply_ticket_page().
+
+        Vive también acá y no sólo en la caja porque los otros roles cobran
+        desde esta pantalla: hasta ahora sólo podían emitir el A4, aunque el
+        papel que el cliente se lleva sea el mismo.
+        """
+        html = documents.ticket_cobro_html(loan, client, payment)
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printing.apply_ticket_page(printer, html)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("Imprimir ticket de cobro")
+        if dialog.exec() != QPrintDialog.DialogCode.Accepted:
+            return
+        try:
+            printing.render_ticket(printer, html)
+        except OSError as exc:
+            self._toast.show_message(_friendly_file_error(exc))
+            return
+        self._toast.show_message("Ticket enviado a la impresora.")
+
+    def _print_html(self, html: str, titulo: str) -> None:
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle(titulo)
+        if dialog.exec() != QPrintDialog.DialogCode.Accepted:
+            return
+        document = QTextDocument()
+        document.setHtml(html)
+        try:
+            document.print_(printer)
+        except OSError as exc:
+            self._toast.show_message(_friendly_file_error(exc))
 
     # ---- Página de cronograma (sistema alemán) ----------------------------
 

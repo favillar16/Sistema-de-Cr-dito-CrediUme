@@ -30,6 +30,7 @@ below -- they are the single place to change if the entity revises its terms,
 and tests/client/test_documents_identity.py guards them against a silent
 revert, the same way it guards the legal identity."""
 
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from cas_client import assets, theme
@@ -158,16 +159,16 @@ def _header(title: str) -> str:
       <tr>
         <td width="130" valign="middle"><img src="{assets.logo_full_data_uri()}" width="110"/></td>
         <td valign="middle">
-          <div style="font-size: 15px; font-weight: 700; color: {theme.TEXT_PRIMARY};">
+          <div style="font-size: 11pt; font-weight: 700; color: {theme.TEXT_PRIMARY};">
             {_COMPANY_NAME} &mdash; RUC: {_COMPANY_RUC}
           </div>
-          <div style="font-size: 12px; color: {theme.TEXT_MUTED};">{_COMPANY_ADDRESS}</div>
-          <div style="font-size: 12px; color: {theme.TEXT_MUTED};">Cel: {_COMPANY_PHONE}</div>
+          <div style="font-size: 9pt; color: {theme.TEXT_MUTED};">{_COMPANY_ADDRESS}</div>
+          <div style="font-size: 9pt; color: {theme.TEXT_MUTED};">Cel: {_COMPANY_PHONE}</div>
         </td>
       </tr>
     </table>
     <hr style="border: none; border-top: 1px solid {theme.BORDER}; margin: 10px 0 14px 0;"/>
-    <div style="text-align:center; font-size: 17px; font-weight: 700; text-transform: uppercase;
+    <div style="text-align:center; font-size: 13pt; font-weight: 700; text-transform: uppercase;
                 color: {theme.PRIMARY}; margin-bottom: 16px;">
       {title}
     </div>
@@ -184,7 +185,7 @@ def _client_block(client) -> str:
 
 
 def _footer(text: str) -> str:
-    return f'<p style="margin-top:24px; font-size:12px; color:{theme.TEXT_MUTED};">{text}</p>'
+    return f'<p style="margin-top:24px; font-size:9pt; color:{theme.TEXT_MUTED};">{text}</p>'
 
 
 def _signature_block(label: str) -> str:
@@ -206,7 +207,7 @@ def _signature_block(label: str) -> str:
     <table cellspacing="0" cellpadding="0" style="margin-top:40px;">
       <tr><td width="150" style="border-bottom: 1px dotted {theme.TEXT_PRIMARY};
                                   height: 17px;">&nbsp;</td></tr>
-      <tr><td style="font-size:13px; font-weight:700; color:{theme.TEXT_PRIMARY};
+      <tr><td style="font-size:10pt; font-weight:700; color:{theme.TEXT_PRIMARY};
                      padding-top:4px;">{label}</td></tr>
     </table>
     """
@@ -273,7 +274,7 @@ def _cargos_y_garantia_block(loan) -> str:
           </tr>
           {filas_html}
         </table>
-        <p style="font-size:12px; color:{theme.TEXT_MUTED};">Los cargos y
+        <p style="font-size:9pt; color:{theme.TEXT_MUTED};">Los cargos y
         seguros se financian junto con el capital: integran el total del
         cr&eacute;dito, que es el monto que amortizan las cuotas y sobre el
         que se calcula el inter&eacute;s. El importe entregado al cliente es
@@ -435,13 +436,13 @@ def _pagare_header(loan) -> str:
     <table width="100%" cellspacing="0" cellpadding="0">
       <tr>
         <td valign="bottom">
-          <div style="font-size: 20px; font-weight: 700; text-transform: uppercase;
+          <div style="font-size: 15pt; font-weight: 700; text-transform: uppercase;
                       color: {theme.TEXT_PRIMARY};">
             Pagar&eacute; a la Orden
           </div>
         </td>
         <td align="right" valign="bottom">
-          <div style="font-size: 11px; color: {theme.TEXT_MUTED};">
+          <div style="font-size: 8pt; color: {theme.TEXT_MUTED};">
             Pr&eacute;stamo N&deg; {loan.id}
           </div>
         </td>
@@ -615,6 +616,52 @@ def filas_medio_de_pago(payment) -> list[tuple[str, str]]:
     return filas
 
 
+class CobroHistorico:
+    """Un cobro traído de `ListLoanPayments` con la forma que esperan los dos
+    papeles (BR-LOAN-016).
+
+    Existe para que el ticket y el Comprobante tengan UNA sola plantilla cada
+    uno: `RecordPaymentResponse` (el cobro recién hecho) y `LoanPaymentEntry`
+    (uno del historial) traen los mismos datos con distinto nombre, y escribir
+    una segunda versión de cada documento para el caso "reimpresión" es
+    exactamente cómo el papel reimpreso terminaría diciendo algo distinto del
+    original.
+
+    `status` no viaja en la entrada del historial y no hace falta: el préstamo
+    queda saldado cuando el saldo posterior al pago es cero, que es la misma
+    condición con la que RecordPayment pone el estado en PAID.
+    """
+
+    es_reimpresion = True
+
+    def __init__(self, entry, total_installments: int):
+        self.amount_paid = entry.amount
+        self.covered_installments = entry.covered_installments
+        self.total_installments = total_installments
+        self.paid_at = entry.paid_at
+        self.payment_method = entry.payment_method
+        self.transfer_reference = entry.transfer_reference
+        self.total_paid = entry.total_paid_after
+        self.remaining_balance = entry.remaining_balance_after
+        self.recorded_by_name = entry.recorded_by_name
+        self.recorded_by_national_id = entry.recorded_by_national_id
+        self.status = "PAID" if _es_cero(entry.remaining_balance_after) else "ACTIVE"
+
+
+def _es_cero(monto: str) -> bool:
+    try:
+        return Decimal(monto or "0") == Decimal("0")
+    except (ArithmeticError, ValueError):
+        return False
+
+
+def es_reimpresion(payment) -> bool:
+    """Si este papel documenta un cobro traído del historial y no el que se
+    acaba de registrar. Los documentos lo dicen en su cara: un comprobante que
+    se emite dos veces no puede pasar por dos cobros distintos."""
+    return getattr(payment, "es_reimpresion", False)
+
+
 def comprobante_pago_html(loan, client, payment) -> str:
     """Comprobante de Pago -- BR-LOAN-011. Se emite despu&eacute;s de
     registrar un pago, para entregar o enviar al deudor como constancia.
@@ -647,11 +694,21 @@ def comprobante_pago_html(loan, client, payment) -> str:
         if saldado
         else ""
     )
+    # Un duplicado tiene que decir que lo es: si no, dos papeles id&eacute;nticos
+    # del mismo cobro se leen como dos cobros.
+    duplicado = (
+        f'<p style="font-weight:700; color:{theme.TEXT_MUTED};">'
+        "REIMPRESI&Oacute;N &mdash; duplicado de un comprobante ya emitido.</p>"
+        if es_reimpresion(payment)
+        else ""
+    )
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
     {_header("Comprobante de Pago")}
+    {duplicado}
     {_client_block(client)}
-    <p><b>Pr&eacute;stamo:</b> {loan.id}</p>
+    <p><b>Pr&eacute;stamo:</b> {loan.id}<br/>
+    <b>Comprobante N&deg;:</b> {numero_ticket(loan, payment)}</p>
     <table border="1" cellspacing="0" cellpadding="8" width="100%">
       <tr style="background-color:{theme.PRIMARY}; color:white;">
         <th align="left">Concepto</th><th align="right">Detalle</th>
@@ -779,6 +836,21 @@ def numero_ticket(loan, payment) -> str:
     return f"{loan.id[:8].upper()}-{momento.strftime('%Y%m%d-%H%M%S')}"
 
 
+def _ticket_duplicado(payment) -> str:
+    """Marca de reimpresi&oacute;n del ticket.
+
+    El n&uacute;mero de ticket es el mismo que el del original (se deriva del
+    pr&eacute;stamo y del instante del cobro, no de cu&aacute;ndo se imprime), as&iacute; que sin
+    esta l&iacute;nea dos papeles id&eacute;nticos del mismo cobro se leen como dos cobros.
+    """
+    if not es_reimpresion(payment):
+        return ""
+    return (
+        '<div style="margin:0; text-align:center; font-size:8pt; '
+        'font-weight:700;">** REIMPRESI&Oacute;N **</div>'
+    )
+
+
 def ticket_cobro_html(loan, client, payment) -> str:
     """Ticket de cobro de 80 mm para la impresora t&eacute;rmica de la caja.
 
@@ -855,6 +927,7 @@ def ticket_cobro_html(loan, client, payment) -> str:
     <div style="margin:0; text-align:center; font-size:8pt;">
       N&deg; {numero_ticket(loan, payment)}
     </div>
+    {_ticket_duplicado(payment)}
     {_ticket_separador()}
     {datos_cliente}
     {_ticket_separador()}
@@ -913,21 +986,152 @@ def _relacion_cuota_ingreso(loan, client) -> tuple[str, bool]:
     return texto, excede
 
 
+# Banda de las secciones de la ficha: un tinte claro del navy de la marca.
+# El formulario de referencia usa celeste; ac&aacute; se usa la propia paleta
+# -- del modelo se toma la estructura, no los colores ajenos.
+_FICHA_BANDA = "#DCE3F2"
+
+
+def _banda(numero: int, titulo: str) -> str:
+    """Banda de secci&oacute;n numerada del formulario.
+
+    Se arma como tabla de una celda y no como un &lt;div&gt; con fondo: el
+    subconjunto de CSS de QTextDocument no pinta el fondo de un div a lo ancho
+    de la p&aacute;gina, pero s&iacute; el de una celda (misma raz&oacute;n por la que
+    _signature_block usa una tabla)."""
+    return f"""
+    <table width="100%" cellspacing="0" cellpadding="4" border="0">
+      <tr><td style="background-color:{_FICHA_BANDA}; font-size:10pt;
+                     font-weight:700; color:{theme.PRIMARY};">
+        {numero}. {titulo}
+      </td></tr>
+    </table>
+    """
+
+
+def _celda(etiqueta: str, valor: str, ancho: str = "", columnas: int = 1) -> str:
+    """Celda del formulario: etiqueta chica arriba, dato debajo -- como se leen
+    las fichas en papel.
+
+    `columnas` es el colspan: sin él, una fila con menos campos que la más
+    ancha de su tabla deja celdas vacías colgando a la derecha, que es
+    exactamente lo que no hace un formulario en papel."""
+    atributo_ancho = f' width="{ancho}"' if ancho else ""
+    atributo_colspan = f' colspan="{columnas}"' if columnas > 1 else ""
+    return f"""
+    <td{atributo_ancho}{atributo_colspan} valign="top" style="padding:3px 6px;">
+      <span style="font-size:7pt; color:{theme.TEXT_MUTED};">{etiqueta}</span><br/>
+      <span style="font-size:9pt; color:{theme.TEXT_PRIMARY};">{valor or "&mdash;"}</span>
+    </td>
+    """
+
+
+def _grilla(filas: list) -> str:
+    cuerpo = "".join(f"<tr>{fila}</tr>" for fila in filas)
+    return (
+        f'<table width="100%" cellspacing="0" cellpadding="0" border="1" '
+        f'style="border-color:{theme.BORDER};">{cuerpo}</table>'
+    )
+
+
+def _casilla(texto: str) -> str:
+    """Casilla de tildar vac&iacute;a + etiqueta, para lo que se decide a mano
+    sobre el papel. QTextDocument no dibuja borde sobre un &lt;span&gt;, as&iacute; que
+    la casilla es una celda de tabla de tama&ntilde;o fijo."""
+    return f"""
+    <table cellspacing="0" cellpadding="0" border="0"><tr>
+      <td width="13" style="border:1px solid {theme.TEXT_PRIMARY};
+                            font-size:10pt;">&nbsp;</td>
+      <td style="padding-left:5px; font-size:9pt;">{texto}</td>
+    </tr></table>
+    """
+
+
+def _renglon_a_completar(etiqueta: str) -> str:
+    """Campo en blanco para llenar a mano: etiqueta y l&iacute;nea punteada."""
+    return f"""
+    <table width="100%" cellspacing="0" cellpadding="0" border="0">
+      <tr><td style="font-size:7pt; color:{theme.TEXT_MUTED};">{etiqueta}</td></tr>
+      <tr><td style="border-bottom:1px dotted {theme.TEXT_PRIMARY};
+                     height:15px;">&nbsp;</td></tr>
+    </table>
+    """
+
+
+def _firma_interna(etiqueta: str) -> str:
+    """Espacio de firma del bloque interno: aire para firmar y la l&iacute;nea
+    debajo. Los &lt;br/&gt; son el recurso ya conocido para forzar alto -- un
+    height= en un &lt;td&gt; lo ignora QTextDocument."""
+    return f"""
+    <span style="font-size:7pt; color:{theme.TEXT_MUTED};">{etiqueta}</span>
+    <br/><br/><br/>
+    <table width="100%" cellspacing="0" cellpadding="0" border="0">
+      <tr><td style="border-bottom:1px solid {theme.TEXT_PRIMARY};">&nbsp;</td></tr>
+      <tr><td style="font-size:7pt; color:{theme.TEXT_MUTED}; padding-top:3px;">
+        Firma y aclaraci&oacute;n</td></tr>
+    </table>
+    """
+
+
+def _ficha_encabezado() -> str:
+    """Encabezado de la ficha: logo, t&iacute;tulo centrado y, a la derecha, el
+    n&uacute;mero de legajo a completar y la fecha de emisi&oacute;n -- la misma
+    disposici&oacute;n en tres zonas del formulario de referencia."""
+    return f"""
+    <table width="100%" cellspacing="0" cellpadding="0" border="0">
+      <tr>
+        <td width="120" valign="middle">
+          <img src="{assets.logo_full_data_uri()}" width="100"/>
+        </td>
+        <td valign="middle" align="center">
+          <div style="font-size:13pt; font-weight:700; text-transform:uppercase;
+                      color:{theme.PRIMARY};">Ficha de cliente</div>
+          <div style="font-size:8pt; color:{theme.TEXT_MUTED};">
+            An&aacute;lisis previo a la aprobaci&oacute;n del cr&eacute;dito
+          </div>
+        </td>
+        <td width="150" valign="middle">
+          {_renglon_a_completar("Legajo N&deg;")}
+          <span style="font-size:7pt; color:{theme.TEXT_MUTED};">Fecha de
+            emisi&oacute;n</span><br/>
+          <span style="font-size:9pt;">{fecha_hora(datetime.now(timezone.utc))}</span>
+        </td>
+      </tr>
+    </table>
+    <table width="100%" cellspacing="0" cellpadding="0" border="0">
+      <tr><td style="font-size:8pt; color:{theme.TEXT_MUTED}; padding:6px 0 10px 0;">
+        {_COMPANY_NAME} &mdash; RUC: {_COMPANY_RUC} &mdash; {_COMPANY_ADDRESS}
+        &mdash; Cel: {_COMPANY_PHONE}
+      </td></tr>
+    </table>
+    """
+
+
 def ficha_cliente_html(loan, client) -> str:
-    """Ficha de cliente para el análisis de una solicitud de crédito: reúne
-    en un solo papel todos los datos del cliente, sus tres referencias
-    (BR-CLI-005), el origen de fondos (BR-CLI-006) y los términos del
-    préstamo que está solicitando -- pensada para imprimirse y analizarse
-    antes de decidir la aprobación, en vez de tener que abrir la ficha del
-    cliente y la del préstamo por separado. Tiene más sentido con un
-    préstamo PENDING, pero no está restringida a ese estado: nada impide
-    reimprimirla para revisar un expediente ya aprobado.
+    """Ficha de cliente para el an&aacute;lisis de una solicitud de cr&eacute;dito: re&uacute;ne
+    en un solo papel los datos del cliente, sus tres referencias (BR-CLI-005),
+    el origen de fondos (BR-CLI-006) y los t&eacute;rminos del pr&eacute;stamo que est&aacute;
+    solicitando -- para imprimirse y analizarse antes de decidir la
+    aprobaci&oacute;n. Tiene m&aacute;s sentido con un pr&eacute;stamo PENDING, pero no est&aacute;
+    restringida a ese estado: nada impide reimprimirla para revisar un
+    expediente ya aprobado.
+
+    **Formato de formulario**, tomado de
+    `docs/cambios finales/Ejemplo de Ficha de Clientes.png`: secciones
+    numeradas con banda de t&iacute;tulo, grilla de campos con l&iacute;neas y, al pie, un
+    bloque de uso exclusivo de la entidad con el dictamen y las firmas. Del
+    modelo se copi&oacute; la **estructura**, no el contenido ni la marca: el
+    original es el formulario de registro de otra empresa.
+
+    Los espacios en blanco del bloque final son deliberados: el dictamen, el
+    monto aprobado y las firmas se completan a mano sobre el papel, que es lo
+    que despu&eacute;s se archiva en el legajo. Las casillas "Verificada" de las
+    referencias son del mismo tipo -- el sistema no registra si se llam&oacute; al
+    referente, y darlo por hecho ser&iacute;a peor que dejar el casillero.
 
     Sin banner de borrador: no tiene texto legal que revisar, solo datos ya
     registrados -- mismo criterio que el Cronograma y los reportes del
-    dashboard. Tampoco es un documento que se entregue al cliente (a
-    diferencia de los otros cinco): es de uso interno para la decisión de
-    crédito.
+    dashboard. Tampoco se entrega al cliente: es de uso interno.
 
     loan: loan_service_pb2.GetLoanByIdResponse
     client: client_service_pb2.GetClientByIdResponse"""
@@ -935,63 +1139,149 @@ def ficha_cliente_html(loan, client) -> str:
     estado_prestamo = _ESTADOS_LABEL.get(loan.status, loan.status)
     ratio_texto, ratio_excede = _relacion_cuota_ingreso(loan, client)
     ratio_color = theme.ERROR if ratio_excede else theme.TEXT_PRIMARY
-    garantia = (
-        f"{loan.guarantee_type} &mdash; Monto: {gs(loan.guarantee_amount)}"
-        if loan.guarantee_type
-        else "Sin garant&iacute;a registrada"
+    garantia_etiqueta, garantia_valor = _garantia_label_valor(loan)
+    cargos = gs(loan.total_charges) if tiene_cargos_financiados(loan) else "Sin cargos"
+
+    generales = _grilla(
+        [
+            _celda(
+                "Nombre y apellido",
+                f"{client.first_name} {client.last_name}",
+                columnas=2,
+            )
+            + _celda("Documento de identidad (C.I.)", client.national_id, "32%"),
+            _celda("Fecha de nacimiento", fecha(client.date_of_birth), "33%")
+            + _celda("Estado del cliente", estado_cliente, "33%")
+            + _celda("Cliente desde", fecha_hora(client.created_at.ToDatetime())),
+            _celda("Direcci&oacute;n", client.address, columnas=2)
+            + _celda("Tel&eacute;fono", client.phone_number, "32%"),
+            _celda("Correo electr&oacute;nico", client.email, columnas=3),
+        ]
     )
+
+    financiera = _grilla(
+        [
+            _celda(
+                "Ingreso mensual declarado", gs(client.declared_monthly_income), "50%"
+            )
+            + _celda("Origen de los fondos", client.source_of_funds),
+            _celda("Lugar de trabajo", client.employment_reference_employer, "50%")
+            + _celda(
+                "Cargo y antig&uuml;edad",
+                f"{client.employment_reference_position} "
+                f"({client.employment_reference_seniority})",
+            ),
+        ]
+    )
+
+    referencias = f"""
+    <table width="100%" cellspacing="0" cellpadding="4" border="1"
+           style="border-color:{theme.BORDER};">
+      <tr style="background-color:{_FICHA_BANDA};">
+        <th align="left" width="21%" style="font-size:8pt;">Tipo</th>
+        <th align="left" style="font-size:8pt;">Nombre</th>
+        <th align="left" style="font-size:8pt;">Relaci&oacute;n / Cargo</th>
+        <th align="left" width="18%" style="font-size:8pt;">Tel&eacute;fono</th>
+        <th align="left" width="16%" style="font-size:8pt;">Verificada</th>
+      </tr>
+      <tr>
+        <td style="font-size:9pt;">Referencia personal 1</td>
+        <td style="font-size:9pt;">{client.personal_reference_1_name}</td>
+        <td style="font-size:9pt;">{client.personal_reference_1_relationship}</td>
+        <td style="font-size:9pt;">{client.personal_reference_1_phone}</td>
+        <td>{_casilla("S&iacute;")}</td>
+      </tr>
+      <tr>
+        <td style="font-size:9pt;">Referencia personal 2</td>
+        <td style="font-size:9pt;">{client.personal_reference_2_name}</td>
+        <td style="font-size:9pt;">{client.personal_reference_2_relationship}</td>
+        <td style="font-size:9pt;">{client.personal_reference_2_phone}</td>
+        <td>{_casilla("S&iacute;")}</td>
+      </tr>
+      <tr>
+        <td style="font-size:9pt;">Referencia laboral</td>
+        <td style="font-size:9pt;">{client.employment_reference_employer}</td>
+        <td style="font-size:9pt;">{client.employment_reference_position}</td>
+        <td style="font-size:9pt;">{client.employment_reference_phone}</td>
+        <td>{_casilla("S&iacute;")}</td>
+      </tr>
+    </table>
+    """
+
+    credito = _grilla(
+        [
+            _celda("Pr&eacute;stamo N&deg;", loan.id[:8].upper(), "33%")
+            + _celda("Estado", estado_prestamo, "33%")
+            + _celda("Plazo", f"{loan.term_months} meses"),
+            _celda("Capital solicitado", gs(loan.principal_amount), "33%")
+            + _celda("Cargos financiados", cargos, "33%")
+            + _celda(
+                "Total del cr&eacute;dito (capital + cargos)",
+                gs(loan.total_credit_with_charges),
+            ),
+            _celda(
+                "Inter&eacute;s",
+                f"{rate_percent(loan.interest_rate)} anual "
+                f"({rate_percent_mensual(loan.interest_rate)} mensual)",
+                "33%",
+            )
+            + _celda("Cuota mensual", gs(loan.installment_amount), "33%")
+            + _celda("Total a pagar", gs(loan.total_to_pay)),
+            _celda("A desembolsar", gs(loan.amount_to_disburse), "33%")
+            + _celda(garantia_etiqueta, garantia_valor, "33%")
+            + f"""
+            <td valign="top" style="padding:3px 6px;">
+              <span style="font-size:7pt; color:{theme.TEXT_MUTED};">Relaci&oacute;n
+                cuota / ingreso</span><br/>
+              <span style="font-size:9pt; font-weight:700; color:{ratio_color};">
+                {ratio_texto}</span>
+            </td>
+            """,
+        ]
+    )
+
+    dictamen = f"""
+    <table width="100%" cellspacing="0" cellpadding="6" border="1"
+           style="border-color:{theme.BORDER};">
+      <tr>
+        <td width="50%" valign="top">
+          <span style="font-size:7pt; color:{theme.TEXT_MUTED};">Dictamen</span>
+          {_casilla("Aprobado")}
+          {_casilla("Aprobado con modificaciones")}
+          {_casilla("Rechazado")}
+        </td>
+        <td valign="top">
+          {_renglon_a_completar("Monto aprobado")}
+          {_renglon_a_completar("Plazo aprobado")}
+          {_renglon_a_completar("Fecha de la decisi&oacute;n")}
+        </td>
+      </tr>
+      <tr>
+        <td valign="top">{_firma_interna("Analista que estudi&oacute; el legajo")}</td>
+        <td valign="top">{_firma_interna("Responsable que autoriza")}</td>
+      </tr>
+      <tr>
+        <td colspan="2" valign="top">
+          <span style="font-size:7pt; color:{theme.TEXT_MUTED};">Observaciones</span>
+          <br/><br/>
+        </td>
+      </tr>
+    </table>
+    """
+
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
-    {_header("Ficha de Cliente &mdash; An&aacute;lisis de Cr&eacute;dito")}
-    <h3 style="color:{theme.PRIMARY};">Datos personales</h3>
-    <p><b>Nombre completo:</b> {client.first_name} {client.last_name}<br/>
-    <b>Documento (C.I.):</b> {client.national_id}<br/>
-    <b>Fecha de nacimiento:</b> {fecha(client.date_of_birth)}<br/>
-    <b>Estado del cliente:</b> {estado_cliente}<br/>
-    <b>Cliente desde:</b> {fecha_hora(client.created_at.ToDatetime())}<br/>
-    <b>Email:</b> {client.email}<br/>
-    <b>Tel&eacute;fono:</b> {client.phone_number}<br/>
-    <b>Direcci&oacute;n:</b> {client.address}<br/>
-    <b>Lugar de trabajo:</b> {client.employment_reference_employer or "No registrado"}</p>
-
-    <h3 style="color:{theme.PRIMARY};">Situaci&oacute;n financiera declarada</h3>
-    <p><b>Ingreso mensual declarado:</b>
-    {gs(client.declared_monthly_income) or "No registrado"}<br/>
-    <b>Origen de fondos:</b> {client.source_of_funds or "No registrado"}</p>
-
-    <h3 style="color:{theme.PRIMARY};">Referencias</h3>
-    <table border="1" cellspacing="0" cellpadding="6" width="100%">
-      <tr style="background-color:{theme.APP_BACKGROUND};">
-        <th align="left">Tipo</th><th align="left">Nombre</th>
-        <th align="left">Relaci&oacute;n / Cargo</th><th align="left">Tel&eacute;fono</th>
-      </tr>
-      <tr><td>Referencia personal 1</td><td>{client.personal_reference_1_name}</td>
-          <td>{client.personal_reference_1_relationship}</td>
-          <td>{client.personal_reference_1_phone}</td></tr>
-      <tr><td>Referencia personal 2</td><td>{client.personal_reference_2_name}</td>
-          <td>{client.personal_reference_2_relationship}</td>
-          <td>{client.personal_reference_2_phone}</td></tr>
-      <tr><td>Referencia laboral</td><td>{client.employment_reference_employer}</td>
-          <td>{client.employment_reference_position}
-          ({client.employment_reference_seniority})</td>
-          <td>{client.employment_reference_phone}</td></tr>
-    </table>
-
-    <h3 style="color:{theme.PRIMARY};">Pr&eacute;stamo solicitado</h3>
-    <p><b>N&uacute;mero:</b> {loan.id}<br/>
-    <b>Estado:</b> {estado_prestamo}<br/>
-    <b>Capital solicitado:</b> {gs(loan.principal_amount)}<br/>
-    <b>Plazo:</b> {loan.term_months} meses<br/>
-    <b>Tasa de inter&eacute;s:</b> {rate_percent(loan.interest_rate)} anual
-    ({rate_percent_mensual(loan.interest_rate)} mensual)<br/>
-    <b>Cuota mensual:</b> {gs(loan.installment_amount)}<br/>
-    <b>Total del cr&eacute;dito (capital + cargos):</b>
-    {gs(loan.total_credit_with_charges)}<br/>
-    <b>Total a pagar:</b> {gs(loan.total_to_pay)}<br/>
-    <b>Garant&iacute;a:</b> {garantia}</p>
-    <p style="color:{ratio_color}; font-weight:700;">Relaci&oacute;n cuota/ingreso:
-    {ratio_texto}</p>
-
+    {_ficha_encabezado()}
+    {_banda(1, "DATOS GENERALES DEL CLIENTE")}
+    {generales}
+    {_banda(2, "SITUACI&Oacute;N FINANCIERA DECLARADA")}
+    {financiera}
+    {_banda(3, "REFERENCIAS")}
+    {referencias}
+    {_banda(4, "CR&Eacute;DITO SOLICITADO")}
+    {credito}
+    {_banda(5, "ESPACIO PARA USO EXCLUSIVO DE " + _COMPANY_NAME)}
+    {dictamen}
     {_footer("Ficha generada por el sistema de CREDIMED UME. Uso interno para el "
              "an&aacute;lisis y la decisi&oacute;n de aprobaci&oacute;n del cr&eacute;dito "
              "-- no constituye un documento legal ni se entrega al cliente.")}
@@ -1088,7 +1378,7 @@ def reporte_periodo_html(report, generated_by: str = "") -> str:
       </tr>
       {filas}
     </table>
-    <p style="font-size:12px; color:{theme.TEXT_MUTED}; margin-top:16px;">
+    <p style="font-size:9pt; color:{theme.TEXT_MUTED}; margin-top:16px;">
     "Movimiento" y "Cobranza" miden lo ocurrido dentro del per&iacute;odo
     seleccionado. "Situaci&oacute;n al cierre" es una foto del estado actual
     de la cartera al momento de generar este reporte, no del &uacute;ltimo
@@ -1210,7 +1500,7 @@ def reporte_estado_pagos_html(report, generated_by: str = "") -> str:
       <tr style="background-color:{theme.PRIMARY}; color:white;">{encabezados}</tr>
       {filas}
     </table>
-    <p style="font-size:12px; color:{theme.TEXT_MUTED}; margin-top:16px;">
+    <p style="font-size:9pt; color:{theme.TEXT_MUTED}; margin-top:16px;">
     El "monto vencido" es lo ya exigible e impago; el "saldo pendiente"
     incluye adem&aacute;s las cuotas futuras todav&iacute;a no vencidas. Los
     totales corresponden a los clientes listados, no a toda la cartera.</p>

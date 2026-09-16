@@ -84,6 +84,11 @@ class LoanServiceStub(object):
                 request_serializer=loan__service__pb2.RecordPaymentRequest.SerializeToString,
                 response_deserializer=loan__service__pb2.RecordPaymentResponse.FromString,
                 _registered_method=True)
+        self.ListLoanPayments = channel.unary_unary(
+                '/loans.LoanService/ListLoanPayments',
+                request_serializer=loan__service__pb2.ListLoanPaymentsRequest.SerializeToString,
+                response_deserializer=loan__service__pb2.ListLoanPaymentsResponse.FromString,
+                _registered_method=True)
         self.MarkDefaulted = channel.unary_unary(
                 '/loans.LoanService/MarkDefaulted',
                 request_serializer=loan__service__pb2.MarkDefaultedRequest.SerializeToString,
@@ -186,6 +191,16 @@ class LoanServiceServicer(object):
 
     def RecordPayment(self, request, context):
         """Registro de un pago de cuota
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListLoanPayments(self, request, context):
+        """Historial de cobros de un préstamo -- BR-LOAN-016. Cualquier rol
+        autenticado: en ventanilla la pregunta "¿ya pagué?" la hace el cliente
+        y la contesta el cajero, y el resto del personal necesita ver el cobro
+        que registró otro sin tener que pedir el papel.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -297,6 +312,11 @@ def add_LoanServiceServicer_to_server(servicer, server):
                     servicer.RecordPayment,
                     request_deserializer=loan__service__pb2.RecordPaymentRequest.FromString,
                     response_serializer=loan__service__pb2.RecordPaymentResponse.SerializeToString,
+            ),
+            'ListLoanPayments': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListLoanPayments,
+                    request_deserializer=loan__service__pb2.ListLoanPaymentsRequest.FromString,
+                    response_serializer=loan__service__pb2.ListLoanPaymentsResponse.SerializeToString,
             ),
             'MarkDefaulted': grpc.unary_unary_rpc_method_handler(
                     servicer.MarkDefaulted,
@@ -599,6 +619,33 @@ class LoanService(object):
             '/loans.LoanService/RecordPayment',
             loan__service__pb2.RecordPaymentRequest.SerializeToString,
             loan__service__pb2.RecordPaymentResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListLoanPayments(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loans.LoanService/ListLoanPayments',
+            loan__service__pb2.ListLoanPaymentsRequest.SerializeToString,
+            loan__service__pb2.ListLoanPaymentsResponse.FromString,
             options,
             channel_credentials,
             insecure,

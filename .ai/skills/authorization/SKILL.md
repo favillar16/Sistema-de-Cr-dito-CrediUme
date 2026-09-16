@@ -33,8 +33,10 @@ mapped per RPC method:
     "the tier below CREDIT_ANALYST": origination RPCs
     (`CreateClient`, `UpdateClient`, `CreateLoan`,
     `UpdateLoanProposal/Guarantee/Charges`) are
-    `CREDIT_ANALYST_AND_ABOVE`, while lookup, `RecordPayment` and the
-    whole of `CashService` stay `CASHIER_AND_ABOVE`. This was an
+    `CREDIT_ANALYST_AND_ABOVE`, while lookup, `RecordPayment`,
+    `ListLoanPayments` (`BR-LOAN-016` — the teller is who gets asked
+    "¿ya pagué?") and the whole of `CashService` stay
+    `CASHIER_AND_ABOVE`. This was an
     earlier-model-corrected change: those origination methods used to
     be `CASHIER_AND_ABOVE` back when nobody had the role.
 -   The two dashboard reports sit at **different** tiers on purpose:

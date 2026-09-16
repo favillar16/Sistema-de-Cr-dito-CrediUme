@@ -37,6 +37,12 @@ service LoanService {
     // Registro de un pago de cuota
     rpc RecordPayment (RecordPaymentRequest) returns (RecordPaymentResponse);
 
+    // Historial de cobros de un préstamo -- BR-LOAN-016. Cualquier rol
+    // autenticado: en ventanilla la pregunta "¿ya pagué?" la hace el cliente
+    // y la contesta el cajero, y el resto del personal necesita ver el cobro
+    // que registró otro sin tener que pedir el papel.
+    rpc ListLoanPayments (ListLoanPaymentsRequest) returns (ListLoanPaymentsResponse);
+
     // Marca un préstamo activo como incumplido (Analista de Crédito o superior)
     rpc MarkDefaulted (MarkDefaultedRequest) returns (MarkDefaultedResponse);
 
@@ -311,6 +317,46 @@ message RecordPaymentResponse {
     // "TRANSFERENCIA"), para que el Comprobante de Pago diga cómo se cobró
     // sin depender de lo que el cliente creía haber enviado.
     string payment_method = 12;
+    // BR-LOAN-016: id de la fila de pago recién creada. Es lo que permite
+    // volver a pedir ESE cobro con ListLoanPayments para reimprimir su
+    // comprobante; antes el cliente solo podía imprimir el pago que tenía en
+    // memoria y lo perdía al cambiar de pantalla.
+    string payment_id = 13;
+}
+
+message ListLoanPaymentsRequest {
+    string loan_id = 1;
+}
+
+// Un cobro ya registrado, con las mismas cifras que devolvió RecordPayment en
+// su momento: el papel reimpreso tiene que decir lo mismo que el original.
+message LoanPaymentEntry {
+    string id = 1;
+    string amount = 2;
+    google.protobuf.Timestamp paid_at = 3;
+    string payment_method = 4;   // "EFECTIVO" | "TRANSFERENCIA"
+    string transfer_reference = 5;
+    // Imputación FIFO de ESTE pago, reconstruida igual que en RecordPayment:
+    // a partir del acumulado anterior a él, no de una cuota guardada (los
+    // pagos no están atados a una cuota puntual en el modelo).
+    repeated int32 covered_installments = 6;
+    // Acumulado y saldo DESPUÉS de este pago -- los mismos números que el
+    // comprobante original imprimió.
+    string total_paid_after = 7;
+    string remaining_balance_after = 8;
+    // Operador que lo registró (BR-AUTH-006). Vacío en los pagos anteriores a
+    // BR-LOAN-016, que no guardaban quién cobraba.
+    string recorded_by_name = 9;
+    string recorded_by_national_id = 10;
+}
+
+message ListLoanPaymentsResponse {
+    // Del más reciente al más antiguo: lo que se consulta en ventanilla es el
+    // último cobro.
+    repeated LoanPaymentEntry payments = 1;
+    int32 total_installments = 2;  // term_months -- el "de 18" del comprobante
+    string total_paid = 3;
+    string remaining_balance = 4;
 }
 
 message MarkDefaultedRequest {

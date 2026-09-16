@@ -69,6 +69,16 @@ Maneja el ciclo de vida completo de un préstamo: Solicitud, Aprobación, Desemb
 
     **Quitar un ajuste puede ser rechazado cuando quedan otros.** Si el ajuste que se quita era chico, esa cuota vuelve a amortizar la porción normal (mayor), el saldo baja más rápido y un ajuste posterior más grande puede pasarse del saldo restante. El servidor valida el cronograma resultante -- la misma comprobación de saldo negativo que hace `UpdateInstallmentAmount` -- y responde `FAILED_PRECONDITION` en vez de dejar el préstamo en un estado imposible; hay que revisar antes los otros ajustes.
 
+*   **BR-LOAN-016 (Historial de cobros y reimpresión del comprobante):** `ListLoanPayments(loan_id)` devuelve los cobros ya registrados de un préstamo, del más reciente al más antiguo. Disponible para **cualquier rol autenticado (Cajero o superior)**, el mismo nivel que `RecordPayment` y `GetAmortizationSchedule`: en ventanilla la pregunta "¿ya pagué?" la hace el cliente y la contesta el cajero, y el resto del personal necesita ver el cobro que registró otro sin pedirle el papel.
+
+    **Qué problema cierra:** hasta acá un cobro solo lo veía quien lo registraba, y solo hasta cambiar de pantalla -- `RecordPayment` devolvía los datos del comprobante y el cliente los guardaba en memoria. Un ticket que salía mal de la impresora térmica, o que el cliente perdía, no se podía repetir; y un cobro hecho por otro operador no aparecía en ningún lado salvo como una baja del saldo.
+
+    **Cada entrada repite las cifras del comprobante original**, no las del préstamo hoy: monto, imputación FIFO de *ese* pago (los números de cuota que cubrió), acumulado y saldo **posteriores a él**, medio, referencia y el operador que lo registró. Se **reconstruyen** a partir del cronograma y de los pagos en orden, por la misma razón por la que el cronograma no se persiste: son función de esos dos datos, y guardar una copia abriría la puerta a que la copia y el cálculo se contradigan. La salvedad honesta es que el cronograma se recalcula con los datos actuales del préstamo: si después del cobro se ajustó una cuota (BR-LOAN-008), la imputación reconstruida puede no coincidir con la del papel original. Por eso **el documento reimpreso se declara reimpresión** en su cara, en vez de hacerse pasar por el primero.
+
+    `RecordPayment` devuelve además el `payment_id` de la fila creada: es lo que ata el comprobante emitido en el momento con el que se reimprime después.
+
+    **El responsable del cobro se guarda en la fila del pago** (`loan_payments.recorded_by_user_id`), no solo en el `AuditLog`. La columna es nullable y **sin backfill**, mismo criterio que `loans.created_by_user_id` y `loans.disbursed_at`: los pagos anteriores a esta regla no tienen un responsable recuperable, se leen como vacío y el papel lo dice en vez de atribuirle el cobro a quien lo reimprime.
+
 *   **Medio de pago (BR-CAJA-004, definido en `specs/cash/README`):** `RecordPayment` acepta `payment_method` = `EFECTIVO` | `TRANSFERENCIA`. `TRANSFERENCIA` -- y también el valor vacío, por compatibilidad con los clientes anteriores a la caja -- exige `transfer_reference`, que es el único rastro del cobro cuando no pasa por ventanilla. `EFECTIVO` no la pide y en cambio exige un **turno de caja abierto** del operador, donde genera un movimiento de ingreso vinculado al pago. La regla completa vive en `specs/cash/README`; acá queda anotada porque cambia el contrato de `RecordPayment`.
 
 ## 3. Modelo de Datos (PostgreSQL)
@@ -85,6 +95,15 @@ Maneja el ciclo de vida completo de un préstamo: Solicitud, Aprobación, Desemb
 *   `status` (Enum: PENDING, APPROVED, ACTIVE, PAID, DEFAULTED, EXPIRED) - `EXPIRED` es el estado terminal de una aprobación no desembolsada dentro de los 30 días (BR-LOAN-003); se distingue de `DEFAULTED`, que es para préstamos que sí llegaron a desembolsarse.
 *   `created_at` (Timestamp)
 
+**Tabla: `loan_payments`**
+*   `id` (UUID, PK)
+*   `loan_id` (UUID, FK -> loans.id)
+*   `amount` (Decimal)
+*   `transfer_reference` (VARCHAR, nullable) - Obligatoria en la capa de aplicación para los cobros que no son en efectivo (BR-CAJA-004)
+*   `payment_method` (Enum: EFECTIVO, TRANSFERENCIA, nullable) - NULL se lee como TRANSFERENCIA (era el único medio antes de la caja)
+*   `paid_at` (Timestamp)
+*   `recorded_by_user_id` (UUID, FK -> users.id, nullable) - Operador que registró el cobro (BR-LOAN-016); nullable y sin backfill, los pagos anteriores se leen como "sin responsable registrado"
+
 **Tabla: `loan_installment_adjustments`** (BR-LOAN-008)
 *   `id` (UUID, PK)
 *   `loan_id` (UUID, FK -> loans.id)
@@ -99,6 +118,7 @@ Maneja el ciclo de vida completo de un préstamo: Solicitud, Aprobación, Desemb
 *   `UpdateLoanChargesRequest` / `UpdateLoanChargesResponse` - Edición de cargos/seguros mientras esté Pendiente (BR-LOAN-006)
 *   `UpdateInstallmentAmountRequest` / `UpdateInstallmentAmountResponse` - Ajuste manual de una cuota de un préstamo ACTIVE (BR-LOAN-008)
 *   `RemoveInstallmentAdjustmentRequest` / `RemoveInstallmentAdjustmentResponse` - Quita un ajuste manual y devuelve la cuota al monto calculado (BR-LOAN-015)
+*   `ListLoanPaymentsRequest` / `ListLoanPaymentsResponse` - Historial de cobros del préstamo, con las cifras de cada comprobante, para consulta y reimpresión (BR-LOAN-016)
 *   `GetAmortizationScheduleRequest` / `GetAmortizationScheduleResponse`
 *   `ListActiveLoansRequest` / `ListActiveLoansResponse` - Vista consolidada de todos los préstamos ACTIVE (no filtrada por cliente), con nombre del cliente incluido para evitar N+1 llamadas a ClientService
 *   `DeleteLoanRequest` / `DeleteLoanResponse` - Eliminación definitiva de un préstamo cargado por error (BR-LOAN-012); devuelve el `client_id` del préstamo borrado para que el cliente pueda volver a listar su cartera

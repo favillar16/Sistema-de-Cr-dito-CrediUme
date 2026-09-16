@@ -479,6 +479,23 @@ class LoanServiceClient:
             error_cls=ApiError,
         )
 
+    def list_loan_payments(
+        self, access_token: str, loan_id: str
+    ) -> loan_service_pb2.ListLoanPaymentsResponse:
+        """BR-LOAN-016: cobros ya registrados del préstamo, del más reciente
+        al más antiguo.
+
+        Es lo que hace visible un pago para el resto del personal (antes sólo
+        lo veía quien lo registraba, y sólo hasta cambiar de pantalla) y lo
+        que permite reimprimir el comprobante de un cobro anterior.
+        """
+        return _invoke(
+            self._stub.ListLoanPayments,
+            loan_service_pb2.ListLoanPaymentsRequest(loan_id=loan_id),
+            access_token=access_token,
+            error_cls=ApiError,
+        )
+
     def mark_defaulted(
         self, access_token: str, loan_id: str
     ) -> loan_service_pb2.MarkDefaultedResponse:

@@ -259,8 +259,12 @@ def test_period_report_totals_what_was_disbursed_in_the_range(servicer):
 
     assert response.loans_disbursed == 1
     assert Decimal(response.principal_disbursed) == Decimal("3000.00")
-    assert response.loans_approved == 2
-    assert Decimal(response.principal_approved) == Decimal("12000.00")
+    # Aprobado en el rango hay UNO solo: el de 9.000, que todavía no se
+    # desembolsó. El de 3.000 se aprobó hace 90 días y se desembolsó recién
+    # ahora -- contarlo como aprobación de este período borraría justamente la
+    # distinción que esta regla existe para hacer.
+    assert response.loans_approved == 1
+    assert Decimal(response.principal_approved) == Decimal("9000.00")
 
 
 def test_period_report_ignores_loans_disbursed_before_the_column_existed(servicer):

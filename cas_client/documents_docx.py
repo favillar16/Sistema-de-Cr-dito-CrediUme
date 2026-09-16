@@ -401,6 +401,8 @@ def ficha_cliente_docx(loan, client) -> Document:
     if ratio_excede:
         ratio_run.font.color.rgb = _rgb(theme.ERROR)
 
+    _add_decision_block(document)
+
     _add_footer_note(
         document,
         "Ficha generada por el sistema de CREDIMED UME. Uso interno para el "
@@ -408,6 +410,52 @@ def ficha_cliente_docx(loan, client) -> Document:
         "documento legal ni se entrega al cliente.",
     )
     return document
+
+
+# Casilla vacía para tildar a mano. En el PDF es una celda con borde (ver
+# documents._casilla); acá alcanza el carácter, que es lo que un usuario puede
+# reemplazar por una X escribiendo encima -- que es para lo que existe el DOCX.
+_CASILLA_VACIA = "☐"
+
+
+def _add_decision_block(document: Document) -> None:
+    """ "Espacio para uso exclusivo de la entidad" de la ficha: dictamen,
+    condiciones aprobadas, firmas y observaciones, todo en blanco.
+
+    Va también en el DOCX y no sólo en el PDF porque es la parte que convierte
+    la ficha en un formulario: sin ella el documento describe la solicitud
+    pero no deja constancia de la decisión ni de quién la tomó.
+    """
+    _add_section_heading(
+        document, f"Espacio para uso exclusivo de {documents._COMPANY_NAME}"
+    )
+    tabla = document.add_table(rows=3, cols=2)
+    tabla.style = "Table Grid"
+
+    dictamen = tabla.rows[0].cells[0]
+    dictamen.text = "Dictamen"
+    for opcion in ("Aprobado", "Aprobado con modificaciones", "Rechazado"):
+        dictamen.add_paragraph(f"{_CASILLA_VACIA}  {opcion}")
+
+    condiciones = tabla.rows[0].cells[1]
+    condiciones.text = "Monto aprobado: "
+    condiciones.add_paragraph("Plazo aprobado: ")
+    condiciones.add_paragraph("Fecha de la decisión: ")
+
+    for celda, etiqueta in (
+        (tabla.rows[1].cells[0], "Analista que estudió el legajo"),
+        (tabla.rows[1].cells[1], "Responsable que autoriza"),
+    ):
+        celda.text = etiqueta
+        celda.add_paragraph("")
+        celda.add_paragraph("")
+        celda.add_paragraph("Firma y aclaración: ")
+
+    observaciones = tabla.rows[2].cells[0]
+    observaciones.merge(tabla.rows[2].cells[1])
+    observaciones.text = "Observaciones:"
+    observaciones.add_paragraph("")
+    observaciones.add_paragraph("")
 
 
 def reporte_periodo_docx(report, generated_by: str = "") -> Document:

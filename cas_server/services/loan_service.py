@@ -395,6 +395,19 @@ def _nombre_completo(usuario: User) -> str:
     return f"{usuario.first_name} {usuario.last_name}"
 
 
+def _datos_de_operador(usuario: User | None) -> tuple[str, str]:
+    """(nombre para mostrar, C.I.) de un operador guardado, o ("", "") si no
+    hay ninguno.
+
+    Un pago anterior a BR-LOAN-016 no tiene responsable: devuelve ("", "") y
+    el comprobante reimpreso lo dice, en vez de atribuirle el cobro a quien
+    está consultando el historial.
+    """
+    if usuario is None:
+        return "", ""
+    return _nombre_completo(usuario) or usuario.username, usuario.national_id or ""
+
+
 def _operador_actual(sesion) -> tuple[str, str]:
     """(nombre para mostrar, C.I.) del operador autenticado que está haciendo
     la llamada -- para el "Registrado por" del Comprobante de Pago.
@@ -412,7 +425,7 @@ def _operador_actual(sesion) -> tuple[str, str]:
     usuario = sesion.get(User, uuid.UUID(credenciales.user_id))
     if usuario is None:
         return credenciales.username, ""
-    return _nombre_completo(usuario) or usuario.username, usuario.national_id or ""
+    return _datos_de_operador(usuario)
 
 
 def _cuotas_cubiertas_por_pago(
@@ -1142,15 +1155,22 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 transfer_reference=referencia_transferencia or None,
                 payment_method=medio_pago,
                 paid_at=ahora,
+                # BR-LOAN-016: el responsable del cobro se guarda en la fila,
+                # no solo en el AuditLog, para que el historial pueda decir
+                # quién cobró y el comprobante reimpreso nombre al mismo
+                # cajero que el original. id_actor_actual devuelve None sin
+                # credenciales (tests directos al servicer), igual que en el
+                # resto del módulo.
+                recorded_by_user_id=id_actor_actual(get_current_claims()),
             )
             sesion.add(pago)
+            # El id del pago se necesita en la respuesta (y para el movimiento
+            # de caja de más abajo), así que se fuerza antes del commit.
+            sesion.flush()
 
             if sesion_caja is not None:
-                # flush para que el movimiento pueda referenciar el id del
-                # pago recién insertado (mismo patrón que el resto del
-                # servidor cuando necesita un id autogenerado antes del
-                # commit).
-                sesion.flush()
+                # El id ya existe por el flush de arriba; el movimiento de
+                # caja lo referencia (BR-CAJA-004).
                 registrar_cobro_en_efectivo(
                     sesion,
                     sesion_caja,
@@ -1207,6 +1227,73 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 recorded_by_name=nombre_operador,
                 recorded_by_national_id=ci_operador,
                 payment_method=medio_pago.value,
+                payment_id=str(pago.id),
+            )
+
+    def ListLoanPayments(self, request, context):
+        """BR-LOAN-016: historial de cobros de un préstamo.
+
+        Devuelve por cada pago las mismas cifras que devolvió RecordPayment
+        cuando se registró -- imputación FIFO, acumulado y saldo *después* de
+        ese pago -- para que un comprobante reimpreso diga lo mismo que el
+        original. Se reconstruyen en vez de guardarse por la misma razón por
+        la que el cronograma no se persiste: son función del cronograma y de
+        los pagos, y duplicarlas abriría la puerta a que la copia y el cálculo
+        se contradigan.
+
+        La salvedad honesta es que el cronograma se recalcula con los datos
+        actuales del préstamo: si después del cobro se ajustó una cuota
+        (BR-LOAN-008) la imputación reconstruida puede no coincidir con la del
+        papel original. Por eso la reimpresión se marca como tal en el
+        documento, en lugar de hacerse pasar por el primer comprobante.
+        """
+        loan_id = analizar_uuid(request.loan_id, "loan_id", context)
+
+        with SessionLocal() as sesion:
+            prestamo = sesion.get(Loan, loan_id)
+            if prestamo is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Préstamo no encontrado")
+
+            total_programado, total_pagado = _totales_prestamo(prestamo)
+
+            # En orden cronológico para poder acumular; se invierte al final,
+            # porque lo que se consulta en ventanilla es el último cobro.
+            pagos = sorted(prestamo.payments, key=lambda pago: pago.paid_at)
+            acumulado = CERO
+            entradas = []
+            for pago in pagos:
+                cubiertas = _cuotas_cubiertas_por_pago(prestamo, acumulado, pago.amount)
+                acumulado += pago.amount
+                nombre_operador, ci_operador = _datos_de_operador(pago.recorded_by)
+                entradas.append(
+                    loan_service_pb2.LoanPaymentEntry(
+                        id=str(pago.id),
+                        amount=str(pago.amount),
+                        paid_at=a_marca_tiempo(pago.paid_at),
+                        # NULL se lee como TRANSFERENCIA: era el único medio
+                        # admitido antes de BR-CAJA-004 (ver el modelo).
+                        payment_method=(
+                            pago.payment_method.value
+                            if pago.payment_method is not None
+                            else PaymentMethodEnum.TRANSFERENCIA.value
+                        ),
+                        transfer_reference=pago.transfer_reference or "",
+                        covered_installments=cubiertas,
+                        total_paid_after=str(acumulado),
+                        remaining_balance_after=str(
+                            max(total_programado - acumulado, CERO)
+                        ),
+                        recorded_by_name=nombre_operador,
+                        recorded_by_national_id=ci_operador,
+                    )
+                )
+            entradas.reverse()
+
+            return loan_service_pb2.ListLoanPaymentsResponse(
+                payments=entradas,
+                total_installments=prestamo.term_months,
+                total_paid=str(total_pagado),
+                remaining_balance=str(max(total_programado - total_pagado, CERO)),
             )
 
     def MarkDefaulted(self, request, context):

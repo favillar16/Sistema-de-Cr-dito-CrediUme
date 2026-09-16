@@ -342,8 +342,20 @@ class LoanPayment(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+    # BR-LOAN-016: operador que registró el cobro. Hasta que existió el
+    # historial consultable, quién cobraba solo vivía en el AuditLog y en el
+    # papel que se imprimía en el momento; para poder reimprimir un
+    # comprobante (que nombra al cajero) y para que el resto del personal vea
+    # quién tomó el dinero, tiene que estar en la fila del pago.
+    # Nullable y sin backfill, mismo criterio que Loan.created_by_user_id y
+    # Loan.disbursed_at: los pagos anteriores no tienen un responsable real y
+    # atribuírselo a alguien sería inventarlo.
+    recorded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
 
     loan: Mapped["Loan"] = relationship(back_populates="payments")
+    recorded_by: Mapped["User | None"] = relationship("User")
 
 
 class LoanInstallmentAdjustment(Base):

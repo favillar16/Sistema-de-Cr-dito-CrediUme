@@ -79,7 +79,16 @@ _MOVEMENT_TYPES = (("Ingreso", "INGRESO"), ("Egreso", "EGRESO"))
 
 _STATUS_LABELS = {"OPEN": "Abierta", "CLOSED": "Cerrada"}
 
-_CLIENT_HEADERS = ("Cliente", "Documento", "Teléfono")
+# Con "Estado" por el mismo motivo que en loans_view: la búsqueda incluye a
+# los clientes dados de baja, y un cliente inactivo no tiene préstamos que
+# cobrar (BR-CLI-004), así que la lista vacía de préstamos necesita
+# explicarse en la fila del cliente.
+_CLIENT_HEADERS = ("Cliente", "Documento", "Teléfono", "Estado")
+
+# Cobros ya registrados del préstamo elegido (BR-LOAN-016). Más corta que la
+# de loans_view: en ventanilla importa cuándo, cuánto y qué cuota; el medio no
+# (acá casi todo es efectivo) y el operador se lee en el ticket.
+_PAYMENT_HEADERS = ("Fecha y hora", "Monto (Gs)", "Cuota(s)", "Registrado por")
 
 # Efectivo va primero acá, al revés que en loans_view.py: esta pantalla ES la
 # caja, así que el cobro en ventanilla es el caso normal y la transferencia la
@@ -185,6 +194,18 @@ class CashView(BaseView):
         self._selected_client = None
         self._selected_loan = None
         self._last_payment = None
+        # El préstamo al que pertenece _last_payment. Sin este pin alcanzaba
+        # con cambiar de préstamo en el combo (un cliente puede tener hasta 3
+        # activos, BR-LOAN-001) para que el ticket saliera con el N° y el
+        # número de comprobante del préstamo nuevo y el monto, las cuotas y la
+        # hora del cobro anterior. Misma defensa que _last_payment_loan_id en
+        # loans_view.py.
+        self._last_payment_loan_id: str | None = None
+        # BR-LOAN-016: cobros ya registrados del préstamo elegido -- los haya
+        # hecho este cajero o cualquier otro. Es lo que se reimprime.
+        self._payment_entries: list = []
+        self._payments_total_installments = 0
+        self._payments_worker: AsyncWorker | None = None
         self._detail = None  # último CashSessionDetail abierto, o None
         # Se fija de verdad en set_user(); el valor inicial importa porque la
         # vista se construye antes del login (igual que el resto del shell).
@@ -378,6 +399,30 @@ class CashView(BaseView):
         self._loan_summary.setWordWrap(True)
         detail_layout.addWidget(self._loan_summary)
 
+        # BR-LOAN-016: cobros ya registrados de este préstamo, los haya hecho
+        # quien los haya hecho. En ventanilla es la respuesta a "¿ya pagué?",
+        # que antes obligaba a mirar el saldo y deducir; y es desde donde se
+        # reimprime un ticket que salió mal o que el cliente perdió.
+        self._payments_table = QTableWidget(0, len(_PAYMENT_HEADERS))
+        self._payments_table.setHorizontalHeaderLabels(_PAYMENT_HEADERS)
+        size_columns(self._payments_table, stretch_column=3)
+        self._payments_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._payments_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._payments_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._payments_table.itemSelectionChanged.connect(self._on_payment_row_selected)
+        self._payments_table.setMaximumHeight(130)
+        style_table(self._payments_table)
+        set_empty_message(
+            self._payments_table, "Este préstamo todavía no registra cobros."
+        )
+        detail_layout.addWidget(self._payments_table)
+
         # ResponsiveGrid y no un QHBoxLayout: con el botón del ticket son 5
         # controles fijos en una fila, y esta tarjeta pasaba de 550 a 667 px de
         # mínimo contra un viewport de ~608 px en la ventana mínima de la app
@@ -416,6 +461,20 @@ class CashView(BaseView):
         self._ticket_button.setToolTip(
             "Imprime el ticket de 80 mm en la impresora térmica de la caja."
         )
+
+        # Reimpresión: opera sobre la fila elegida de la tabla de cobros, no
+        # sobre el pago en memoria, así que sirve para un cobro de ayer o de
+        # otro cajero. El papel sale marcado como duplicado.
+        self._reprint_button = QPushButton("Reimprimir ticket elegido")
+        self._reprint_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reprint_button.setStyleSheet(theme.secondary_button_style())
+        self._reprint_button.setToolTip(
+            "Vuelve a imprimir el ticket del cobro seleccionado en la lista "
+            "de arriba, marcado como reimpresión."
+        )
+        self._reprint_button.setEnabled(False)
+        self._reprint_button.clicked.connect(self._on_reprint_ticket)
+        actions.add_widget(self._reprint_button)
         detail_layout.addWidget(actions)
 
         self._collection_detail.setVisible(False)
@@ -569,12 +628,36 @@ class CashView(BaseView):
     # ---- Estado de sesión / refresco ------------------------------------
 
     def set_user(self, username: str, role: str) -> None:
+        # La vista se construye una sola vez y sobrevive al logout, así que un
+        # cambio de operador tiene que borrar lo que quedó del anterior: sin
+        # esto el siguiente cajero encontraba en pantalla al cliente del turno
+        # previo y los cuatro botones de comprobante habilitados sobre un
+        # cobro que no hizo él.
+        self.clear_session_state()
         self._is_supervisor = can_supervise_cash_sessions(role)
         self._history_caption.setText(
             "Arqueos de todos los cajeros."
             if self._is_supervisor
             else "Sus propios arqueos."
         )
+
+    def clear_session_state(self) -> None:
+        """Borra todo lo que pertenece a la sesión del operador anterior.
+
+        Se llama en cada cambio de usuario (login, logout y expiración de
+        sesión) desde MainWindow, no sólo en el logout explícito: la pantalla
+        no debe conservar datos personales de un cliente ni un comprobante
+        emitible entre dos operadores distintos de la misma PC.
+        """
+        self._selected_client = None
+        self._selected_client_label.setText("")
+        self._client_search.clear()
+        self._client_search.set_error(False)
+        self._client_table.setRowCount(0)
+        self._client_table.setVisible(False)
+        self._collection_detail.setVisible(False)
+        self._reset_collection_selection()
+        self._detail = None
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -867,6 +950,7 @@ class CashView(BaseView):
                 f"{cliente.first_name} {cliente.last_name}",
                 cliente.national_id,
                 cliente.phone_number,
+                "Activo" if cliente.is_active else "Inactivo",
             )
             for col, texto in enumerate(celdas):
                 item = QTableWidgetItem(texto)
@@ -903,12 +987,35 @@ class CashView(BaseView):
         otro cliente sobre la pantalla del actual."""
         self._selected_loan = None
         self._last_payment = None
+        self._last_payment_loan_id = None
         self._loan_combo.clear()
         self._installment_combo.clear()
         self._collection_amount.clear()
         self._loan_summary.setText("")
+        self._payment_entries = []
+        self._payments_total_installments = 0
+        self._payments_table.setRowCount(0)
+        self._sync_receipt_buttons()
+        self._on_payment_row_selected()
+
+    def _comprobante_vigente(self) -> bool:
+        """Si el cobro en memoria corresponde al préstamo que está en pantalla.
+
+        Los cuatro papeles (ticket, PDF, DOCX e impresión A4) describen un
+        cobro concreto sobre un préstamo concreto: el ticket imprime el N° de
+        préstamo y el número de comprobante desde `loan`, y los montos desde
+        `payment`. Si no son del mismo préstamo, el papel mezcla dos cobros.
+        """
+        return (
+            self._last_payment is not None
+            and self._selected_loan is not None
+            and self._last_payment_loan_id == self._selected_loan.id
+        )
+
+    def _sync_receipt_buttons(self) -> None:
+        vigente = self._comprobante_vigente()
         for button in self._receipt_buttons:
-            button.setEnabled(False)
+            button.setEnabled(vigente)
 
     def _on_client_loans_loaded(self, response) -> None:
         activos = [loan for loan in response.loans if loan.status == _COBRABLE]
@@ -933,6 +1040,10 @@ class CashView(BaseView):
         self._selected_loan = loan
         self._installment_combo.clear()
         self._collection_amount.clear()
+        # El comprobante sigue a su préstamo: se apaga al pasar a otro y
+        # vuelve si se regresa al que se acaba de cobrar (el cajero suele
+        # mirar el otro préstamo del mismo cliente antes de imprimir).
+        self._sync_receipt_buttons()
         if loan is None:
             return
         estado = (
@@ -950,6 +1061,7 @@ class CashView(BaseView):
             loan.id,
             on_success=self._on_schedule_loaded,
         )
+        self._load_loan_payments(loan.id)
 
     def _on_schedule_loaded(self, response) -> None:
         self._installment_combo.clear()
@@ -1016,9 +1128,11 @@ class CashView(BaseView):
 
     def _on_payment_recorded(self, payment) -> None:
         self._last_payment = payment
+        self._last_payment_loan_id = (
+            self._selected_loan.id if self._selected_loan is not None else None
+        )
         self._collection_reference.clear()
-        for button in self._receipt_buttons:
-            button.setEnabled(True)
+        self._sync_receipt_buttons()
         cuotas = documents.cuotas_cubiertas_texto(
             payment.covered_installments, payment.total_installments
         )
@@ -1050,6 +1164,7 @@ class CashView(BaseView):
         self._loan_summary.setText(
             f"Saldo restante {gs(loan.remaining_balance)} · Préstamo {estado}."
         )
+        self._load_loan_payments(loan.id)
         if loan.status != _COBRABLE:
             # Quedó saldado con este cobro: no hay más cuotas que ofrecer.
             self._installment_combo.clear()
@@ -1062,6 +1177,64 @@ class CashView(BaseView):
             loan.id,
             on_success=self._on_schedule_loaded,
         )
+
+    # ---- Cobros registrados del préstamo (BR-LOAN-016) -------------------
+
+    def _load_loan_payments(self, loan_id: str) -> None:
+        self._payments_worker = AsyncWorker(
+            self._loans_client.list_loan_payments,
+            self._session.access_token,
+            loan_id,
+            error_translator=_friendly_collection_message,
+        )
+        self._payments_worker.succeeded.connect(self._on_payments_loaded)
+        self._payments_worker.failed.connect(self._toast.show_message)
+        self._payments_worker.start()
+
+    def _on_payments_loaded(self, response) -> None:
+        self._payment_entries = list(response.payments)
+        self._payments_total_installments = response.total_installments
+        self._payments_table.setRowCount(0)
+        for entry in self._payment_entries:
+            row = self._payments_table.rowCount()
+            self._payments_table.insertRow(row)
+            celdas = (
+                fecha_hora(entry.paid_at.ToDatetime()),
+                gs(entry.amount),
+                documents.cuotas_cubiertas_texto(
+                    entry.covered_installments, response.total_installments
+                ),
+                entry.recorded_by_name or "No registrado",
+            )
+            for col, texto in enumerate(celdas):
+                self._payments_table.setItem(row, col, QTableWidgetItem(texto))
+        self._on_payment_row_selected()
+
+    def _on_payment_row_selected(self) -> None:
+        self._reprint_button.setEnabled(self._selected_payment_entry() is not None)
+
+    def _selected_payment_entry(self):
+        fila = self._payments_table.currentRow()
+        if fila < 0 or fila >= len(self._payment_entries):
+            return None
+        return self._payment_entries[fila]
+
+    def _on_reprint_ticket(self) -> None:
+        """Reimprime el ticket del cobro elegido en la lista.
+
+        A diferencia de "Imprimir ticket" (que emite el papel del cobro que se
+        acaba de registrar), esto sirve para un cobro anterior -- de ayer, o de
+        otro cajero -- y el papel sale marcado como reimpresión.
+        """
+        entry = self._selected_payment_entry()
+        if (
+            entry is None
+            or self._selected_loan is None
+            or self._selected_client is None
+        ):
+            return
+        pago = documents.CobroHistorico(entry, self._payments_total_installments)
+        self._imprimir_ticket(pago)
 
     # ---- Comprobante de pago (BR-LOAN-011) -------------------------------
 
@@ -1082,10 +1255,15 @@ class CashView(BaseView):
         de 80 mm de ancho por una A4. El armado de la página va *después* de
         aceptar el diálogo -- ver apply_ticket_page().
         """
-        if self._last_payment is None:
+        if not self._comprobante_vigente():
             return
+        self._imprimir_ticket(self._last_payment)
+
+    def _imprimir_ticket(self, payment) -> None:
+        """Arma e imprime el ticket de `payment`, sea el cobro recién hecho o
+        uno traído del historial (que sale marcado como reimpresión)."""
         html = documents.ticket_cobro_html(
-            self._selected_loan, self._selected_client, self._last_payment
+            self._selected_loan, self._selected_client, payment
         )
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printing.apply_ticket_page(printer, html)
@@ -1101,7 +1279,7 @@ class CashView(BaseView):
         self._toast.show_message("Ticket enviado a la impresora.")
 
     def _on_receipt_pdf(self) -> None:
-        if self._last_payment is None:
+        if not self._comprobante_vigente():
             return
         path, _filtro = QFileDialog.getSaveFileName(
             self, "Guardar comprobante", self._receipt_name("pdf"), "PDF (*.pdf)"
@@ -1121,7 +1299,7 @@ class CashView(BaseView):
         self._toast.show_message("Comprobante guardado.")
 
     def _on_receipt_docx(self) -> None:
-        if self._last_payment is None:
+        if not self._comprobante_vigente():
             return
         path, _filtro = QFileDialog.getSaveFileName(
             self, "Guardar comprobante", self._receipt_name("docx"), "Word (*.docx)"
@@ -1138,7 +1316,7 @@ class CashView(BaseView):
         self._toast.show_message("Comprobante guardado.")
 
     def _on_receipt_print(self) -> None:
-        if self._last_payment is None:
+        if not self._comprobante_vigente():
             return
         document = QTextDocument()
         document.setHtml(self._receipt_html())

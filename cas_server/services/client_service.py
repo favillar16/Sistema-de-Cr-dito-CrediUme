@@ -226,10 +226,20 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
             consulta = sesion.query(Client)
             if termino:
                 patron = f"%{termino}%"
+                # El nombre completo se compara además concatenado, en los dos
+                # órdenes: cada columna por separado no encuentra "Juan Pérez"
+                # (ninguna la contiene entera), que es justamente como lo
+                # escribe quien atiende al cliente que tiene enfrente. Los dos
+                # órdenes porque en ventanilla se dicta indistintamente
+                # "nombre apellido" o "apellido nombre".
+                nombre_apellido = Client.first_name + " " + Client.last_name
+                apellido_nombre = Client.last_name + " " + Client.first_name
                 consulta = consulta.filter(
                     or_(
                         Client.first_name.ilike(patron),
                         Client.last_name.ilike(patron),
+                        nombre_apellido.ilike(patron),
+                        apellido_nombre.ilike(patron),
                         Client.national_id.ilike(patron),
                         Client.phone_number.ilike(patron),
                     )

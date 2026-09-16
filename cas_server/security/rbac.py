@@ -63,6 +63,10 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     "/loans.LoanService/ListClientLoans": CASHIER_AND_ABOVE,
     "/loans.LoanService/ListActiveLoans": CASHIER_AND_ABOVE,
     "/loans.LoanService/RecordPayment": CASHIER_AND_ABOVE,
+    # BR-LOAN-016. Mismo rango que RecordPayment y GetAmortizationSchedule:
+    # el historial de cobros es información operativa de consulta -- en
+    # ventanilla "¿ya pagué?" la pregunta el cliente y la contesta el cajero.
+    "/loans.LoanService/ListLoanPayments": CASHIER_AND_ABOVE,
     "/loans.LoanService/GetAmortizationSchedule": CASHIER_AND_ABOVE,
     "/loans.LoanService/UpdateInstallmentAmount": MANAGER_AND_ABOVE,
     # BR-LOAN-015: simétrica con UpdateInstallmentAmount a propósito --

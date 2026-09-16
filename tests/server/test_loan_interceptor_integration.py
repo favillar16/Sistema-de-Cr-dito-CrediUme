@@ -3,7 +3,7 @@ pattern: a real grpc.Server with AuthInterceptor wired in, driven over an
 actual channel so metadata-based auth is exercised for real."""
 
 from concurrent import futures
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import auth_service_pb2
@@ -19,6 +19,7 @@ from cas_server.db.models import (
     AuditLog,
     Client,
     Loan,
+    LoanPayment,
     LoanStatusEnum,
     RoleEnum,
     User,
@@ -248,7 +249,13 @@ def test_update_loan_proposal_allows_credit_analyst(stubs):
             loan_id=str(loan_id),
             principal_amount="1200.00",
             term_months=8,
-            first_due_date="2026-09-01",
+            # Derivada de hoy y no una fecha fija: el préstamo se crea con
+            # created_at=now(), y el servidor rechaza un primer vencimiento
+            # anterior a esa fecha -- con un literal, el test pasa hasta que
+            # el calendario lo alcanza y después falla solo.
+            first_due_date=(
+                datetime.now(timezone.utc).date() + timedelta(days=30)
+            ).isoformat(),
         ),
         metadata=metadata,
     )
@@ -756,5 +763,206 @@ def test_revert_default_on_unknown_loan_is_not_found(stubs):
                 loan_id="11111111-1111-1111-1111-111111111111", reason="x"
             ),
             metadata=_login(auth_stub, "analyst_rd5", "Passw0rd!"),
+        )
+    assert exc_info.value.code() == grpc.StatusCode.NOT_FOUND
+
+
+# --- BR-LOAN-016: historial de cobros y reimpresión ---------------------------
+#
+# Un cobro dejó de ser algo que sólo ve quien lo registra: el resto del
+# personal lo consulta desde el préstamo, y el comprobante se puede volver a
+# emitir. Eso obliga a que el historial reconstruya, para cada pago, las
+# mismas cifras que devolvió RecordPayment en su momento -- si no, el papel
+# reimpreso diría algo distinto del que se entregó.
+
+
+def test_list_loan_payments_is_open_to_every_authenticated_role(stubs):
+    """En ventanilla "¿ya pagué?" la pregunta el cliente y la contesta el
+    cajero: el historial es consulta operativa, no material de gestión."""
+    auth_stub, loan_stub = stubs
+    _create_user("cashier_hist", "Passw0rd!", RoleEnum.CASHIER)
+    client_id = _create_client_row(national_id="7000040", email="hist1@example.com")
+    loan_id = _create_loan_row(
+        client_id, LoanStatusEnum.ACTIVE, approved_at=datetime.now(timezone.utc)
+    )
+    metadata = _login(auth_stub, "cashier_hist", "Passw0rd!")
+
+    response = loan_stub.ListLoanPayments(
+        loan_service_pb2.ListLoanPaymentsRequest(loan_id=str(loan_id)),
+        metadata=metadata,
+    )
+
+    assert list(response.payments) == []
+    # 6 = term_months de _create_loan_row; es el "de 6" que imprime el
+    # comprobante ("Cuota(s) 1 de 6").
+    assert response.total_installments == 6
+
+
+def test_list_loan_payments_without_token_is_unauthenticated(stubs):
+    auth_stub, loan_stub = stubs
+    with pytest.raises(grpc.RpcError) as exc_info:
+        loan_stub.ListLoanPayments(
+            loan_service_pb2.ListLoanPaymentsRequest(
+                loan_id="11111111-1111-1111-1111-111111111111"
+            )
+        )
+    assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+
+def test_record_payment_returns_the_id_of_the_payment_it_created(stubs):
+    """Sin el id no hay forma de volver a pedir ESE cobro: es lo que ata el
+    comprobante emitido en el momento con el que se reimprime después."""
+    auth_stub, loan_stub = stubs
+    _create_user("manager_pid", "Passw0rd!", RoleEnum.MANAGER)
+    client_id = _create_client_row(national_id="7000041", email="hist2@example.com")
+    loan_id = _create_loan_row(
+        client_id, LoanStatusEnum.ACTIVE, approved_at=datetime.now(timezone.utc)
+    )
+    metadata = _login(auth_stub, "manager_pid", "Passw0rd!")
+
+    pago = loan_stub.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=str(loan_id), transfer_reference="TRF-ID", installment_number=1
+        ),
+        metadata=metadata,
+    )
+    historial = loan_stub.ListLoanPayments(
+        loan_service_pb2.ListLoanPaymentsRequest(loan_id=str(loan_id)),
+        metadata=metadata,
+    )
+
+    assert pago.payment_id
+    assert [entrada.id for entrada in historial.payments] == [pago.payment_id]
+
+
+def test_list_loan_payments_repeats_what_each_receipt_said(stubs):
+    """El corazón de la reimpresión: cada entrada trae la imputación y el
+    saldo *de ese pago*, no los del préstamo hoy."""
+    auth_stub, loan_stub = stubs
+    _create_user("manager_hist", "Passw0rd!", RoleEnum.MANAGER)
+    client_id = _create_client_row(national_id="7000042", email="hist3@example.com")
+    loan_id = _create_loan_row(
+        client_id, LoanStatusEnum.ACTIVE, approved_at=datetime.now(timezone.utc)
+    )
+    metadata = _login(auth_stub, "manager_hist", "Passw0rd!")
+
+    primero = loan_stub.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=str(loan_id), transfer_reference="TRF-1", installment_number=1
+        ),
+        metadata=metadata,
+    )
+    segundo = loan_stub.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=str(loan_id), transfer_reference="TRF-2", installment_number=2
+        ),
+        metadata=metadata,
+    )
+
+    historial = loan_stub.ListLoanPayments(
+        loan_service_pb2.ListLoanPaymentsRequest(loan_id=str(loan_id)),
+        metadata=metadata,
+    )
+
+    # Del más reciente al más antiguo: lo que se consulta es el último cobro.
+    entrada_segundo, entrada_primero = historial.payments
+    for entrada, original in (
+        (entrada_primero, primero),
+        (entrada_segundo, segundo),
+    ):
+        assert entrada.amount == original.amount_paid
+        assert list(entrada.covered_installments) == list(original.covered_installments)
+        assert entrada.total_paid_after == original.total_paid
+        assert entrada.remaining_balance_after == original.remaining_balance
+        assert entrada.transfer_reference == original.transfer_reference
+        assert entrada.payment_method == original.payment_method
+
+    # Contra lo que dijo RecordPayment, no contra un literal: lo que importa
+    # es que el historial y el comprobante original cuenten las mismas cuotas.
+    assert historial.total_installments == segundo.total_installments
+    assert historial.total_paid == segundo.total_paid
+    assert historial.remaining_balance == segundo.remaining_balance
+
+
+def test_list_loan_payments_names_the_operator_who_collected(stubs):
+    """El comprobante nombra al cajero, así que el historial tiene que saber
+    quién cobró -- antes eso sólo estaba en el AuditLog, como texto."""
+    auth_stub, loan_stub = stubs
+    _create_user(
+        "cashier_named",
+        "Passw0rd!",
+        RoleEnum.CASHIER,
+        first_name="Ana",
+        last_name="Giménez",
+        national_id="4111222",
+    )
+    client_id = _create_client_row(national_id="7000043", email="hist4@example.com")
+    loan_id = _create_loan_row(
+        client_id, LoanStatusEnum.ACTIVE, approved_at=datetime.now(timezone.utc)
+    )
+    metadata = _login(auth_stub, "cashier_named", "Passw0rd!")
+
+    loan_stub.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=str(loan_id), transfer_reference="TRF-QUIEN", installment_number=1
+        ),
+        metadata=metadata,
+    )
+    historial = loan_stub.ListLoanPayments(
+        loan_service_pb2.ListLoanPaymentsRequest(loan_id=str(loan_id)),
+        metadata=metadata,
+    )
+
+    entrada = historial.payments[0]
+    assert entrada.recorded_by_name == "Ana Giménez"
+    assert entrada.recorded_by_national_id == "4111222"
+
+
+def test_payments_recorded_before_the_column_have_no_operator(stubs):
+    """Sin backfill: un pago anterior a BR-LOAN-016 no tiene responsable, y
+    atribuírselo a alguien sería inventarlo. El papel lo dice."""
+    auth_stub, loan_stub = stubs
+    _create_user("manager_old", "Passw0rd!", RoleEnum.MANAGER)
+    client_id = _create_client_row(national_id="7000044", email="hist5@example.com")
+    loan_id = _create_loan_row(
+        client_id, LoanStatusEnum.ACTIVE, approved_at=datetime.now(timezone.utc)
+    )
+    with SessionLocal() as session:
+        session.add(
+            LoanPayment(
+                loan_id=loan_id,
+                amount=Decimal("100.00"),
+                transfer_reference="TRF-VIEJO",
+                paid_at=datetime.now(timezone.utc),
+                recorded_by_user_id=None,
+            )
+        )
+        session.commit()
+    metadata = _login(auth_stub, "manager_old", "Passw0rd!")
+
+    historial = loan_stub.ListLoanPayments(
+        loan_service_pb2.ListLoanPaymentsRequest(loan_id=str(loan_id)),
+        metadata=metadata,
+    )
+
+    entrada = historial.payments[0]
+    assert entrada.recorded_by_name == ""
+    assert entrada.recorded_by_national_id == ""
+    # El medio también es nulo en esas filas: se lee como TRANSFERENCIA, que
+    # era el único admitido antes de BR-CAJA-004.
+    assert entrada.payment_method == "TRANSFERENCIA"
+
+
+def test_list_loan_payments_of_an_unknown_loan_is_not_found(stubs):
+    auth_stub, loan_stub = stubs
+    _create_user("manager_404", "Passw0rd!", RoleEnum.MANAGER)
+    metadata = _login(auth_stub, "manager_404", "Passw0rd!")
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        loan_stub.ListLoanPayments(
+            loan_service_pb2.ListLoanPaymentsRequest(
+                loan_id="11111111-1111-1111-1111-111111111111"
+            ),
+            metadata=metadata,
         )
     assert exc_info.value.code() == grpc.StatusCode.NOT_FOUND
