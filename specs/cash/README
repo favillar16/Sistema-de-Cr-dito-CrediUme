@@ -149,6 +149,8 @@ que llame al servicer directamente.
 *   tarjeta de movimientos + tabla del turno, visible solo con la caja abierta;
 *   tarjeta de cierre, con el conteo pre-cargado con el esperado (el caso normal
     es que cuadre; el servidor recalcula y compara igual);
+*   **tarjeta de comprobante de arqueo**, que aparece recién después de cerrar
+    la caja (ver abajo);
 *   historial de arqueos con filtro por rango de fechas.
 
 ### Cobro de cuotas en la ventanilla
@@ -233,6 +235,33 @@ Decisiones que no conviene "corregir" después:
 *   **`documents.ticket_cobro_html()` sigue existiendo** (la impresión ya no
     pasa por ahí, pero `tests/client/test_ticket_cobro.py`/`test_reimpresion.py`
     la siguen ejercitando directamente) -- no asumir que es código muerto.
+
+### Comprobante de arqueo, para firmar
+
+`documents.reporte_arqueo_html()` / `documents_docx.reporte_arqueo_docx()`:
+PDF, DOCX e impresión del `CashSessionDetail` que acaba de devolver
+`CloseCashSession`, para que el cajero lo firme y se lo entregue a un
+supervisor -- hasta esta funcionalidad, el cierre sólo quedaba en pantalla.
+
+*   **Sólo describe el cierre recién hecho**, no uno reimpreso del historial:
+    `ListCashSessions` devuelve `CashSessionSummary`, que no trae los
+    movimientos del turno, y un arqueo sin su detalle es un papel incompleto
+    para firmar. Mismo criterio de alcance que el ticket/comprobante de pago
+    (BR-LOAN-011): sólo lo que está en memoria.
+*   **La tarjeta aparece y desaparece con el ciclo del turno**, no con
+    enable/disable de sus botones (a diferencia de los cuatro botones del
+    comprobante de pago): está oculta hasta el primer cierre de la sesión, y
+    se vuelve a ocultar al abrir un turno nuevo o al cambiar de operador --
+    seguir ofreciendo el arqueo de un turno ya cerrado junto a uno nuevo en
+    curso se leería como si describiera el turno actual.
+*   `documents._filas_arqueo()` / `_filas_movimientos_arqueo()` son la única
+    definición de las filas del resumen y de los movimientos, compartida por
+    el PDF y el DOCX -- mismo criterio que `_filas_reporte()` para el reporte
+    de período.
+*   La diferencia (contado − esperado) sale en rojo si hay sobrante o
+    faltante y en verde si cuadró exacto, mismo criterio visual que
+    `CashView` (`_signed_gs`/`_difference_color`, replicados en
+    `documents._monto_con_signo`/`_color_diferencia`).
 
 El número de ticket se deriva del préstamo más la marca de tiempo del cobro
 (`documents.numero_ticket`): el contrato no devuelve un id de pago, y dos pagos

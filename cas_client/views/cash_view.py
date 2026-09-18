@@ -221,6 +221,11 @@ class CashView(BaseView):
         self._payments_total_installments = 0
         self._payments_worker: AsyncWorker | None = None
         self._detail = None  # último CashSessionDetail abierto, o None
+        # CashSessionDetail del cierre recién hecho -- lo único que trae los
+        # movimientos del turno (ListCashSessions no los expone), así que es
+        # la única oportunidad de ofrecer el arqueo para firmar y archivar.
+        # Se invalida al abrir un turno nuevo o cambiar de operador.
+        self._last_closed_session = None
         # Se fija de verdad en set_user(); el valor inicial importa porque la
         # vista se construye antes del login (igual que el resto del shell).
         self._is_supervisor = False
@@ -273,6 +278,18 @@ class CashView(BaseView):
         self.content_layout.addWidget(self._close_section)
         self._close_card = self._build_close_card()
         self.content_layout.addWidget(self._close_card)
+
+        # Vive fuera de _close_card a propósito: esa tarjeta se oculta en
+        # cuanto la caja queda cerrada (_render() la controla con `abierta`),
+        # pero el arqueo recién cerrado tiene que seguir imprimible después
+        # de eso -- por eso su visibilidad la maneja _sync_arqueo_card(), no
+        # _render(). Oculta hasta el primer cierre de la sesión.
+        self._arqueo_section = section_label("Comprobante de arqueo")
+        self._arqueo_section.setVisible(False)
+        self.content_layout.addWidget(self._arqueo_section)
+        self._arqueo_card = self._build_arqueo_card()
+        self._arqueo_card.setVisible(False)
+        self.content_layout.addWidget(self._arqueo_card)
 
         self.content_layout.addWidget(section_label("Historial de arqueos"))
         self._history_card = self._build_history_card()
@@ -593,6 +610,37 @@ class CashView(BaseView):
 
         return frame
 
+    def _build_arqueo_card(self) -> QWidget:
+        """Constancia del arqueo que se acaba de cerrar (BR-CAJA-003), para
+        firmar y entregar a un supervisor -- hasta ahora el cierre sólo
+        quedaba en pantalla, sin nada que archivar (ver "Open items" en
+        CLAUDE.md). Sólo describe el cierre recién hecho, no uno reimpreso
+        del historial: ver el docstring de documents.reporte_arqueo_html."""
+        frame, layout = card()
+
+        intro = QLabel(
+            "Imprima o guarde el arqueo que se acaba de cerrar para "
+            "firmarlo y entregarlo a un supervisor."
+        )
+        intro.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        actions = ResponsiveGrid(min_cell_width=160, spacing=8)
+        for label, handler in (
+            ("Imprimir arqueo", self._on_arqueo_print),
+            ("Arqueo PDF", self._on_arqueo_pdf),
+            ("Arqueo DOCX", self._on_arqueo_docx),
+        ):
+            button = QPushButton(label)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(theme.secondary_button_style())
+            button.clicked.connect(handler)
+            actions.add_widget(button)
+        layout.addWidget(actions)
+
+        return frame
+
     def _build_history_card(self) -> QWidget:
         frame, layout = card()
 
@@ -716,6 +764,8 @@ class CashView(BaseView):
         self._collection_detail.setVisible(False)
         self._reset_collection_selection()
         self._detail = None
+        self._last_closed_session = None
+        self._sync_arqueo_card()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -862,7 +912,8 @@ class CashView(BaseView):
             self._session.access_token,
             monto,
             self._opening_notes.text().strip(),
-            mensaje_ok="Caja abierta.",
+            mensaje_ok=None,  # el mensaje lo muestra _on_opened
+            on_success=self._on_opened,
         )
 
     def _on_movement_clicked(self) -> None:
@@ -924,6 +975,25 @@ class CashView(BaseView):
             self._toast.show_message(
                 f"Caja cerrada con un sobrante de {_signed_gs(diferencia)}."
             )
+        # El detalle completo (incluye los movimientos, que ListCashSessions
+        # no trae -- ver reporte_arqueo_html()) sólo existe acá y en la
+        # respuesta de CloseCashSession: es la única oportunidad de ofrecer
+        # el arqueo para imprimir/guardar.
+        self._last_closed_session = detail
+        self._sync_arqueo_card()
+
+    def _on_opened(self, _detail) -> None:
+        self._toast.show_message("Caja abierta.")
+        # Un nuevo turno invalida el arqueo del anterior en pantalla: seguir
+        # ofreciéndolo junto a la caja recién abierta se leería como si
+        # describiera el turno en curso.
+        self._last_closed_session = None
+        self._sync_arqueo_card()
+
+    def _sync_arqueo_card(self) -> None:
+        vigente = self._last_closed_session is not None
+        self._arqueo_section.setVisible(vigente)
+        self._arqueo_card.setVisible(vigente)
 
     def _run(
         self,
@@ -1376,6 +1446,66 @@ class CashView(BaseView):
                 document.print_(printer)
             except OSError as exc:
                 self._toast.show_message(documents.friendly_file_error(exc))
+
+    # ---- Arqueo de caja (BR-CAJA-003) -------------------------------------
+
+    def _arqueo_html(self) -> str:
+        return documents.reporte_arqueo_html(
+            self._last_closed_session, self._session.username or ""
+        )
+
+    def _arqueo_name(self, extension: str) -> str:
+        return f"arqueo_{self._last_closed_session.id[:8]}.{extension}"
+
+    def _on_arqueo_print(self) -> None:
+        if self._last_closed_session is None:
+            return
+        document = QTextDocument()
+        document.setHtml(self._arqueo_html())
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        dialog = QPrintDialog(printer, self)
+        if dialog.exec() == QPrintDialog.DialogCode.Accepted:
+            try:
+                document.print_(printer)
+            except OSError as exc:
+                self._toast.show_message(documents.friendly_file_error(exc))
+
+    def _on_arqueo_pdf(self) -> None:
+        if self._last_closed_session is None:
+            return
+        path, _filtro = QFileDialog.getSaveFileName(
+            self, "Guardar arqueo", self._arqueo_name("pdf"), "PDF (*.pdf)"
+        )
+        if not path:
+            return
+        document = QTextDocument()
+        document.setHtml(self._arqueo_html())
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+        try:
+            document.print_(printer)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Arqueo guardado.")
+
+    def _on_arqueo_docx(self) -> None:
+        if self._last_closed_session is None:
+            return
+        path, _filtro = QFileDialog.getSaveFileName(
+            self, "Guardar arqueo", self._arqueo_name("docx"), "Word (*.docx)"
+        )
+        if not path:
+            return
+        try:
+            documents_docx.reporte_arqueo_docx(
+                self._last_closed_session, self._session.username or ""
+            ).save(path)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Arqueo guardado.")
 
     # ---- Historial -------------------------------------------------------
 

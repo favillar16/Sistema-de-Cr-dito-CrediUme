@@ -492,6 +492,75 @@ def reporte_periodo_docx(report, generated_by: str = "") -> Document:
     return document
 
 
+def reporte_arqueo_docx(detail, generated_by: str = "") -> Document:
+    """BR-CAJA-003, contraparte .docx de documents.reporte_arqueo_html() --
+    ver ese docstring para el porqué (constancia de cierre para firmar y
+    archivar, sólo del cierre recién hecho). Sin banner de borrador, mismo
+    criterio que cronograma_docx: no tiene texto legal, sólo cifras que el
+    servidor calculó al cerrar el turno.
+
+    Filas y movimientos vienen de documents._filas_arqueo() /
+    _filas_movimientos_arqueo() -- mismo criterio que _filas_reporte(): una
+    sola definición del contenido para que el PDF y el DOCX no se
+    desincronicen.
+
+    detail: cash_service_pb2.CashSessionDetail
+    """
+    document = Document()
+    _add_header(document, "Arqueo de Caja")
+
+    filas = documents._filas_arqueo(detail)
+    if generated_by:
+        filas = filas + [("Impreso por", generated_by)]
+    table = document.add_table(rows=1 + len(filas) + 1, cols=2)
+    table.style = "Table Grid"
+    table.rows[0].cells[0].text = "Concepto"
+    table.rows[0].cells[1].text = "Detalle"
+    for row_index, (concepto, valor) in enumerate(filas, start=1):
+        cells = table.rows[row_index].cells
+        cells[0].text = concepto
+        cells[1].text = valor
+
+    diferencia_row = table.rows[-1].cells
+    diferencia_row[0].text = "Diferencia (contado − esperado)"
+    diferencia_run = (
+        diferencia_row[1]
+        .paragraphs[0]
+        .add_run(documents._monto_con_signo(detail.closing_difference))
+    )
+    diferencia_run.bold = True
+    diferencia_run.font.color.rgb = _rgb(
+        documents._color_diferencia(detail.closing_difference)
+    )
+    for cell in diferencia_row:
+        for paragraph in cell.paragraphs:
+            for run in paragraph.runs:
+                run.bold = True
+
+    _add_section_heading(document, "Movimientos del turno")
+    movimientos = documents._filas_movimientos_arqueo(detail)
+    if movimientos:
+        mov_table = document.add_table(rows=1 + len(movimientos), cols=5)
+        mov_table.style = "Table Grid"
+        for col, text in enumerate(["Hora", "Tipo", "Concepto", "Monto", "Origen"]):
+            mov_table.rows[0].cells[col].text = text
+        for row_index, fila in enumerate(movimientos, start=1):
+            cells = mov_table.rows[row_index].cells
+            for col, valor in enumerate(fila):
+                cells[col].text = valor
+    else:
+        document.add_paragraph("Sin movimientos registrados en este turno.")
+
+    _add_signature_block(document, "FIRMA DEL CAJERO")
+    _add_signature_block(document, "FIRMA DEL SUPERVISOR")
+    _add_footer_note(
+        document,
+        "Documento generado por el sistema de CREDIMED UME. Constancia de "
+        "arqueo para archivo interno -- no se entrega al cliente.",
+    )
+    return document
+
+
 def _apaisar(document: Document) -> None:
     """Pasa la hoja a orientación horizontal.
 

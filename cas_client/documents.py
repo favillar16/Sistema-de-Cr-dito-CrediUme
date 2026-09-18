@@ -1474,6 +1474,150 @@ def reporte_estado_pagos_html(report, generated_by: str = "") -> str:
     """
 
 
+_ESTADO_CAJA_LABEL = {"OPEN": "Abierta", "CLOSED": "Cerrada"}
+
+
+def _monto_con_signo(value: str) -> str:
+    """gs() descarta el signo de un negativo (pasa por Decimal/int sin
+    conservarlo) -- acá el signo es justo el dato: sobrante contra faltante
+    en el arqueo. Mismo criterio que CashView._signed_gs()."""
+    if value.startswith("-"):
+        return f"-{gs(value[1:])}"
+    return gs(value)
+
+
+def _color_diferencia(value: str) -> str:
+    """Mismo criterio que CashView._difference_color(): verde si el arqueo
+    cuadró exacto, rojo si hubo sobrante o faltante."""
+    if not value or value.lstrip("-").replace(".", "").strip("0") == "":
+        return theme.SUCCESS
+    return theme.ERROR
+
+
+def _filas_arqueo(detail) -> list[tuple[str, str]]:
+    """(concepto, valor) del resumen del arqueo -- BR-CAJA-003, sin la fila
+    de diferencia (HTML y DOCX la arman aparte, cada uno con su propio
+    mecanismo para resaltarla en rojo/verde).
+
+    Compartido por reporte_arqueo_html() y reporte_arqueo_docx(), mismo
+    criterio que _filas_reporte(): una sola definición del contenido para
+    que los dos formatos no se desincronicen.
+
+    detail: cash_service_pb2.CashSessionDetail
+    """
+    cajero = detail.cashier_full_name or detail.cashier_username
+    filas = [
+        ("Cajero", cajero),
+        ("Estado", _ESTADO_CAJA_LABEL.get(detail.status, detail.status)),
+        ("Apertura", fecha_hora(detail.opened_at.ToDatetime())),
+        ("Monto inicial", gs(detail.opening_amount)),
+    ]
+    if detail.opening_notes:
+        filas.append(("Observaciones de apertura", detail.opening_notes))
+    filas += [
+        ("Ingresos", gs(detail.total_income)),
+        ("Egresos", gs(detail.total_expense)),
+        ("Cobros de cuotas en efectivo", gs(detail.total_loan_collections)),
+        ("Efectivo esperado", gs(detail.expected_amount)),
+        ("Cierre", fecha_hora(detail.closed_at.ToDatetime())),
+        ("Efectivo contado", gs(detail.closing_counted_amount)),
+    ]
+    if (
+        detail.closed_by_username
+        and detail.closed_by_username != detail.cashier_username
+    ):
+        filas.append(("Cerrado por", detail.closed_by_username))
+    if detail.closing_notes:
+        filas.append(("Observaciones de cierre", detail.closing_notes))
+    return filas
+
+
+def _filas_movimientos_arqueo(detail) -> list[tuple[str, str, str, str, str]]:
+    """(hora, tipo, concepto, monto, origen) por movimiento del turno, mismo
+    orden que la tabla de CashView. Compartido por el PDF y el DOCX."""
+    return [
+        (
+            fecha_hora(movimiento.created_at.ToDatetime()),
+            "Ingreso" if movimiento.movement_type == "INGRESO" else "Egreso",
+            movimiento.concept,
+            gs(movimiento.amount),
+            "Cobro de préstamo" if movimiento.is_automatic else "Manual",
+        )
+        for movimiento in detail.movements
+    ]
+
+
+def reporte_arqueo_html(detail, generated_by: str = "") -> str:
+    """Arqueo de caja (BR-CAJA-003): se emite al cerrar el turno para que el
+    cajero lo firme y se lo entregue a un supervisor -- hasta ahora el
+    cierre sólo quedaba en pantalla, sin nada que archivar o firmar (ver
+    "Open items" en CLAUDE.md).
+
+    Documenta el mismo `CashSessionDetail` que ya se ve al cerrar -- mismos
+    datos y mismos criterios que CashView (`_signed_gs`/`_difference_color`):
+    un sobrante o faltante tiene que saltar a la vista, no perderse en el
+    mismo color que el resto de las cifras.
+
+    Sólo describe el cierre recién hecho, no un arqueo reimpreso del
+    historial: `ListCashSessions` devuelve `CashSessionSummary`, que no trae
+    los movimientos del turno, y un arqueo sin su detalle es un papel
+    incompleto para firmar. Mismo criterio de alcance que el ticket/
+    comprobante de pago (BR-LOAN-011): sólo lo que está en memoria.
+
+    No lleva _DRAFT_BANNER, igual que el Cronograma y los reportes del
+    dashboard: no hay texto legal que revisar, sólo cifras que el servidor
+    ya calculó al cerrar el turno.
+
+    detail: cash_service_pb2.CashSessionDetail
+    """
+    filas = _filas_arqueo(detail)
+    if generated_by:
+        filas = filas + [("Impreso por", generated_by)]
+    filas_html = "".join(
+        f"<tr><td>{concepto}</td><td align='right'>{valor}</td></tr>"
+        for concepto, valor in filas
+    )
+    diferencia_html = (
+        "<tr><td><b>Diferencia (contado &minus; esperado)</b></td>"
+        f'<td align="right"><b style="color:{_color_diferencia(detail.closing_difference)};">'
+        f"{_monto_con_signo(detail.closing_difference)}</b></td></tr>"
+    )
+
+    movimientos_html = (
+        "".join(
+            f"<tr><td>{hora}</td><td>{tipo}</td><td>{concepto}</td>"
+            f'<td align="right">{monto}</td><td>{origen}</td></tr>'
+            for hora, tipo, concepto, monto, origen in _filas_movimientos_arqueo(detail)
+        )
+        or '<tr><td colspan="5">Sin movimientos registrados en este turno.</td></tr>'
+    )
+
+    return f"""
+    <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
+    {_header("Arqueo de Caja")}
+    <table border="1" cellspacing="0" cellpadding="6" width="100%">
+      {filas_html}
+      {diferencia_html}
+    </table>
+    <h3 style="color:{theme.PRIMARY}; margin-top:20px;">Movimientos del turno</h3>
+    <table border="1" cellspacing="0" cellpadding="5" width="100%">
+      <tr style="background-color:{theme.PRIMARY}; color:white;">
+        <th align="left">Hora</th><th align="left">Tipo</th>
+        <th align="left">Concepto</th><th align="right">Monto</th>
+        <th align="left">Origen</th>
+      </tr>
+      {movimientos_html}
+    </table>
+    {_signature_block("FIRMA DEL CAJERO")}
+    {_signature_block("FIRMA DEL SUPERVISOR")}
+    {_footer(
+        "Documento generado por el sistema de CREDIMED UME. Constancia de "
+        "arqueo para archivo interno -- no se entrega al cliente."
+    )}
+    </body></html>
+    """
+
+
 def contrato_html(loan, client) -> str:
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
