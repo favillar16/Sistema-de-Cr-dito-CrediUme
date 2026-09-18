@@ -1307,11 +1307,8 @@ class CashView(BaseView):
     def _on_ticket_print(self) -> None:
         """Ticket de 80 mm en la impresora térmica de la caja.
 
-        Se muestra el diálogo de impresión igual que en el resto de la app:
-        la térmica no es necesariamente la impresora por defecto de la PC, y
-        mandar el ticket a ciegas a la que esté configurada sacaría un papel
-        de 80 mm de ancho por una A4. El armado de la página va *después* de
-        aceptar el diálogo -- ver apply_ticket_page().
+        Sin diálogo: imprime directo a la térmica configurada en
+        TICKET_PRINTER_NAME -- ver printing.print_ticket().
         """
         if not self._comprobante_vigente():
             return
@@ -1320,19 +1317,13 @@ class CashView(BaseView):
     def _imprimir_ticket(self, payment) -> None:
         """Arma e imprime el ticket de `payment`, sea el cobro recién hecho o
         uno traído del historial (que sale marcado como reimpresión)."""
-        html = documents.ticket_cobro_html(
-            self._selected_loan, self._selected_client, payment
-        )
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        printing.apply_ticket_page(printer, html)
-        dialog = QPrintDialog(printer, self)
-        dialog.setWindowTitle("Imprimir ticket de cobro")
-        if dialog.exec() != QPrintDialog.DialogCode.Accepted:
-            return
         try:
-            printing.render_ticket(printer, html)
-        except OSError as exc:
-            self._toast.show_message(documents.friendly_file_error(exc))
+            printing.print_ticket(self._selected_loan, self._selected_client, payment)
+        except printing.PrinterNotFoundError as exc:
+            self._toast.show_message(str(exc))
+            return
+        except printing.PrinterError as exc:
+            self._toast.show_message(str(exc))
             return
         self._toast.show_message("Ticket enviado a la impresora.")
 

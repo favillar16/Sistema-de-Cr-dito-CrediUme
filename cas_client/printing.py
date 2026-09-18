@@ -1,100 +1,119 @@
-"""Armado de la página para la impresora térmica de la caja (FTX FTXP 80W).
+"""Entrega del ticket de 80 mm al puerto físico de la impresora térmica.
 
-Separado de `documents.py` a propósito: ese módulo es HTML puro y no importa
-Qt (por eso sus tests corren sin display), mientras que acá se toca
-QPrinter/QPageLayout. Y separado de `cash_view.py` porque la geometría del
-rollo no es una decisión de esa pantalla: es una característica del papel.
+Separado de `escpos.py` a propósito: ese módulo arma los bytes ESC/POS del
+ticket sin tocar Windows (por eso sus tests corren sin la impresora real,
+igual que `documents.py` corre sin Qt), mientras que acá se abre el spool de
+Windows con `win32print` y se empujan esos bytes en crudo. Y separado de
+`cash_view.py` porque cuál impresora usar y cómo hablarle es una
+característica de la caja, no de la pantalla.
 
-El punto no obvio de todo esto es la **altura de la página**. Un rollo
-térmico no tiene páginas: el driver corta al final del trabajo, así que si se
-le declara un alto fijo (los "80 x 297 mm" que trae por defecto el formulario
-de estas impresoras) cada ticket se lleva casi 30 cm de papel en blanco. Por
-eso la altura se **mide** a partir del contenido antes de imprimir, y la
-página se arma exactamente de ese alto más la cola del corte.
+**Por qué en crudo y no con QPrinter/QTextDocument (Qt).** La primera versión
+de esto armaba el ticket como HTML y lo imprimía con el pipeline gráfico de
+Qt, midiendo el contenido para declarar una página de 80 mm de ancho por el
+alto exacto del ticket (ver el historial de este archivo). Contra la
+impresora física de la caja ("Printer POS-80", USB\\VID_1FC9&PID_2016) eso
+nunca funcionó: `scripts/diagnostico_impresora_ticket.py` mostró que el
+driver instalado ("Generic / Text Only") y los dos genéricos de Windows que
+se probaron en su reemplazo ("Microsoft Virtual Print Class Driver",
+"Universal Print Class Driver") ignoran cualquier tamaño de página
+personalizado y fuerzan A4 sin avisar -- ninguno de los tres es un driver
+gráfico real, así que no hay tamaño de página que Qt les pueda pedir que
+efectivamente se respete.
+
+La salida es mandar los bytes ESC/POS directo al puerto con el datatype
+"RAW" de la API de impresión de Windows (`win32print`): ese modo no pasa por
+el renderer gráfico del driver en absoluto, así que a la impresora le da
+igual qué driver tenga instalado -- es historia de por qué "Generic / Text
+Only" venía siendo la opción que menos rompía las cosas hasta ahora, aunque
+tampoco imprimiera el ticket con el formato correcto.
 """
 
-from PySide6.QtCore import QMarginsF, QSizeF
-from PySide6.QtGui import QPageLayout, QPageSize, QTextDocument
-from PySide6.QtPrintSupport import QPrinter
+import pywintypes
+import win32print
 
-from cas_client.documents import TICKET_MARGIN_MM, TICKET_TAIL_MM, TICKET_WIDTH_MM
-
-# QTextDocument dispone su contenido en píxeles lógicos a 96 dpi, no en
-# puntos: un <p> de 8pt mide ~37 unidades de documento, no ~10. Mientras la
-# medición y el tamaño de página que se le pasa después usen esta misma
-# constante, un píxel de documento termina midiendo 1/96" sobre el papel y
-# las tipografías salen en su tamaño real en puntos.
-_PX_PER_MM = 96.0 / 25.4
-
-# Alto de sobra para medir: la página "infinita" contra la cual se dispone el
-# documento en la primera pasada, para que no se pagine y size() devuelva el
-# alto real del contenido completo.
-_ALTO_DE_MEDICION_PX = 100_000.0
+from cas_client import config
+from cas_client.escpos import ticket_cobro_escpos
 
 
-def printable_width_mm() -> float:
-    """Ancho útil del ticket: el papel menos los dos márgenes."""
-    return TICKET_WIDTH_MM - 2 * TICKET_MARGIN_MM
+class PrinterNotFoundError(Exception):
+    """No hay impresora a la cual mandar el ticket.
+
+    Ni `TICKET_PRINTER_NAME` apunta a una impresora instalada, ni (si no se
+    configuró nada) Windows tiene una impresora predeterminada. Se levanta en
+    vez de imprimir a ciegas en lo que sea que Windows elija -- un ticket que
+    sale en la impresora equivocada, o que no sale porque no hay ninguna, es
+    peor que uno que avisa por qué no se imprimió."""
 
 
-def content_height_mm(html: str) -> float:
-    """Alto que ocupa `html` dispuesto en el ancho útil del rollo.
+class PrinterError(Exception):
+    """La API de impresión de Windows (OpenPrinter/StartDocPrinter/
+    WritePrinter) devolvió un error al mandar el trabajo. Envuelve el
+    `pywintypes.error` original -- ver su mensaje para el detalle."""
 
-    Primera de las dos pasadas: se dispone el documento contra una página de
-    alto prácticamente infinito para que no se pagine, y se lee cuánto midió.
+
+def _printer_name() -> str:
+    """Nombre de la impresora a la que se manda el ticket.
+
+    `TICKET_PRINTER_NAME` (cas_client/.env) manda; vacío cae a la
+    predeterminada de Windows. GetDefaultPrinter() levanta RuntimeError si no
+    hay ninguna -- se traduce a PrinterNotFoundError, el mismo tipo que el
+    caso de un nombre configurado que no existe.
     """
-    document = QTextDocument()
-    document.setHtml(html)
-    document.setPageSize(
-        QSizeF(printable_width_mm() * _PX_PER_MM, _ALTO_DE_MEDICION_PX)
-    )
-    return document.size().height() / _PX_PER_MM
+    nombre = config.TICKET_PRINTER_NAME
+    if nombre:
+        return nombre
+    try:
+        return win32print.GetDefaultPrinter()
+    except RuntimeError as exc:
+        raise PrinterNotFoundError(
+            "No hay ninguna impresora configurada (TICKET_PRINTER_NAME) ni "
+            "una impresora predeterminada en Windows."
+        ) from exc
 
 
-def apply_ticket_page(printer: QPrinter, html: str) -> None:
-    """Deja `printer` configurado con una página del ancho del rollo y del
-    alto exacto que necesita `html`.
-
-    **Hay que llamarlo después del QPrintDialog, no antes**: al aceptar el
-    diálogo Qt reemplaza el page layout por el de la impresora elegida, así
-    que una página configurada antes se pierde y el ticket vuelve a salir en
-    el formulario por defecto del driver.
-    """
-    alto = content_height_mm(html) + 2 * TICKET_MARGIN_MM + TICKET_TAIL_MM
-    printer.setPageLayout(
-        QPageLayout(
-            QPageSize(
-                QSizeF(TICKET_WIDTH_MM, alto),
-                QPageSize.Unit.Millimeter,
-                "Ticket80",
-                # ExactMatch y no el default: sin esto Qt busca el tamaño
-                # estándar más parecido y termina imprimiendo en A4.
-                QPageSize.SizeMatchPolicy.ExactMatch,
-            ),
-            QPageLayout.Orientation.Portrait,
-            QMarginsF(
-                TICKET_MARGIN_MM,
-                TICKET_MARGIN_MM,
-                TICKET_MARGIN_MM,
-                TICKET_MARGIN_MM,
-            ),
-            QPageLayout.Unit.Millimeter,
+def _enviar_raw(printer_name: str, datos: bytes) -> None:
+    """Abre `printer_name` y le manda `datos` como un trabajo RAW -- sin
+    reinterpretarlos, sea cual sea el driver instalado."""
+    try:
+        handle = win32print.OpenPrinter(printer_name)
+    except pywintypes.error as exc:
+        instaladas = ", ".join(
+            nombre
+            for _flags, _srv, nombre, _cmt in win32print.EnumPrinters(
+                win32print.PRINTER_ENUM_LOCAL
+            )
         )
-    )
+        raise PrinterNotFoundError(
+            f'No se encontró la impresora "{printer_name}" (TICKET_PRINTER_NAME '
+            f"en cas_client/.env). Impresoras instaladas: {instaladas or 'ninguna'}."
+        ) from exc
+    try:
+        job = win32print.StartDocPrinter(handle, 1, ("Ticket de cobro", None, "RAW"))
+        try:
+            win32print.StartPagePrinter(handle)
+            try:
+                win32print.WritePrinter(handle, datos)
+            finally:
+                win32print.EndPagePrinter(handle)
+        finally:
+            win32print.EndDocPrinter(handle)
+        del job
+    except pywintypes.error as exc:
+        raise PrinterError(
+            f'La impresora "{printer_name}" rechazó el ticket: {exc.strerror or exc}.'
+        ) from exc
+    finally:
+        win32print.ClosePrinter(handle)
 
 
-def render_ticket(printer: QPrinter, html: str) -> None:
-    """Segunda pasada: arma el documento contra el área imprimible real que
-    quedó en `printer` y lo manda a imprimir.
+def print_ticket(loan, client, payment) -> None:
+    """Arma el ticket (escpos.ticket_cobro_escpos) y lo manda directo a la
+    impresora térmica configurada, sin diálogo: la PC de caja tiene una sola
+    impresora física y elegirla en cada cobro no aporta nada.
 
-    Se usa el paintRect que reporta el printer (y no los milímetros nominales
-    del rollo) porque el driver puede recortar el área imprimible por su
-    cuenta; disponer el texto contra el ancho nominal en ese caso haría que la
-    última columna saliera cortada.
+    Punto de entrada único para las vistas -- solo necesitan atrapar
+    PrinterNotFoundError y PrinterError.
     """
-    apply_ticket_page(printer, html)
-    area = printer.pageLayout().paintRect(QPageLayout.Unit.Millimeter)
-    document = QTextDocument()
-    document.setHtml(html)
-    document.setPageSize(QSizeF(area.width() * _PX_PER_MM, area.height() * _PX_PER_MM))
-    document.print_(printer)
+    nombre = _printer_name()
+    datos = ticket_cobro_escpos(loan, client, payment)
+    _enviar_raw(nombre, datos)

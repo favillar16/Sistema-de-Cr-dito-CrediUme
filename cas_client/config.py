@@ -59,3 +59,10 @@ GRPC_KEEPALIVE_TIMEOUT_MS = int(os.environ.get("GRPC_KEEPALIVE_TIMEOUT_MS", "100
 # progreso girando y sin forma de cancelar. 20 s es holgado para consultas de
 # LAN contra Postgres y corto como para que el usuario reciba un error claro.
 GRPC_CALL_TIMEOUT_SECONDS = float(os.environ.get("GRPC_CALL_TIMEOUT_SECONDS", "20"))
+
+# Nombre exacto (tal cual Windows lo lista) de la impresora térmica de la
+# caja. Se imprime el ticket de cobro directo a esta impresora, sin diálogo
+# de selección -- la PC de caja tiene una sola térmica física, y pedir que se
+# elija en cada cobro es un paso que no aporta nada. Vacío (default) cae a la
+# impresora predeterminada de Windows; ver cas_client/printing.py.
+TICKET_PRINTER_NAME = os.environ.get("TICKET_PRINTER_NAME", "").strip()

@@ -182,26 +182,41 @@ secuencia es de arriba hacia abajo, igual que la atención real:
 
 ### Ticket de cobro en impresora térmica (80 mm)
 
-`documents.ticket_cobro_html()` arma el ticket y `cas_client/printing.py` la
-página. Sale de la **misma respuesta de `RecordPayment`** que el comprobante A4
-y comparte sus helpers (`cuotas_cubiertas_texto`, `filas_medio_de_pago`,
-`responsable`), así que el papelito y el A4 no pueden decir cosas distintas del
-mismo cobro. Lleva, además de lo que trae el A4, los **datos del cajero** y un
-**espacio de sello y firma**: es el respaldo físico que el cliente se lleva.
+`cas_client/escpos.py` arma el ticket como comandos **ESC/POS crudos** y
+`cas_client/printing.py` los manda directo al puerto de la impresora (job
+`RAW` vía `win32print`), sin pasar por el sistema de páginas de Windows ni
+por un diálogo de impresión. Reutiliza los datos y helpers de `documents.py`
+(`numero_ticket`, `cuotas_cubiertas_texto`, `filas_medio_de_pago`,
+`responsable`) sobre la **misma respuesta de `RecordPayment`** que el
+comprobante A4, así que el papelito y el A4 no pueden decir cosas distintas
+del mismo cobro. Lleva, además de lo que trae el A4, los **datos del cajero**
+y un **espacio de sello y firma**: es el respaldo físico que el cliente se
+lleva.
 
-Tres decisiones que no conviene "corregir" después:
+No siempre fue así: la primera versión armaba el ticket como HTML y lo
+imprimía con `QTextDocument`/`QPrinter` (Qt), igual que el resto de los
+documentos. Contra la impresora real de la caja ("Printer POS-80") nunca
+funcionó -- confirmado con `scripts/diagnostico_impresora_ticket.py` que su
+driver de Windows ("Generic / Text Only", y también los genéricos
+"Microsoft Virtual Print Class Driver"/"Universal Print Class Driver" que se
+probaron en su lugar) **ignora cualquier tamaño de página personalizado y
+fuerza A4**. Ninguno es un driver gráfico real, así que no hay forma de
+pedirles un tamaño de 80 mm que efectivamente respeten. De ahí el cambio a
+bytes crudos, que no dependen del driver para nada más que pasar los datos al
+puerto.
 
-*   **La altura de la página se mide, no se fija.** Un rollo térmico no tiene
-    páginas: el driver corta al final del trabajo. Declararle el formulario
-    típico de estas impresoras ("80 x 297 mm") gastaría casi 30 cm de papel en
-    blanco por ticket. `printing.content_height_mm()` dispone el HTML contra el
-    ancho útil y arma la página de ese alto más la cola del corte
-    (`TICKET_TAIL_MM`), que existe porque la cuchilla queda unos milímetros por
-    encima de la cabeza térmica.
-*   **La página se configura *después* del diálogo de impresión.** Al aceptar el
-    `QPrintDialog`, Qt reemplaza el page layout por el de la impresora elegida;
-    configurarlo antes se pierde y el ticket vuelve a salir en el formulario por
-    defecto del driver.
+Decisiones que no conviene "corregir" después:
+
+*   **`TICKET_PRINTER_NAME`** (`cas_client/.env`) fija el nombre exacto de la
+    impresora térmica tal cual Windows la lista; vacío cae a la predeterminada
+    de Windows. `printing.ticket_printer()` aborta con un mensaje claro en vez
+    de imprimir a ciegas si el nombre no resuelve a una impresora instalada.
+*   **Font A es monoespaciada a 48 columnas** (`escpos._COLUMNAS`, el valor
+    típico a 80 mm/203 dpi) — las columnas se alinean con `rjust()`, no con una
+    tabla HTML como en el resto de los documentos.
+*   **CP437 no tiene raya (—)**: `escpos._sanear()` la baja a un guion común
+    antes de codificar, para que la dirección de la entidad no salga como un
+    "?" de reemplazo en el papel.
 *   **El cierre no menciona variaciones de montos.** El Comprobante A4 termina
     con "el saldo restante puede variar por cargos o ajustes posteriores"; en el
     ticket la entidad pidió sacarlo. Es el papel que el cliente se lleva de
@@ -213,8 +228,11 @@ Tres decisiones que no conviene "corregir" después:
     copia de archivo.
 *   **Sin logo y sin color.** Una térmica es monocromática: un bitmap a color
     sale tramado y lento, y varios drivers de estas impresoras directamente no
-    lo imprimen. La entidad queda identificada por el bloque de texto del
-    encabezado. `tests/client/test_ticket_cobro.py` lo verifica.
+    lo imprimen -- y un trabajo `RAW` no lleva datos de imagen de ningún modo.
+    `tests/client/test_ticket_escpos.py` lo verifica.
+*   **`documents.ticket_cobro_html()` sigue existiendo** (la impresión ya no
+    pasa por ahí, pero `tests/client/test_ticket_cobro.py`/`test_reimpresion.py`
+    la siguen ejercitando directamente) -- no asumir que es código muerto.
 
 El número de ticket se deriva del préstamo más la marca de tiempo del cobro
 (`documents.numero_ticket`): el contrato no devuelve un id de pago, y dos pagos

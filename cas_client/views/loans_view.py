@@ -2262,28 +2262,22 @@ class LoansView(BaseView):
         self._worker.start()
 
     def _print_ticket(self, loan, client, payment) -> None:
-        """Ticket de 80 mm en la impresora térmica.
+        """Ticket de 80 mm en la impresora térmica, sin diálogo.
 
-        Mismo camino que cash_view: el diálogo se muestra siempre (la térmica
-        no es la impresora por defecto de la PC) y la página se arma *después*
-        de aceptarlo, porque al aceptar Qt reemplaza el page layout por el de
-        la impresora elegida -- ver printing.apply_ticket_page().
+        Mismo camino que cash_view: imprime directo a la térmica configurada
+        en TICKET_PRINTER_NAME -- ver printing.print_ticket().
 
         Vive también acá y no sólo en la caja porque los otros roles cobran
         desde esta pantalla: hasta ahora sólo podían emitir el A4, aunque el
         papel que el cliente se lleva sea el mismo.
         """
-        html = documents.ticket_cobro_html(loan, client, payment)
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        printing.apply_ticket_page(printer, html)
-        dialog = QPrintDialog(printer, self)
-        dialog.setWindowTitle("Imprimir ticket de cobro")
-        if dialog.exec() != QPrintDialog.DialogCode.Accepted:
-            return
         try:
-            printing.render_ticket(printer, html)
-        except OSError as exc:
-            self._toast.show_message(_friendly_file_error(exc))
+            printing.print_ticket(loan, client, payment)
+        except printing.PrinterNotFoundError as exc:
+            self._toast.show_message(str(exc))
+            return
+        except printing.PrinterError as exc:
+            self._toast.show_message(str(exc))
             return
         self._toast.show_message("Ticket enviado a la impresora.")
 
