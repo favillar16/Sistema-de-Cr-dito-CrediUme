@@ -325,22 +325,6 @@ def test_ficha_cliente_shows_the_requested_loan_terms():
     assert "31.825.000 Gs" in texto  # total a pagar
 
 
-def test_ficha_cliente_flags_a_ratio_over_br_loan_002s_cap():
-    """La cuota (1.768.056) sobre un ingreso más bajo supera el 40% de
-    BR-LOAN-002 -- la ficha tiene que marcarlo, no solo mostrar el número."""
-
-    class _ClienteIngresoBajo(_FakeClientCompleto):
-        declared_monthly_income = "3000000.00"
-
-    html = documents.ficha_cliente_html(_FakeLoanCompleto, _ClienteIngresoBajo)
-    assert "supera el 40% admitido por BR-LOAN-002" in html
-
-
-def test_ficha_cliente_does_not_flag_a_ratio_within_the_cap():
-    html = documents.ficha_cliente_html(_FakeLoanCompleto, _FakeClientCompleto)
-    assert "supera el 40%" not in html
-
-
 def test_no_placeholder_survives_in_the_signed_instruments():
     """Un documento que va a la firma no puede salir con "[A DEFINIR]"."""
     for html in (

@@ -394,13 +394,6 @@ def ficha_cliente_docx(loan, client) -> Document:
         ],
     )
 
-    ratio_texto, ratio_excede = documents._relacion_cuota_ingreso(loan, client)
-    ratio_paragraph = document.add_paragraph()
-    ratio_run = ratio_paragraph.add_run(f"Relación cuota/ingreso: {ratio_texto}")
-    ratio_run.bold = True
-    if ratio_excede:
-        ratio_run.font.color.rgb = _rgb(theme.ERROR)
-
     _add_decision_block(document)
 
     _add_footer_note(

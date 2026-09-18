@@ -45,11 +45,11 @@ def test_trae_los_datos_que_se_estudian_para_decidir():
     # Identidad y contacto.
     assert "Fabrizio Villar" in texto
     assert "5746680" in texto
-    # Capacidad de pago: el ingreso declarado, la cuota y la relación entre
-    # ambas, que es el número por el que pasa BR-LOAN-002.
+    # Capacidad de pago: el ingreso declarado y la cuota, para que quien
+    # decide una aprobación los compare a ojo con BR-LOAN-002 (el porcentaje
+    # ya no se calcula en esta ficha -- pedido explícito de la entidad).
     assert "5.000.000 Gs" in texto
     assert "1.768.056 Gs" in texto
-    assert "35.4% del ingreso declarado" in texto
     # Origen de fondos (BR-CLI-006) y las tres referencias (BR-CLI-005).
     assert "Salario" in texto
     assert "Juan Pérez" in texto
@@ -79,19 +79,6 @@ def test_el_bloque_interno_queda_en_blanco_para_completar_a_mano():
     assert "Responsable que autoriza" in texto
     assert "Firma y aclaración" in texto
     assert "Observaciones" in texto
-
-
-def test_la_relacion_cuota_ingreso_se_marca_cuando_supera_el_tope():
-    """El dato que decide la aprobación no puede salir del mismo color que el
-    resto: si supera el 40% de BR-LOAN-002 tiene que saltar a la vista."""
-
-    class _IngresoBajo(_FakeClientCompleto):
-        declared_monthly_income = "1000000.00"
-
-    html = documents.ficha_cliente_html(_FakeLoanCompleto, _IngresoBajo)
-
-    assert "supera el 40%" in _texto_plano(html)
-    assert "#C0392B" in html  # theme.ERROR
 
 
 def test_no_se_entrega_al_cliente_y_lo_dice():

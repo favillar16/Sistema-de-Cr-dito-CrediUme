@@ -961,31 +961,6 @@ def ticket_cobro_html(loan, client, payment) -> str:
     """
 
 
-def _relacion_cuota_ingreso(loan, client) -> tuple[str, bool]:
-    """(texto, excede_tope) -- la cuota mensual como % del ingreso mensual
-    declarado del cliente, para que quien decide una aprobación vea de un
-    vistazo qué tan cerca (o cuánto por encima) está esta solicitud del tope
-    del 40% de BR-LOAN-002, sin tener que calcularlo a mano con una
-    calculadora aparte. Puramente informativo -- la validación real de
-    BR-LOAN-002 ya la hace CreateLoan/UpdateLoanProposal en el servidor;
-    esto no vuelve a aplicarla, solo la muestra."""
-    if not client.declared_monthly_income:
-        return "Sin ingreso declarado registrado", False
-    try:
-        ingreso = Decimal(client.declared_monthly_income)
-        cuota = Decimal(loan.installment_amount or loan.principal_amount)
-    except InvalidOperation:
-        return "No se pudo calcular", False
-    if ingreso <= 0:
-        return "Ingreso declarado en cero", False
-    ratio = (cuota / ingreso) * 100
-    excede = ratio > 40
-    texto = f"{ratio:.1f}% del ingreso declarado"
-    if excede:
-        texto += " — supera el 40% admitido por BR-LOAN-002"
-    return texto, excede
-
-
 # Banda de las secciones de la ficha: un tinte claro del navy de la marca.
 # El formulario de referencia usa celeste; ac&aacute; se usa la propia paleta
 # -- del modelo se toma la estructura, no los colores ajenos.
@@ -1137,8 +1112,6 @@ def ficha_cliente_html(loan, client) -> str:
     client: client_service_pb2.GetClientByIdResponse"""
     estado_cliente = "Activo" if client.is_active else "Inactivo"
     estado_prestamo = _ESTADOS_LABEL.get(loan.status, loan.status)
-    ratio_texto, ratio_excede = _relacion_cuota_ingreso(loan, client)
-    ratio_color = theme.ERROR if ratio_excede else theme.TEXT_PRIMARY
     garantia_etiqueta, garantia_valor = _garantia_label_valor(loan)
     cargos = gs(loan.total_charges) if tiene_cargos_financiados(loan) else "Sin cargos"
 
@@ -1227,16 +1200,8 @@ def ficha_cliente_html(loan, client) -> str:
             )
             + _celda("Cuota mensual", gs(loan.installment_amount), "33%")
             + _celda("Total a pagar", gs(loan.total_to_pay)),
-            _celda("A desembolsar", gs(loan.amount_to_disburse), "33%")
-            + _celda(garantia_etiqueta, garantia_valor, "33%")
-            + f"""
-            <td valign="top" style="padding:3px 6px;">
-              <span style="font-size:7pt; color:{theme.TEXT_MUTED};">Relaci&oacute;n
-                cuota / ingreso</span><br/>
-              <span style="font-size:9pt; font-weight:700; color:{ratio_color};">
-                {ratio_texto}</span>
-            </td>
-            """,
+            _celda("A desembolsar", gs(loan.amount_to_disburse), "50%")
+            + _celda(garantia_etiqueta, garantia_valor, "50%"),
         ]
     )
 
