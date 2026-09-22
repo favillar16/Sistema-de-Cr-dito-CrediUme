@@ -84,6 +84,15 @@ Dos decisiones estructurales atraviesan el módulo:
     El Comprobante de Pago (BR-LOAN-011) imprime el medio de cobro, y omite la
     fila de referencia cuando fue en efectivo en vez de imprimirla vacía.
 
+    **El movimiento imputa cuota + mora (BR-LOAN-017, desde 2026-09-22).**
+    `LoanPayment.amount` es sólo la parte que va contra el cronograma; el
+    recargo por atraso viaja aparte en `late_fee_amount`. Por la ventanilla
+    entró la suma de los dos, así que `registrar_cobro_en_efectivo()` imputa
+    `amount + late_fee_amount`: si imputara sólo `amount` — como hacía hasta
+    esa fecha, cuando la mora no existía como plata — el arqueo cerraría corto
+    exactamente por la mora cobrada, y el faltante aparecería como un error del
+    cajero.
+
 *   **BR-CAJA-005 (Alcance del rol Cajero):** el cajero es un puesto de
     **ventanilla, no de originación**. Cuando el rol volvió a usarse, las RPC de
     alta y edición subieron a `CREDIT_ANALYST_AND_ABOVE`:

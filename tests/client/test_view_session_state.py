@@ -96,6 +96,11 @@ def _cobrar(vista, loan):
             amount_paid="100000.00",
             covered_installments=[1],
             total_installments=12,
+            # BR-LOAN-017: RecordPaymentResponse trae el desglose del cobro
+            # desde 2026-09-22. Un cobro al día no lleva mora, que es el caso
+            # que estas pruebas de estado de sesión ejercitan.
+            late_fee_amount="0.00",
+            total_charged="100000.00",
         )
     )
 

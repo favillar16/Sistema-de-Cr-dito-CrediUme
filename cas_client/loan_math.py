@@ -43,12 +43,41 @@ def cuota_estimada(
     )
 
 
-def tope_cargos(capital: Decimal, ratio_maximo: Decimal, plazo_meses: int) -> Decimal:
-    """BR-LOAN-006: techo de la suma de cargos, prorrateado por el plazo con la
-    misma mecánica que BR-LOAN-013 usa para el interés."""
-    return (capital * ratio_maximo / Decimal(12) * plazo_meses).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
+def tasa_vigente(
+    plazo_meses: int,
+    tasa_base: Decimal = Decimal("0.20"),
+    plazo_minimo: int = 12,
+) -> Decimal:
+    """BR-LOAN-007: la tasa anual que corresponde a un plazo.
+
+    Espejo manual de `loan_service._tasa_vigente` -- no hay fuente compartida
+    entre los dos procesos, y `tests/client/test_loan_math.py` es lo que evita
+    que se separen. Los valores por defecto acompañan a `rbac_ui`.
+
+    `tasa_base * 12 / min(plazo, 12)`: un préstamo más corto que un año rinde
+    el mismo interés total que uno de un año (20% del financiado), así que su
+    tasa **anual** sube. De 13 meses en adelante es la tasa base de siempre.
+
+    Ojo con la asimetría respecto de `tope_cargos`, que para la misma regla
+    usa `max(plazo, 12)`: ahí el plazo multiplica y acá divide. Ver el
+    comentario largo en `loan_service.py`.
+    """
+    return (tasa_base * Decimal(12) / Decimal(min(plazo_meses, plazo_minimo))).quantize(
+        Decimal("0.0001"), rounding=ROUND_HALF_UP
     )
+
+
+def tope_cargos(
+    capital: Decimal,
+    ratio_maximo: Decimal,
+    plazo_meses: int,
+    plazo_minimo: int = 12,
+) -> Decimal:
+    """BR-LOAN-006: techo de la suma de cargos, prorrateado por el plazo con el
+    piso de un año (`max(plazo, 12)`), igual que `loan_service._tope_cargos`."""
+    return (
+        capital * ratio_maximo / Decimal(12) * max(plazo_meses, plazo_minimo)
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def cargo_para_cuota_objetivo(

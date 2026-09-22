@@ -27,14 +27,20 @@ def _ficha() -> str:
 
 
 def test_las_secciones_van_numeradas_como_en_el_formulario():
+    """Cuatro bandas desde 2026-09-22, no cinco: los datos personales y la
+    situación financiera declarada se fusionaron en una sola sección.
+
+    Las dos describen al solicitante, y cada banda costaba una fila entera de
+    alto en una ficha que no entraba en la hoja (ver test_ficha_una_hoja.py).
+    Ningún dato se perdió -- se sacó una línea de título, no campos.
+    """
     texto = _ficha()
 
     for numero, titulo in (
-        (1, "DATOS GENERALES DEL CLIENTE"),
-        (2, "SITUACIÓN FINANCIERA DECLARADA"),
-        (3, "REFERENCIAS"),
-        (4, "CRÉDITO SOLICITADO"),
-        (5, "ESPACIO PARA USO EXCLUSIVO DE CREDIMED UME"),
+        (1, "DATOS DEL CLIENTE Y SITUACIÓN FINANCIERA DECLARADA"),
+        (2, "REFERENCIAS"),
+        (3, "CRÉDITO SOLICITADO"),
+        (4, "ESPACIO PARA USO EXCLUSIVO DE CREDIMED UME"),
     ):
         assert f"{numero}. {titulo}" in texto
 

@@ -19,7 +19,11 @@ from cas_server.db.models import (
     User,
 )
 from cas_server.security.current_user import get_current_claims
-from cas_server.services.amortization import calcular_cronograma
+from cas_server.services.amortization import (
+    MoraCuota,
+    calcular_cronograma,
+    calcular_mora_cuota,
+)
 
 # BR-CAJA-004. La dependencia va en un solo sentido (loan_service ->
 # cash_service): cash_service.py no importa nada de acá, así que no hay ciclo.
@@ -183,6 +187,55 @@ def _estado_pago_prestamo(prestamo: Loan, hoy: date) -> tuple[str, Decimal, int]
     return estado, monto_vencido, cuotas_vencidas_impagas
 
 
+def _mora_prestamo(prestamo: Loan, hoy: date) -> dict[int, MoraCuota]:
+    """BR-LOAN-017: mora devengada por cada cuota vencida e impaga, a `hoy`.
+
+    Se calcula al leer/escribir, igual que el vencimiento perezoso de
+    BR-LOAN-003 (`_tal_vez_vencer_prestamo`): en este código no hay ni va a
+    haber un scheduler. Y como se deriva de las fechas del cronograma en vez
+    de guardarse, un préstamo que vuelve de DEFAULTED por BR-LOAN-014 recupera
+    su mora solo, sin tener que reconstruir nada.
+
+    Sólo para préstamos ACTIVE, el mismo alcance que `_estado_pago_prestamo`:
+    un préstamo que todavía no se desembolsó no tiene cuotas corriendo, y uno
+    ya resuelto no tiene dónde cobrarla.
+
+    Devuelve {número de cuota: MoraCuota} y omite las cuotas sin mora, para
+    que quien llama pueda preguntar por una cuota puntual sin recorrer todo.
+    """
+    if prestamo.status != LoanStatusEnum.ACTIVE:
+        return {}
+
+    moras: dict[int, MoraCuota] = {}
+    for fila, pendiente, pagada in _cronograma_con_pendientes(prestamo):
+        if fila.fecha_vencimiento is None or fila.fecha_vencimiento > hoy:
+            break
+        if pagada:
+            continue
+        mora = calcular_mora_cuota(
+            fila.numero,
+            pendiente,
+            fila.fecha_vencimiento,
+            hoy,
+            tasa_mensual=config.LOAN_LATE_FEE_MONTHLY_RATE,
+            dias_gracia=config.LOAN_LATE_FEE_GRACE_DAYS,
+            dias_por_mes=config.LOAN_LATE_FEE_DAYS_PER_MONTH,
+            desde=config.LOAN_LATE_FEE_START_DATE,
+        )
+        if mora.monto > CERO:
+            moras[fila.numero] = mora
+    return moras
+
+
+def _total_mora(prestamo: Loan, hoy: date) -> Decimal:
+    """Mora devengada de todo el préstamo (BR-LOAN-017).
+
+    Distinta del `monto_vencido` de BR-LOAN-009, que es la cuota en sí: una es
+    el recargo por el atraso, la otra la deuda que se atrasó.
+    """
+    return sum((mora.monto for mora in _mora_prestamo(prestamo, hoy).values()), CERO)
+
+
 def _total_cargos(prestamo: Loan) -> Decimal:
     """BR-LOAN-006: suma de los 4 cargos/seguros del préstamo.
 
@@ -221,20 +274,79 @@ def _monto_financiado(prestamo: Loan) -> Decimal:
     return prestamo.principal_amount + _total_cargos(prestamo)
 
 
+# Revisado 2026-09-22. Una sola regla comercial -- "un préstamo más corto que
+# un año se cobra como si durara un año" -- pero cada tope la expresa con la
+# aritmética inversa del otro, y **confundirlas es un error silencioso que ya
+# se cometió al implementar esto**:
+#
+#   * el techo de cargos se prorratea multiplicando por el plazo, así que para
+#     no rendir menos que 12 meses usa `max(plazo, 12)`;
+#   * la tasa se aplica mensualmente (`tasa/12` por cuota, BR-LOAN-013), así
+#     que para que el interés total no baje hay que DIVIDIR por el plazo:
+#     `min(plazo, 12)`.
+#
+# Usar `max` en los dos lados compila, pasa desapercibido y abarata los
+# préstamos largos: 18 meses pasaría de 30% de interés a 20%. De ahí que sean
+# dos funciones con nombres distintos y no una compartida.
+
+
+def _plazo_para_cargos(plazo_meses: int) -> int:
+    """Plazo con el que se prorratea el techo de cargos: `max(plazo, 12)`."""
+    return max(plazo_meses, config.LOAN_RATE_MIN_TERM_MONTHS)
+
+
+def _plazo_para_tasa(plazo_meses: int) -> int:
+    """Plazo con el que se deriva la tasa: `min(plazo, 12)`."""
+    return min(plazo_meses, config.LOAN_RATE_MIN_TERM_MONTHS)
+
+
+def _tasa_vigente(plazo_meses: int) -> Decimal:
+    """BR-LOAN-007 (revisado 2026-09-22): la tasa anual que corresponde a un
+    plazo, derivada de `LOAN_FIXED_INTEREST_RATE`.
+
+    `tasa_anual = LOAN_FIXED_INTEREST_RATE * 12 / min(plazo, 12)`, que es la
+    tasa cuyo interés total (BR-LOAN-013: `financiado * tasa/12 * plazo`) da
+    exactamente el 20% del financiado en cualquier plazo de hasta 12 meses. De
+    13 meses en adelante devuelve la tasa fija de siempre, así que la cartera
+    larga sigue rindiendo lo mismo que antes (30% a 18 meses, 40% a 24).
+
+    Consecuencia visible: un préstamo a 6 meses se guarda a 0,40 anual, y el
+    Pagaré declara el 3,33% mensual que de ahí se deriva. Es una decisión
+    comercial de la entidad, no un descuido -- ver el comentario de
+    `LOAN_RATE_MIN_TERM_MONTHS` en config.py.
+
+    **Se cuantiza a 4 decimales a propósito**: es la precisión de
+    `Loan.interest_rate` (Numeric(6,4)). Sin cuantizar acá, en los plazos que
+    no dividen a 12 (7, 11) la tasa validada y la guardada difieren, y el
+    cronograma que se recalcula al leer no coincide con el que se validó al
+    crear. El precio de eso es que en esos plazos el interés total queda a
+    centésimas del 20% exacto, no en el 20% redondo.
+    """
+    return (
+        config.LOAN_FIXED_INTEREST_RATE
+        * Decimal(12)
+        / Decimal(_plazo_para_tasa(plazo_meses))
+    ).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
 def _tope_cargos(capital: Decimal, plazo_meses: int) -> Decimal:
-    """BR-LOAN-006 (revisado 2026-08-28): tope conjunto de los 4 cargos
-    financiados, con la misma mecánica de prorrateo por plazo que el interés
-    (BR-LOAN-013): `capital * LOAN_MAX_CHARGES_RATIO / 12 * plazo_meses`.
+    """BR-LOAN-006 (revisado 2026-09-22): tope conjunto de los 4 cargos
+    financiados, prorrateado por el plazo con el piso de un año:
+    `capital * LOAN_MAX_CHARGES_RATIO / 12 * max(plazo, 12)`.
+
+    Con el piso, un préstamo de 6 meses admite el 40% pleno del capital en
+    cargos, no el 20% que salía del prorrateo puro.
 
     Se mide sobre `principal_amount` (el capital solicitado), no sobre el
     monto financiado -- éste ya incluiría los cargos que el tope está
-    limitando. Es el complemento de `LOAN_FIXED_INTEREST_RATE` (20% anual, el
-    máximo legal de interés) para llegar al 60% anual que la entidad fija
-    como costo total del crédito (subió de 45% cuando el tope de cargos pasó
-    de 25% a 40%, 2026-09-08).
+    limitando. Es el complemento de la tasa de interés para llegar al 60%
+    anual que la entidad fija como costo total del crédito.
     """
     return (
-        capital * config.LOAN_MAX_CHARGES_RATIO / Decimal(12) * plazo_meses
+        capital
+        * config.LOAN_MAX_CHARGES_RATIO
+        / Decimal(12)
+        * _plazo_para_cargos(plazo_meses)
     ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
@@ -304,22 +416,26 @@ def _garantia_de_solicitud(request, context) -> tuple[str | None, Decimal | None
     return (tipo or None), monto
 
 
-def _tasa_estandar_o_abortar(texto_tasa: str, context) -> Decimal:
+def _tasa_estandar_o_abortar(texto_tasa: str, plazo_meses: int, context) -> Decimal:
     """BR-LOAN-007: la tasa es fija para todos los roles, sin excepción.
+
+    "Fija" no quiere decir "única": desde 2026-09-22 la tasa la determina el
+    plazo (`_tasa_vigente`), no el operador. Lo que sigue sin poder elegirse
+    es *qué* tasa se aplica a un préstamo dado.
 
     Se acepta el campo vacío -- la forma normal de pedir "la tasa vigente" y
     lo que manda el cliente desde que se le sacó el campo del formulario -- o
-    exactamente `config.LOAN_FIXED_INTEREST_RATE`, para que un llamador viejo
-    que la manda explícitamente siga funcionando. Cualquier otro valor se
-    rechaza en vez de descartarse en silencio: si alguien pidió 30%, dejarlo
-    creado a la tasa fija sin avisar es peor que fallar.
+    exactamente la tasa que corresponde a ese plazo, para que un llamador
+    viejo que la manda explícitamente siga funcionando. Cualquier otro valor
+    se rechaza en vez de descartarse en silencio: si alguien pidió 30%,
+    dejarlo creado a la tasa fija sin avisar es peor que fallar.
 
     Hasta 2026-08-28 un MANAGER/ADMIN podía fijar una tasa distinta acá. Ya no:
     la tasa pasó a ser una decisión comercial de la entidad y se cambia en
-    `config.LOAN_FIXED_INTEREST_RATE` (mirroreada a mano en
-    `cas_client/rbac_ui.py`), no préstamo por préstamo.
+    `config.LOAN_FIXED_INTEREST_RATE`/`LOAN_RATE_MIN_TERM_MONTHS` (mirroreadas
+    a mano en `cas_client/`), no préstamo por préstamo.
     """
-    estandar = config.LOAN_FIXED_INTEREST_RATE
+    estandar = _tasa_vigente(plazo_meses)
     texto = texto_tasa.strip()
     if not texto:
         return estandar
@@ -327,8 +443,9 @@ def _tasa_estandar_o_abortar(texto_tasa: str, context) -> Decimal:
     if tasa != estandar:
         context.abort(
             grpc.StatusCode.FAILED_PRECONDITION,
-            f"La tasa de interés es fija ({estandar}) y no puede cambiarse "
-            "desde la aplicación (BR-LOAN-007)",
+            f"La tasa de interés de un préstamo a {plazo_meses} meses es fija "
+            f"({estandar}) y no puede cambiarse desde la aplicación "
+            "(BR-LOAN-007)",
         )
     return tasa
 
@@ -470,6 +587,42 @@ def _cuotas_cubiertas_por_pago(
     return cubiertas
 
 
+def _cuotas_saldadas_por_pago(
+    prestamo: Loan, pagado_antes: Decimal, monto: Decimal
+) -> list[int]:
+    """Cuotas que este pago deja **enteramente** cubiertas.
+
+    Subconjunto de `_cuotas_cubiertas_por_pago`, que también devuelve la cuota
+    abonada a medias. La distinción importa sólo para la mora (BR-LOAN-017):
+    se cobra el recargo de las cuotas que quedan saldadas, no el de una que
+    sigue impaga. Si se cobrara el de una cuota parcialmente cubierta, esa
+    cuota seguiría devengando sobre los mismos días ya cobrados y el deudor
+    pagaría dos veces el mismo atraso.
+
+    El costo de esa decisión es que un pago libre que no alcanza a saldar la
+    cuota no paga mora todavía: se cobra entera cuando la cuota se completa,
+    calculada sobre el saldo que quedaba. Conservador a favor del deudor, y
+    exacto en el camino normal (BR-LOAN-010), donde la cuota elegida siempre
+    se cubre entera.
+    """
+    cronograma = calcular_cronograma(
+        _monto_financiado(prestamo),
+        prestamo.interest_rate,
+        prestamo.term_months,
+        fecha_primer_vencimiento=prestamo.first_due_date,
+        ajustes=_ajustes_prestamo(prestamo),
+    )
+    hasta = pagado_antes + monto
+    saldadas: list[int] = []
+    inicio_cuota = CERO
+    for fila in cronograma:
+        fin_cuota = inicio_cuota + fila.monto_cuota
+        if fin_cuota > pagado_antes and fin_cuota <= hasta:
+            saldadas.append(fila.numero)
+        inicio_cuota = fin_cuota
+    return saldadas
+
+
 def _prestamo_a_respuesta(
     prestamo: Loan, sesion
 ) -> loan_service_pb2.GetLoanByIdResponse:
@@ -484,9 +637,9 @@ def _prestamo_a_respuesta(
         ajustes=_ajustes_prestamo(prestamo),
     )
     total_interes = sum((fila.interes for fila in cronograma), CERO)
-    estado_pago, monto_vencido, cuotas_vencidas = _estado_pago_prestamo(
-        prestamo, datetime.now(timezone.utc).date()
-    )
+    hoy = datetime.now(timezone.utc).date()
+    estado_pago, monto_vencido, cuotas_vencidas = _estado_pago_prestamo(prestamo, hoy)
+    mora_devengada = _total_mora(prestamo, hoy)
     argumentos = dict(
         id=str(prestamo.id),
         client_id=str(prestamo.client_id),
@@ -532,6 +685,10 @@ def _prestamo_a_respuesta(
         payment_status=estado_pago,
         overdue_amount=str(monto_vencido),
         overdue_installments_count=cuotas_vencidas,
+        # BR-LOAN-017. Va al lado de overdue_amount y no sumado a él a
+        # propósito: uno es la cuota que se atrasó, el otro el recargo por
+        # haberse atrasado, y la pantalla los muestra separados por lo mismo.
+        accrued_late_fee=str(mora_devengada),
         created_by_username=_nombre_usuario_creador(sesion, prestamo),
     )
     nombre_asesor, ci_asesor = _datos_personales_creador(sesion, prestamo)
@@ -566,7 +723,9 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
         capital = analizar_decimal(
             request.principal_amount, "principal_amount", context, permitir_cero=False
         )
-        tasa_interes = _tasa_estandar_o_abortar(request.interest_rate, context)
+        tasa_interes = _tasa_estandar_o_abortar(
+            request.interest_rate, request.term_months, context
+        )
         tipo_garantia, monto_garantia = _garantia_de_solicitud(request, context)
         cargos = _cargos_de_solicitud(request, context)
         total_cargos = sum((c for c in cargos.values() if c is not None), CERO)
@@ -705,12 +864,22 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     "El cliente del préstamo no existe",
                 )
 
+            # BR-LOAN-007: la tasa depende del plazo desde 2026-09-22, así que
+            # editar el plazo obliga a re-tasar. Es la **única** excepción a
+            # "UpdateLoanProposal no toca interest_rate": sin ella, bajar una
+            # propuesta de 12 a 6 meses la dejaría cobrando la mitad de
+            # interés en silencio, que es justo lo que el piso de plazo vino a
+            # evitar. Sigue sin poder elegirse la tasa: se recalcula, no se
+            # recibe.
+            tasa_anterior = prestamo.interest_rate
+            tasa_interes = _tasa_vigente(request.term_months)
+
             # El tope se mide sobre capital + cargos: los cargos se capitalizan
             # (BR-LOAN-006), así que suben la cuota igual que el capital.
             _validar_tope_cuota(
                 cliente,
                 capital + total_cargos,
-                prestamo.interest_rate,
+                tasa_interes,
                 request.term_months,
                 context,
             )
@@ -720,6 +889,7 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
             cargos_anterior = _total_cargos(prestamo)
             prestamo.principal_amount = capital
             prestamo.term_months = request.term_months
+            prestamo.interest_rate = tasa_interes
             prestamo.first_due_date = fecha_primer_vencimiento
             prestamo.guarantee_type = tipo_garantia
             prestamo.guarantee_amount = monto_garantia
@@ -734,6 +904,7 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                         f"monto_anterior={monto_anterior} monto_nuevo={capital} "
                         f"cuotas_anterior={cuotas_anterior} "
                         f"cuotas_nuevo={request.term_months} "
+                        f"tasa_anterior={tasa_anterior} tasa_nueva={tasa_interes} "
                         f"cargos_anterior={cargos_anterior} "
                         f"cargos_nuevo={total_cargos} "
                         f"garantia={tipo_garantia or '-'}/{monto_garantia}"
@@ -1131,6 +1302,24 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
             total_programado, total_pagado = _totales_prestamo(prestamo)
             nuevo_total_pagado = total_pagado + monto
 
+            # BR-LOAN-017: la mora del atraso se cobra junto con la cuota, y
+            # el operador no puede cobrar de menos -- el servidor fija el
+            # total, igual que fija el monto de la cuota en BR-LOAN-010. Se
+            # calcula con el acumulado ANTERIOR a este pago (como la
+            # imputación del comprobante) y sólo sobre las cuotas que este
+            # pago deja saldadas.
+            moras = _mora_prestamo(prestamo, ahora.date())
+            mora_cobrada = sum(
+                (
+                    moras[numero].monto
+                    for numero in _cuotas_saldadas_por_pago(
+                        prestamo, total_pagado, monto
+                    )
+                    if numero in moras
+                ),
+                CERO,
+            )
+
             # BR-CAJA-004: la caja se busca (y se bloquea) DESPUÉS del
             # préstamo, manteniendo el mismo orden de bloqueo en todos los
             # caminos que tocan ambas filas, y ANTES de insertar el pago, para
@@ -1152,6 +1341,10 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
             pago = LoanPayment(
                 loan_id=prestamo.id,
                 amount=monto,
+                # BR-LOAN-017: aparte de `amount` a propósito -- `amount` es
+                # lo que se imputa al cronograma, y sumarle el recargo haría
+                # que el préstamo se diera por pagado antes de tiempo.
+                late_fee_amount=mora_cobrada,
                 transfer_reference=referencia_transferencia or None,
                 payment_method=medio_pago,
                 paid_at=ahora,
@@ -1184,7 +1377,8 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     user_id=id_actor_actual(get_current_claims()),
                     action=(
                         f"PRESTAMO_PAGO_REGISTRADO loan_id={prestamo.id} "
-                        f"amount={monto} medio={medio_pago.value} "
+                        f"amount={monto} mora={mora_cobrada} "
+                        f"medio={medio_pago.value} "
                         f"referencia={referencia_transferencia}"
                         + (f" cuota={numero_cuota}" if usa_cuota_fija else "")
                         + (f" caja={sesion_caja.id}" if sesion_caja is not None else "")
@@ -1228,6 +1422,8 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 recorded_by_national_id=ci_operador,
                 payment_method=medio_pago.value,
                 payment_id=str(pago.id),
+                late_fee_amount=str(mora_cobrada),
+                total_charged=str(monto + mora_cobrada),
             )
 
     def ListLoanPayments(self, request, context):
@@ -1285,6 +1481,18 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                         ),
                         recorded_by_name=nombre_operador,
                         recorded_by_national_id=ci_operador,
+                        # BR-LOAN-017: la única cifra del historial que se lee
+                        # de la fila en vez de reconstruirse. Recalcularla hoy
+                        # daría cero -- esa cuota ya está cubierta y no
+                        # devenga más -- y el comprobante reimpreso diría que
+                        # no se cobró mora cuando sí se cobró. "" en los
+                        # cobros anteriores a la regla.
+                        late_fee_amount=(
+                            ""
+                            if pago.late_fee_amount is None
+                            else str(pago.late_fee_amount)
+                        ),
+                        total_charged=str(pago.amount + (pago.late_fee_amount or CERO)),
                     )
                 )
             entradas.reverse()
@@ -1402,6 +1610,9 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
             filas_con_pendientes = _cronograma_con_pendientes(prestamo)
             total_programado, total_pagado = _totales_prestamo(prestamo)
             saldo_restante = max(total_programado - total_pagado, CERO)
+            # BR-LOAN-017: el cronograma en pantalla es donde el operador ve
+            # por qué una cuota se cobra más cara que las otras.
+            moras = _mora_prestamo(prestamo, datetime.now(timezone.utc).date())
 
             cuotas = [
                 loan_service_pb2.AmortizationInstallment(
@@ -1415,6 +1626,12 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                     is_adjusted=fila.ajustada,
                     amount_due=str(pendiente),
                     is_paid=pagada,
+                    late_fee=str(
+                        moras[fila.numero].monto if fila.numero in moras else CERO
+                    ),
+                    late_fee_days=(
+                        moras[fila.numero].dias_punibles if fila.numero in moras else 0
+                    ),
                 )
                 for fila, pendiente, pagada in filas_con_pendientes
             ]

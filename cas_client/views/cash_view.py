@@ -13,6 +13,8 @@ La vista nunca calcula el monto esperado por su cuenta: siempre muestra el
 recalculado acá -- el que se usa para el arqueo del cierre.
 """
 
+from decimal import Decimal
+
 import grpc
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QTextDocument
@@ -46,6 +48,7 @@ from cas_client.grpc_client import (
     DashboardServiceClient,
     LoanServiceClient,
 )
+from cas_client.page_layout import aplicar_hoja
 from cas_client.rbac_ui import can_supervise_cash_sessions
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
@@ -89,7 +92,16 @@ _CLIENT_HEADERS = ("Cliente", "Documento", "Teléfono", "Estado")
 # Cobros ya registrados del préstamo elegido (BR-LOAN-016). Más corta que la
 # de loans_view: en ventanilla importa cuándo, cuánto y qué cuota; el medio no
 # (acá casi todo es efectivo) y el operador se lee en el ticket.
-_PAYMENT_HEADERS = ("Fecha y hora", "Monto (Gs)", "Cuota(s)", "Registrado por")
+# BR-LOAN-017: "Mora (Gs)" va como columna propia y no sumada al monto -- el
+# historial es lo que se consulta cuando el cliente discute cuánto pagó, y ahí
+# la diferencia entre cuota y recargo es justamente lo que se discute.
+_PAYMENT_HEADERS = (
+    "Fecha y hora",
+    "Monto (Gs)",
+    "Mora (Gs)",
+    "Cuota(s)",
+    "Registrado por",
+)
 
 # Efectivo va primero acá, al revés que en loans_view.py: esta pantalla ES la
 # caja, así que el cobro en ventanilla es el caso normal y la transferencia la
@@ -167,6 +179,20 @@ def _difference_color(value: str) -> str:
     if not value or value.lstrip("-").replace(".", "").strip("0") == "":
         return theme.SUCCESS  # cuadró exacto
     return theme.ERROR
+
+
+def _hay_mora(valor: str) -> bool:
+    """BR-LOAN-017: si el string decimal que manda el servidor trae mora.
+
+    Los montos viajan como string ("0.00", o "" en los cobros anteriores a la
+    regla), así que compararlos contra "0.00" a mano falla con "0" o "".
+    """
+    if not valor:
+        return False
+    try:
+        return Decimal(valor) > 0
+    except (ArithmeticError, ValueError):
+        return False
 
 
 class CashView(BaseView):
@@ -419,7 +445,9 @@ class CashView(BaseView):
             "Monto a cobrar (Gs)", input_cls=CurrencyInput
         )
         # El monto sale del cronograma y el servidor lo recalcula igual
-        # (BR-LOAN-010): se muestra para confirmar, no para editar.
+        # (BR-LOAN-010): se muestra para confirmar, no para editar. Incluye la
+        # mora devengada (BR-LOAN-017), porque es lo que el cajero tiene que
+        # recibir en la mano; el desglose va en _collection_breakdown.
         self._collection_amount.setReadOnly(True)
         selectors.add_widget(amount_field)
         reference_field, self._collection_reference = labeled_field(
@@ -433,6 +461,17 @@ class CashView(BaseView):
         # que lo toca. Poblarlo junto al combo reventaría con AttributeError.
         for label, value in _PAYMENT_METHODS:
             self._method_combo.addItem(label, value)
+
+        # BR-LOAN-017: el desglose de por qué se cobra más que la cuota. Va
+        # separado del monto y no dentro del campo porque el cajero tiene que
+        # poder leérselo al cliente que pregunta por la diferencia.
+        self._collection_breakdown = QLabel("")
+        self._collection_breakdown.setWordWrap(True)
+        self._collection_breakdown.setStyleSheet(
+            f"color: {theme.ERROR}; font-size: 12px; font-weight: 600;"
+        )
+        self._collection_breakdown.hide()
+        detail_layout.addWidget(self._collection_breakdown)
 
         self._loan_summary = QLabel("")
         self._loan_summary.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
@@ -771,6 +810,15 @@ class CashView(BaseView):
         super().showEvent(event)
         if self._session.access_token:
             self.refresh()
+            # Además del panel de caja, el préstamo que haya quedado
+            # seleccionado. `refresh()` sólo trae el turno, así que sin esto
+            # la tarjeta de cobro se queda con el cronograma de cuando se
+            # eligió el préstamo: si mientras tanto alguien cobró esa cuota
+            # -- desde Préstamos, o el compañero de al lado -- la pantalla
+            # seguiría ofreciendo cobrarla, por un monto que ya no existe.
+            # El servidor rechaza ese cobro (la cuota está saldada), pero el
+            # operador se entera recién al apretar el botón.
+            self._reload_selected_loan()
 
     def refresh(self) -> None:
         if not self._session.access_token:
@@ -1034,9 +1082,13 @@ class CashView(BaseView):
 
     # ---- Cobro de cuotas (BR-CAJA-004) -----------------------------------
 
-    def _run_collection(self, fn, *args, on_success, **kwargs) -> None:
+    def _run_collection(self, fn, *args, on_success, on_failure=None, **kwargs) -> None:
         """Toda consulta de la tarjeta de cobro usa su propia barra de
-        progreso, para no confundirse con la del estado de la caja."""
+        progreso, para no confundirse con la del estado de la caja.
+
+        `on_failure` es opcional y se suma al Toast, no lo reemplaza: lo usa el
+        cobro para volver a habilitar su botón si el RPC falló.
+        """
         self._collection_progress.setRange(0, 0)
         self._collection_progress.show()
         self._collection_worker = AsyncWorker(
@@ -1044,6 +1096,8 @@ class CashView(BaseView):
         )
         self._collection_worker.succeeded.connect(on_success)
         self._collection_worker.failed.connect(self._toast.show_message)
+        if on_failure is not None:
+            self._collection_worker.failed.connect(on_failure)
         self._collection_worker.finished.connect(self._hide_collection_progress)
         self._collection_worker.start()
 
@@ -1196,10 +1250,17 @@ class CashView(BaseView):
         for cuota in response.installments:
             if cuota.is_paid:
                 continue
-            self._installment_combo.addItem(
+            # BR-LOAN-017: la mora viaja junto a la cuota en el itemData para
+            # que el desglose no tenga que volver a pedir el cronograma.
+            etiqueta = (
                 f"Cuota {cuota.installment_number} · Vence "
-                f"{fecha(cuota.due_date)} · {gs(cuota.amount_due)}",
-                (cuota.installment_number, cuota.amount_due),
+                f"{fecha(cuota.due_date)} · {gs(cuota.amount_due)}"
+            )
+            if _hay_mora(cuota.late_fee):
+                etiqueta += f" + mora {gs(cuota.late_fee)}"
+            self._installment_combo.addItem(
+                etiqueta,
+                (cuota.installment_number, cuota.amount_due, cuota.late_fee),
             )
         hay_pendientes = self._installment_combo.count() > 0
         self._collect_button.setEnabled(hay_pendientes)
@@ -1212,9 +1273,22 @@ class CashView(BaseView):
         data = self._installment_combo.itemData(index)
         if data is None:
             self._collection_amount.clear()
+            self._collection_breakdown.hide()
             return
-        _numero, monto = data
-        self._collection_amount.set_amount(monto)
+        _numero, monto, mora = data
+        # El campo muestra el TOTAL a recibir (BR-LOAN-017). Mostrar sólo la
+        # cuota dejaría al cajero cobrando de menos y al arqueo corto, porque
+        # el servidor cobra cuota + mora igual.
+        total = Decimal(monto) + (Decimal(mora) if _hay_mora(mora) else Decimal("0"))
+        self._collection_amount.set_amount(str(total))
+        if _hay_mora(mora):
+            self._collection_breakdown.setText(
+                f"Incluye {gs(mora)} de mora por atraso, además de la cuota de "
+                f"{gs(monto)}."
+            )
+            self._collection_breakdown.show()
+        else:
+            self._collection_breakdown.hide()
 
     def _on_method_changed(self, _index: int) -> None:
         """En efectivo no hay referencia que pedir (BR-CAJA-004). Se
@@ -1232,7 +1306,7 @@ class CashView(BaseView):
         if data is None:
             self._toast.show_message("Elija la cuota que está abonando.")
             return
-        numero_cuota, _monto = data
+        numero_cuota, _monto, _mora = data
         medio = self._method_combo.currentData()
         referencia = self._collection_reference.text().strip()
         if medio != "EFECTIVO" and not referencia:
@@ -1242,8 +1316,17 @@ class CashView(BaseView):
             )
             return
         self._collection_reference.set_error(False)
-        # El cobro en efectivo exige caja abierta; el servidor lo rechaza si no
-        # la hay, pero la tarjeta ya está oculta en ese caso.
+        # Apagado mientras el cobro viaja: el RPC tarda, y hasta que vuelve el
+        # combo sigue ofreciendo la misma cuota por el mismo monto. Un segundo
+        # clic ahí manda un segundo cobro. Contra la MISMA cuota el servidor lo
+        # rechaza ("ya está saldada", porque bloquea la fila del préstamo), así
+        # que no se cobra dos veces; pero el operador se lleva un error
+        # confuso, y peor: si la cuota que quedó elegida es otra, ese segundo
+        # cobro es perfectamente válido y se registra sin que nadie lo haya
+        # querido. Se vuelve a habilitar sólo al fallar -- si sale bien, la
+        # recarga del préstamo deja el botón en el estado que corresponda
+        # (apagado si el préstamo quedó saldado).
+        self._collect_button.setEnabled(False)
         self._run_collection(
             self._loans_client.record_payment,
             self._session.access_token,
@@ -1252,6 +1335,7 @@ class CashView(BaseView):
             installment_number=numero_cuota,
             payment_method=medio,
             on_success=self._on_payment_recorded,
+            on_failure=lambda _mensaje: self._collect_button.setEnabled(True),
         )
 
     def _on_payment_recorded(self, payment) -> None:
@@ -1264,8 +1348,17 @@ class CashView(BaseView):
         cuotas = documents.cuotas_cubiertas_texto(
             payment.covered_installments, payment.total_installments
         )
+        # El toast dice el TOTAL cobrado, no sólo la cuota: es el número que
+        # el cajero acaba de recibir y contra el que va a cuadrar el arqueo.
+        if _hay_mora(payment.late_fee_amount):
+            detalle = (
+                f"{gs(payment.total_charged)} ({gs(payment.amount_paid)} de cuota "
+                f"+ {gs(payment.late_fee_amount)} de mora)"
+            )
+        else:
+            detalle = gs(payment.amount_paid)
         self._toast.show_message(
-            f"Cobro registrado por {gs(payment.amount_paid)} — {cuotas}. "
+            f"Cobro registrado por {detalle} — {cuotas}. "
             "Ya puede emitir el comprobante."
         )
         # Refresca el saldo del préstamo y las cuotas pendientes, y (si fue en
@@ -1329,6 +1422,7 @@ class CashView(BaseView):
             celdas = (
                 fecha_hora(entry.paid_at.ToDatetime()),
                 gs(entry.amount),
+                gs(entry.late_fee_amount) if _hay_mora(entry.late_fee_amount) else "—",
                 documents.cuotas_cubiertas_texto(
                     entry.covered_installments, response.total_installments
                 ),
@@ -1410,6 +1504,7 @@ class CashView(BaseView):
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         printer.setOutputFileName(path)
+        aplicar_hoja(printer)
         try:
             document.print_(printer)
         except OSError as exc:
@@ -1442,6 +1537,9 @@ class CashView(BaseView):
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         dialog = QPrintDialog(printer, self)
         if dialog.exec() == QPrintDialog.DialogCode.Accepted:
+            # Después del diálogo: aceptarlo reemplaza el layout de página
+            # por el de la impresora elegida (ver page_layout.aplicar_hoja).
+            aplicar_hoja(printer)
             try:
                 document.print_(printer)
             except OSError as exc:
@@ -1465,6 +1563,9 @@ class CashView(BaseView):
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         dialog = QPrintDialog(printer, self)
         if dialog.exec() == QPrintDialog.DialogCode.Accepted:
+            # Después del diálogo: aceptarlo reemplaza el layout de página
+            # por el de la impresora elegida (ver page_layout.aplicar_hoja).
+            aplicar_hoja(printer)
             try:
                 document.print_(printer)
             except OSError as exc:
@@ -1483,6 +1584,7 @@ class CashView(BaseView):
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         printer.setOutputFileName(path)
+        aplicar_hoja(printer)
         try:
             document.print_(printer)
         except OSError as exc:

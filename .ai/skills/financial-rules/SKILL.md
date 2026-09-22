@@ -68,12 +68,23 @@ Two consequences that are easy to get wrong when touching this:
     different, cheaper calculation than the schedule the same borrower
     signs. Guarded by `tests/client/test_documents_identity.py`.
 
-The rate is `config.LOAN_FIXED_INTEREST_RATE` — **20% nominal annual =
-1,667% monthly on the original financed amount** (`BR-LOAN-007`), the
-legal ceiling on interest itself — and it is fixed for **every** role,
-ADMIN included, since 2026-08-28. There is no rate field in the form;
-`CreateLoan` takes an empty `interest_rate` or exactly this value and
-rejects anything else rather than silently substituting. Changing it is
+The rate derives from `config.LOAN_FIXED_INTEREST_RATE` — **20% nominal
+annual = 1,667% monthly on the original financed amount**
+(`BR-LOAN-007`) — and it is fixed for **every** role, ADMIN included,
+since 2026-08-28. There is no rate field in the form; `CreateLoan` takes
+an empty `interest_rate` or exactly the rate that term earns, and
+rejects anything else rather than silently substituting.
+
+**Since 2026-09-22 that base is not the rate of every loan.**
+`_tasa_vigente(plazo)` returns `0.20 * 12 / min(plazo,
+LOAN_RATE_MIN_TERM_MONTHS)`: a loan shorter than a year is priced as a
+one-year loan, so 6 months is stored at **0,40 anual (3,33% mensual)**
+and earns the same 20% of the financed amount as 12 months. 13 months
+and up are unchanged. Two traps: the charges ceiling expresses the same
+rule with `max(plazo, 12)` because there the term multiplies (using
+`max` for both halves the price of long loans), and
+`UpdateLoanProposal` **re-rates** when the term changes — the only place
+it touches `interest_rate`. Changing it is
 a commercial/legal decision, not a code tweak: it also moves
 `cas_client/rbac_ui.py`'s `FIXED_INTEREST_RATE` (no shared source
 between the two processes) and the interest clause in
@@ -81,8 +92,8 @@ between the two processes) and the interest clause in
 
 The complement is `config.LOAN_MAX_CHARGES_RATIO` — **40% anual del
 capital solicitado** (`BR-LOAN-006`, subió de 25% el 2026-09-08), a cap
-on the sum of the 4 financed charges, prorated by term the same way as
-interest. 20% legal interest + up to 40% financed charges = the 60%
+on the sum of the 4 financed charges, prorated by term with a one-year
+floor (`max(plazo, 12)`, added 2026-09-22) the same way as interest. 20% legal interest + up to 40% financed charges = the 60%
 annual total cost of credit the entity sets — up from 45% (20%+25%)
 before 2026-09-08. This is validated separately from, and is unrelated
 to, BR-LOAN-002's own 40%-of-income cap (a different ceiling on a
@@ -96,7 +107,17 @@ what the signed document discloses.
 -   Principal.
 -   Interest.
 -   Fees (financed — they change the installment).
--   Late interest.
+-   Late interest — **implemented since 2026-09-22** (`BR-LOAN-017`):
+    0,38% mensual on each overdue installment's unpaid balance, accruing
+    from the 5th day (the grace is counted, not deducted: day six owes
+    one day), prorated daily over 30, floored at
+    `config.LOAN_LATE_FEE_START_DATE` so it is never retroactive, and
+    charged together with the installment. Stored in
+    `loan_payments.late_fee_amount`, **separate from `amount`** (which
+    stays "imputed to the schedule"), while the cash movement imputes
+    the sum. Before that date it existed only as clause text on the
+    Pagaré — if a figure here and one in `documents.py`'s `_TERM_*`
+    disagree, the paper and the charge disagree.
 -   Installment amount.
 -   Due dates.
 -   Outstanding balance.

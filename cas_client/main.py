@@ -51,6 +51,10 @@ def main() -> None:
     # Yes/No buttons (_on_deactivate, _on_mark_defaulted). Scoped with the
     # "QMessageBox QPushButton" descendant selector so it can't leak onto
     # unrelated buttons elsewhere (e.g. the sidebar's own per-button styles).
+    #
+    # theme.tooltip_style() va acá y no en una vista a propósito: el tooltip
+    # es una ventana top-level, no un hijo del botón, así que sólo la hoja de
+    # la aplicación lo alcanza. Sin él sale como un recuadro negro.
     app.setStyleSheet(
         "QMessageBox QPushButton { "
         f"background-color: {theme.APP_BACKGROUND}; color: {theme.TEXT_PRIMARY}; "
@@ -58,6 +62,7 @@ def main() -> None:
         "font-weight: 600; }"
         f"QMessageBox QPushButton:hover {{ background-color: white; "
         f"border: 1px solid {theme.PRIMARY}; color: {theme.PRIMARY}; }}"
+        + theme.tooltip_style()
     )
     try:
         window = MainWindow()

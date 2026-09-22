@@ -210,6 +210,10 @@ message GetLoanByIdResponse {
     string total_interest = 27;     // Interés total del cronograma
     string total_to_pay = 28;       // total_credit_with_charges + total_interest
     string installment_amount = 29; // Cuota mensual (la primera, representativa)
+    // BR-LOAN-017: mora devengada a hoy por las cuotas vencidas e impagas.
+    // **No es lo mismo que overdue_amount**: ése es la cuota que se atrasó,
+    // éste el recargo por el atraso. "0.00" cuando no hay nada devengado.
+    string accrued_late_fee = 30;
 }
 
 message ListClientLoansRequest {
@@ -322,6 +326,12 @@ message RecordPaymentResponse {
     // comprobante; antes el cliente solo podía imprimir el pago que tenía en
     // memoria y lo perdía al cambiar de pantalla.
     string payment_id = 13;
+    // BR-LOAN-017. `amount_paid` sigue siendo lo imputado al cronograma;
+    // estos dos son el recargo por atraso cobrado junto con la cuota y la
+    // suma que el cliente entregó de verdad. El comprobante y el ticket los
+    // desglosan: el deudor tiene derecho a ver por qué pagó más que la cuota.
+    string late_fee_amount = 14;
+    string total_charged = 15; // amount_paid + late_fee_amount
 }
 
 message ListLoanPaymentsRequest {
@@ -348,6 +358,12 @@ message LoanPaymentEntry {
     // BR-LOAN-016, que no guardaban quién cobraba.
     string recorded_by_name = 9;
     string recorded_by_national_id = 10;
+    // BR-LOAN-017: mora cobrada en ESE pago, tal como quedó guardada -- no
+    // recalculada. Recalcularla hoy daría cero (la cuota ya está cubierta) y
+    // el comprobante reimpreso contradiría al original. "" en los cobros
+    // anteriores a la regla, que no tuvieron mora.
+    string late_fee_amount = 11;
+    string total_charged = 12; // amount + late_fee_amount
 }
 
 message ListLoanPaymentsResponse {
@@ -399,6 +415,11 @@ message AmortizationInstallment {
     // "0.00" si ya está totalmente cubierta.
     string amount_due = 9;
     bool is_paid = 10;
+    // BR-LOAN-017: mora devengada por ESTA cuota a hoy, y los días punibles
+    // que la generaron (atraso menos los días de gracia, nunca negativo).
+    // "0.00"/0 mientras la cuota no esté vencida o siga dentro de la gracia.
+    string late_fee = 11;
+    int32 late_fee_days = 12;
 }
 
 message GetAmortizationScheduleResponse {

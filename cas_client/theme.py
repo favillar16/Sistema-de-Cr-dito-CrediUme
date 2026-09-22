@@ -64,6 +64,29 @@ BODY_FONT_FAMILY = '"Inter", "Segoe UI", sans-serif'
 # lists, not a guarantee. Qt falls back to the next name if one isn't present.
 
 
+def tooltip_style() -> str:
+    """Stylesheet for every QToolTip in the app.
+
+    Los tooltips salían como un recuadro negro sin texto legible: `QToolTip`
+    es la única clase de widget que nunca recibió un `color:`/`background`
+    explícito, así que cae en la paleta del sistema (la trampa que documenta
+    CLAUDE.md). `QT_QPA_PLATFORM=windows:darkmode=0` de main.py no alcanza --
+    desactiva la adaptación automática de los widgets comunes, no la del
+    popup del tooltip, que es una ventana top-level aparte.
+
+    Por eso mismo esto **tiene que ir en la hoja de estilos de la aplicación**
+    (main.py) y no en la de un widget: el tooltip no es hijo del botón que lo
+    dispara, así que un `setStyleSheet` sobre el botón nunca lo alcanza.
+    """
+    return (
+        "QToolTip { "
+        f"background-color: #FFFFFF; color: {TEXT_PRIMARY}; "
+        f"border: 1px solid {BORDER}; border-radius: 4px; "
+        f"padding: 6px 8px; font-family: {BODY_FONT_FAMILY}; "
+        "}"
+    )
+
+
 def flat_button_style() -> str:
     """Shared stylesheet for flat/borderless nav buttons (e.g. "← Volver").
     Qt's default flat QPushButton palette can resolve to white text on some

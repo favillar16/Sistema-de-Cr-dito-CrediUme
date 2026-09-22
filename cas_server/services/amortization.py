@@ -7,7 +7,7 @@ specs/loans/README no incluye una tabla de cronograma/cuotas).
 
 import calendar
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 CENTAVOS = Decimal("0.01")
@@ -24,8 +24,58 @@ class Cuota:
     ajustada: bool = False
 
 
+@dataclass(frozen=True)
+class MoraCuota:
+    """Mora devengada por **una** cuota vencida e impaga a una fecha dada."""
+
+    numero: int
+    dias_punibles: int
+    monto: Decimal
+
+
 def _centavos(valor: Decimal) -> Decimal:
     return valor.quantize(CENTAVOS, rounding=ROUND_HALF_UP)
+
+
+def calcular_mora_cuota(
+    numero: int,
+    pendiente: Decimal,
+    fecha_vencimiento: date,
+    hoy: date,
+    *,
+    tasa_mensual: Decimal,
+    dias_gracia: int,
+    dias_por_mes: int,
+    desde: date | None = None,
+) -> MoraCuota:
+    """BR-LOAN-017: interés moratorio de una cuota vencida, a `hoy`.
+
+    `pendiente * tasa_mensual / dias_por_mes * dias_punibles`, donde los días
+    punibles se cuentan **desde el día de gracia en adelante**: la cláusula
+    firmada dice que la mora "se devengará a partir de los 5 días corridos
+    contados desde la fecha de su primer vencimiento", así que al sexto día de
+    atraso se debe un día de mora, no seis.
+
+    `desde` es un piso de calendario (config.LOAN_LATE_FEE_START_DATE): antes
+    de esa fecha no se devenga nada, cualquiera sea el vencimiento de la
+    cuota. Existe porque la mora se deriva de fechas y no se persiste -- sin
+    el piso, el día que la regla entra en vigencia toda la cartera ya vencida
+    aparecería debiendo meses de recargo que nunca se cobraron.
+
+    Función pura, como el resto del módulo: no sabe qué préstamo es ni mira la
+    base. El número de cuota viaja en el resultado sólo para que quien llama
+    pueda imputar la mora a la cuota que la generó.
+    """
+    inicio = fecha_vencimiento + timedelta(days=dias_gracia)
+    if desde is not None and desde > inicio:
+        inicio = desde
+    dias_punibles = max((hoy - inicio).days, 0)
+    monto = (
+        _centavos(pendiente * tasa_mensual / Decimal(dias_por_mes) * dias_punibles)
+        if dias_punibles and pendiente > 0
+        else Decimal("0.00")
+    )
+    return MoraCuota(numero=numero, dias_punibles=dias_punibles, monto=monto)
 
 
 def _sumar_meses(fecha: date, meses: int) -> date:

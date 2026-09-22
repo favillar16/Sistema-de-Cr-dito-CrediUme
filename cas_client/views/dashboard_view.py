@@ -2,7 +2,7 @@ from datetime import date, datetime, timedelta
 
 import grpc
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPageLayout, QTextDocument
+from PySide6.QtGui import QTextDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,6 +28,7 @@ from cas_client.formatting import (
     gs,
 )
 from cas_client.grpc_client import ApiError, DashboardServiceClient
+from cas_client.page_layout import aplicar_hoja
 from cas_client.rbac_ui import (
     can_view_payment_status_report,
     can_view_period_report,
@@ -504,6 +505,7 @@ class DashboardView(BaseView):
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         printer.setOutputFileName(path)
+        aplicar_hoja(printer)
         try:
             document.print_(printer)
         except OSError as exc:
@@ -538,6 +540,9 @@ class DashboardView(BaseView):
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         dialog = QPrintDialog(printer, self)
         if dialog.exec() == QPrintDialog.DialogCode.Accepted:
+            # Después del diálogo: aceptarlo reemplaza el layout de página
+            # por el de la impresora elegida (ver page_layout.aplicar_hoja).
+            aplicar_hoja(printer)
             try:
                 document.print_(printer)
             except OSError as exc:
@@ -709,7 +714,11 @@ class DashboardView(BaseView):
         de la app que lo necesita -- el resto son tablas de 2 o 3 columnas.
         El .docx hace lo mismo por su lado (documents_docx._apaisar)."""
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        printer.setPageOrientation(QPageLayout.Orientation.Landscape)
+        # aplicar_hoja fija A4 y los márgenes además de la orientación, así
+        # que reemplaza al setPageOrientation suelto que había acá: sin
+        # tamaño declarado, el reporte salía en el papel que tuviera la
+        # impresora predeterminada.
+        aplicar_hoja(printer, apaisado=True)
         return printer
 
     def _payment_status_default_name(self, extension: str) -> str:
@@ -736,6 +745,7 @@ class DashboardView(BaseView):
         printer = self._payment_status_printer()
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         printer.setOutputFileName(path)
+        aplicar_hoja(printer)
         try:
             document.print_(printer)
         except OSError as exc:
@@ -775,6 +785,9 @@ class DashboardView(BaseView):
         printer = self._payment_status_printer()
         dialog = QPrintDialog(printer, self)
         if dialog.exec() == QPrintDialog.DialogCode.Accepted:
+            # Después del diálogo: aceptarlo reemplaza el layout de página
+            # por el de la impresora elegida (ver page_layout.aplicar_hoja).
+            aplicar_hoja(printer)
             try:
                 document.print_(printer)
             except OSError as exc:

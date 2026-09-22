@@ -1,4 +1,5 @@
 import os
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -118,3 +119,44 @@ LOAN_FIXED_INTEREST_RATE = Decimal("0.20")  # 20% anual, tope legal de interés
 # ocultar ninguna cifra: lo que cambia es sólo el tope, no la transparencia
 # del documento firmado.
 LOAN_MAX_CHARGES_RATIO = Decimal("0.40")  # 40% anual, tope de cargos financiados
+
+# BR-LOAN-007/006 (revisado 2026-09-22). Piso de plazo para **cobrar**, no
+# para aceptar: un préstamo más corto que un año se cobra como si durara un
+# año. Sin esto el prorrateo por plazo hacía que 6 meses rindieran la mitad
+# que 12 (10% de interés y 20% de techo de cargos), y la entidad decidió que
+# ningún plazo rinda menos que uno de 12 meses.
+#
+# Consecuencia deliberada: la tasa **guardada** de un préstamo corto ya no es
+# LOAN_FIXED_INTEREST_RATE. Un préstamo a 6 meses se crea a 0,40 anual (3,33%
+# mensual) para que su interés total sea el mismo 20% del financiado que uno
+# a 12, y el Pagaré/Contrato declaran ese mensual porque lo derivan de la
+# tasa del propio préstamo. El plazo sigue siendo libre (cualquier entero
+# positivo); esto sólo cambia lo que se cobra, no lo que se acepta.
+LOAN_RATE_MIN_TERM_MONTHS = 12
+
+# BR-LOAN-017 (2026-09-22). Interés moratorio: una sola tasa con carácter
+# moratorio y punitorio sobre **cada cuota vencida e impaga**, tal como ya lo
+# declaraban el Pagaré y el Contrato desde 2026-09-02 sin que nadie lo
+# calculara. Los tres valores son los mismos que imprime la cláusula
+# (cas_client/documents.py's _TERM_MORATORY_*), espejados a mano como el
+# resto de las constantes comerciales: si divergen, el papel firmado y lo que
+# se cobra dicen cosas distintas.
+LOAN_LATE_FEE_MONTHLY_RATE = Decimal("0.0038")  # 0,38% mensual
+LOAN_LATE_FEE_GRACE_DAYS = 5  # días corridos desde el vencimiento
+LOAN_LATE_FEE_DAYS_PER_MONTH = 30  # base de prorrateo diario
+
+# Fecha desde la cual se devenga mora, cualquiera sea el vencimiento de la
+# cuota. La mora se deriva de fechas y no se persiste, así que sin este piso
+# el día del despliegue toda la cartera vencida aparecería debiendo meses de
+# recargo que la entidad nunca cobró. Decisión de negocio: la mora corre
+# desde la puesta en marcha en adelante. Se puede mover por .env.
+# El default va aparte del valor efectivo a propósito: es lo que se despliega
+# y lo único que tiene sentido proteger con un test. El override por entorno
+# existe para poder *probar* la mora antes de esa fecha (si no, en un equipo
+# de desarrollo siempre da cero), y un override local no debe romper la suite.
+LOAN_LATE_FEE_DEFAULT_START_DATE = date(2026, 10, 1)
+LOAN_LATE_FEE_START_DATE = date.fromisoformat(
+    os.environ.get(
+        "LOAN_LATE_FEE_START_DATE", LOAN_LATE_FEE_DEFAULT_START_DATE.isoformat()
+    )
+)

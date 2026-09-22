@@ -39,6 +39,12 @@ establishment reincorporated a teller position, so:
     module was one). `TRANSFERENCIA` still requires a non-empty
     `transfer_reference`; `EFECTIVO` instead requires an open cash
     session and posts a movement into it.
+-   `LoanPayment.amount` means **"imputed to the schedule"**, and
+    `LoanPayment.late_fee_amount` (nullable, no backfill) the mora
+    charged with it (`BR-LOAN-017`, 2026-09-22). They are separate
+    because folding the surcharge into `amount` would mark the loan
+    `PAID` before the capital was amortised. The cash movement, in
+    contrast, imputes **the sum** — that is what crossed the counter.
 -   The expected amount of an arqueo is always recomputed server-side
     from the opening balance and the session's movements. Never accept
     it from the client — a close where the client supplies both the

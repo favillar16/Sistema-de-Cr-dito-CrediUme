@@ -40,15 +40,18 @@ from cas_client.loan_math import (
     cargo_para_cuota_objetivo,
     cronograma_estimado,
     cuota_estimada,
+    tasa_vigente,
+    tope_cargos,
 )
+from cas_client.page_layout import aplicar_hoja
 from cas_client.rbac_ui import (
     FIXED_INTEREST_RATE,
     MAX_CHARGES_RATIO,
+    RATE_MIN_TERM_MONTHS,
     can_delete_loan,
     can_revert_default,
     can_edit_installment_amount,
     can_originate_credit,
-    fixed_interest_rate_percent,
     role_at_least,
     tier_label,
 )
@@ -135,6 +138,10 @@ _PREVIEW_TABLE_HEADERS = (
 _PAYMENT_HEADERS = (
     "Fecha y hora",
     "Monto (Gs)",
+    # BR-LOAN-017: separada del monto a propósito -- el monto es lo que fue al
+    # cronograma y la mora el recargo, y el historial es justo donde se
+    # discute la diferencia.
+    "Mora (Gs)",
     "Medio",
     "Cuota(s)",
     "Registrado por",
@@ -215,7 +222,16 @@ _SUMMARY_ROWS = (
     ("amount_to_disburse", "A desembolsar al cliente", False),
     ("total_paid", "Total pagado", False),
     ("remaining_balance", "Saldo restante", False),
+    ("accrued_late_fee", "Mora devengada", False),
 )
+
+# BR-LOAN-017: la mora se pinta en rojo cuando hay algo devengado y apagada
+# cuando no, en vez de ocultarse -- una celda que aparece y desaparece mueve
+# la grilla entera y deja al operador sin saber si el préstamo no tiene mora o
+# si la pantalla no la muestra. Va al lado del saldo y NO sumada a él: el
+# saldo es la deuda, la mora el recargo por haberse atrasado (misma distinción
+# que el dashboard hace entre saldo pendiente y monto vencido).
+_SUMMARY_ROWS_MORA = "accrued_late_fee"
 
 # Texto que explica, una sola vez, cómo se compone el costo del préstamo. Lo
 # usan el alta y la edición de la propuesta: es lo que hace entendible que el
@@ -235,6 +251,31 @@ _CHARGES_HINT = (
 # vuelve a verificarlo, esto solo evita ofrecer un botón que respondería
 # FAILED_PRECONDITION.
 _DELETABLE_STATUSES = ("PENDING", "APPROVED", "EXPIRED")
+
+
+def _es_monto_positivo(texto: str) -> bool:
+    """True si el string decimal que manda el servidor es mayor a cero.
+
+    Los montos viajan como string por el contrato (`"0.00"`, `""` cuando no
+    aplica), así que compararlos con `"0.00"` a mano falla con `"0"` o `"0.0"`.
+    """
+    if not texto:
+        return False
+    try:
+        return Decimal(texto) > 0
+    except (ArithmeticError, ValueError):
+        return False
+
+
+def _tasa_de_plazo(plazo_meses: int) -> Decimal:
+    """BR-LOAN-007: la tasa que el servidor va a guardar para ese plazo.
+
+    Atajo sobre `loan_math.tasa_vigente` con las constantes de esta pantalla,
+    para que los tres cálculos de la propuesta (cuota deseada, cuota
+    resultante y cronograma estimado) no puedan quedarse con la tasa base
+    mientras el servidor usa otra.
+    """
+    return tasa_vigente(plazo_meses, Decimal(FIXED_INTEREST_RATE), RATE_MIN_TERM_MONTHS)
 
 
 def _apply_action_gate(
@@ -851,7 +892,7 @@ class LoansView(BaseView):
         principal_field, principal_input = labeled_field(
             "Capital solicitado (Gs)", "Ej. 10.000.000", input_cls=CurrencyInput
         )
-        term_field, term_input = labeled_field("Plazo en meses", "Ej. 12")
+        term_field, term_input = labeled_field("Plazo en meses", "Ej. 6, 12, 18")
         due_field, due_input = labeled_field(
             "Primer vencimiento", DISPLAY_DATE_PLACEHOLDER
         )
@@ -872,18 +913,19 @@ class LoansView(BaseView):
         # tarjeta de cargos, abajo), no como interés. El detalle de
         # porcentajes no se explica en pantalla (queda en
         # specs/loans/README) -- solo se avisa dónde está.
-        rate_line = QLabel(
-            f"Interés legal: {fixed_interest_rate_percent()}% anual "
-            f"({rate_percent_mensual(FIXED_INTEREST_RATE)} mensual sobre el "
-            "monto original) — es el máximo que permite la ley y es fijo "
-            "para todos los usuarios. Costos Administrativos generados más "
-            "abajo."
-        )
+        # Revisado 2026-09-22: la tasa depende del plazo (BR-LOAN-007), así
+        # que esta línea dejó de ser un texto fijo y se reescribe cada vez que
+        # cambia el plazo. Si dijera siempre "20% anual", un préstamo a 6
+        # meses mostraría en pantalla una tasa distinta de la que el servidor
+        # guarda y de la que el Pagaré declara.
+        rate_line = QLabel()
         rate_line.setWordWrap(True)
         rate_line.setStyleSheet(
             f"color: {theme.PRIMARY}; font-size: 12px; font-weight: 600;"
         )
         terms.addWidget(rate_line)
+        setattr(self, f"{prefix}_rate_line", rate_line)
+        self._refresh_rate_line(prefix)
 
         hint = QLabel(
             "Cada mes se amortiza la misma porción de capital y se cobra un "
@@ -937,6 +979,7 @@ class LoansView(BaseView):
         # servidor vuelve a validar el tope real al guardar.
         principal_input.editingFinished.connect(lambda: self._suggest_admin_fee(prefix))
         term_input.editingFinished.connect(lambda: self._suggest_admin_fee(prefix))
+        term_input.editingFinished.connect(lambda: self._refresh_rate_line(prefix))
         # Si cambian capital o plazo despues de fijar una cuota objetivo, el
         # cargo calculado deja de producir esa cuota: se recalcula solo, si no
         # el formulario mostraria una cuota que ya no es la que va a salir.
@@ -1001,10 +1044,59 @@ class LoansView(BaseView):
 
         return container
 
+    def _plazo_del_formulario(self, prefix: str) -> int | None:
+        """El plazo tipeado, o None si todavía no es un entero positivo.
+
+        Tres handlers distintos necesitaban exactamente esta lectura y cada
+        uno la hacía por su cuenta; ahora también la necesita la línea de
+        tasa, que depende del plazo desde 2026-09-22.
+        """
+        term_text = getattr(self, f"{prefix}_term").text().strip()
+        if not term_text:
+            return None
+        try:
+            term_months = int(term_text)
+        except ValueError:
+            return None
+        return term_months if term_months > 0 else None
+
+    def _refresh_rate_line(self, prefix: str) -> None:
+        """BR-LOAN-007: reescribe la línea de tasa para el plazo tipeado.
+
+        Sin plazo cargado muestra la tasa base (la de 12 meses o más), que es
+        el caso habitual. Con un plazo corto muestra la tasa que realmente se
+        va a guardar, porque es la que el Pagaré va a declarar.
+        """
+        rate_line = getattr(self, f"{prefix}_rate_line", None)
+        if rate_line is None:
+            return
+        term_months = self._plazo_del_formulario(prefix)
+        tasa = tasa_vigente(
+            term_months if term_months is not None else RATE_MIN_TERM_MONTHS,
+            Decimal(FIXED_INTEREST_RATE),
+            RATE_MIN_TERM_MONTHS,
+        )
+        porcentaje = f"{tasa * 100:f}".rstrip("0").rstrip(".")
+        if term_months is not None and term_months < RATE_MIN_TERM_MONTHS:
+            encabezado = (
+                f"Interés a {term_months} meses: {porcentaje}% anual "
+                f"({rate_percent_mensual(str(tasa))} mensual sobre el monto "
+                f"original). Un plazo menor a {RATE_MIN_TERM_MONTHS} meses se "
+                f"cobra como uno de {RATE_MIN_TERM_MONTHS}, así que el interés "
+                "total es el mismo."
+            )
+        else:
+            encabezado = (
+                f"Interés legal: {porcentaje}% anual "
+                f"({rate_percent_mensual(str(tasa))} mensual sobre el monto "
+                "original) — es fijo para todos los usuarios."
+            )
+        rate_line.setText(f"{encabezado} Costos Administrativos generados más abajo.")
+
     def _suggest_admin_fee(self, prefix: str) -> None:
         """BR-LOAN-006: sugiere "Gastos administrativos por desembolso" con
-        el tope de cargos (40% anual del capital, prorrateado por el plazo),
-        para que el operador no tenga que calcularlo a mano.
+        el tope de cargos (40% anual del capital, con piso de un año de
+        prorrateo), para que el operador no tenga que calcularlo a mano.
 
         No pisa un monto ya cargado -- ni el que el operador haya tipeado, ni
         el que trae una propuesta existente al abrir la edición (que se
@@ -1016,17 +1108,15 @@ class LoansView(BaseView):
         if admin_fee_input.raw_value():
             return
         principal = getattr(self, f"{prefix}_principal").raw_value()
-        term_text = getattr(self, f"{prefix}_term").text().strip()
-        if not (principal and term_text):
+        term_months = self._plazo_del_formulario(prefix)
+        if not principal or term_months is None:
             return
-        try:
-            term_months = int(term_text)
-        except ValueError:
-            return
-        if term_months <= 0:
-            return
-        sugerido = (
-            Decimal(principal) * MAX_CHARGES_RATIO / Decimal(12) * term_months
+        # Vía loan_math y no con la fórmula escrita acá: era la tercera copia
+        # de la misma cuenta (servidor, loan_math, esta vista) y la que se
+        # olvidó al agregar el piso de plazo habría sugerido la mitad del
+        # tope real en un préstamo corto.
+        sugerido = tope_cargos(
+            Decimal(principal), MAX_CHARGES_RATIO, term_months, RATE_MIN_TERM_MONTHS
         ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         admin_fee_input.set_amount(str(sugerido))
 
@@ -1086,7 +1176,7 @@ class LoansView(BaseView):
         try:
             cargo = cargo_para_cuota_objetivo(
                 Decimal(principal),
-                Decimal(FIXED_INTEREST_RATE),
+                _tasa_de_plazo(term_months),
                 term_months,
                 Decimal(objetivo_texto),
                 otros_cargos=otros,
@@ -1100,7 +1190,7 @@ class LoansView(BaseView):
         getattr(self, f"{prefix}_charge_admin_fee").set_amount(str(cargo))
         resultante = cuota_estimada(
             Decimal(principal),
-            Decimal(FIXED_INTEREST_RATE),
+            _tasa_de_plazo(term_months),
             term_months,
             otros + cargo,
         )
@@ -1144,7 +1234,7 @@ class LoansView(BaseView):
         try:
             cuotas = cronograma_estimado(
                 Decimal(principal),
-                Decimal(FIXED_INTEREST_RATE),
+                _tasa_de_plazo(term_months),
                 term_months,
                 total_cargos,
             )
@@ -1549,6 +1639,11 @@ class LoansView(BaseView):
         amount_field, self._payment_amount_display = labeled_field(
             "Monto a registrar (Gs)", input_cls=CurrencyInput
         )
+        # Incluye la mora devengada (BR-LOAN-017), igual que la tarjeta de
+        # cobro de CashView: el servidor cobra cuota + mora, así que mostrar
+        # sólo la cuota haría que se registrara un monto distinto del que el
+        # operador vio antes de confirmar. El desglose va en
+        # _payment_breakdown, debajo de la fila.
         self._payment_amount_display.setReadOnly(True)
         payment_row.add_widget(amount_field)
 
@@ -1602,6 +1697,17 @@ class LoansView(BaseView):
         ticket_column.addWidget(self._ticket_button)
         payment_row.add_widget(ticket_wrapper)
         actions_card.addWidget(payment_row)
+
+        # BR-LOAN-017: por qué el monto a registrar no coincide con la cuota.
+        # Mismo criterio (y mismo texto) que la tarjeta de cobro de la caja:
+        # quien cobra tiene que poder explicárselo al cliente.
+        self._payment_breakdown = QLabel("")
+        self._payment_breakdown.setWordWrap(True)
+        self._payment_breakdown.setStyleSheet(
+            f"color: {theme.ERROR}; font-size: 12px; font-weight: 600;"
+        )
+        self._payment_breakdown.hide()
+        actions_card.addWidget(self._payment_breakdown)
 
         # Se puebla DESPUÉS de que existe el campo de referencia: el primer
         # addItem() mueve el índice de -1 a 0 y dispara _on_payment_method_
@@ -1774,6 +1880,16 @@ class LoansView(BaseView):
         )
         for field_name, value_label in self._detail_amount_labels.items():
             value_label.setText(gs(getattr(loan, field_name)))
+            if field_name == _SUMMARY_ROWS_MORA:
+                hay_mora = _es_monto_positivo(loan.accrued_late_fee)
+                value_label.setStyleSheet(
+                    "font-size: 14px; font-weight: 700; "
+                    + (
+                        f"color: {theme.ERROR};"
+                        if hay_mora
+                        else f"color: {theme.TEXT_MUTED};"
+                    )
+                )
         self._detail_charges_breakdown.setText(_charges_breakdown_text(loan))
 
         puede_pagare_contrato = loan.status in ("APPROVED", "ACTIVE", "PAID")
@@ -1891,7 +2007,11 @@ class LoansView(BaseView):
             self._pending_schedule_after_create = False
             self._on_view_schedule()
 
-    def _run_loan_action(self, worker_fn, *args, on_success, **kwargs) -> None:
+    def _run_loan_action(
+        self, worker_fn, *args, on_success, on_failure=None, **kwargs
+    ) -> None:
+        """`on_failure` es opcional y se suma al manejo de error habitual, no
+        lo reemplaza: lo usa el cobro para volver a habilitar su botón."""
         self._set_loading(True)
         self._worker = AsyncWorker(
             worker_fn,
@@ -1902,6 +2022,8 @@ class LoansView(BaseView):
         )
         self._worker.succeeded.connect(on_success)
         self._worker.failed.connect(self._on_error)
+        if on_failure is not None:
+            self._worker.failed.connect(on_failure)
         self._worker.finished.connect(lambda: self._set_loading(False))
         self._worker.start()
 
@@ -2065,8 +2187,15 @@ class LoansView(BaseView):
                 f"Cuota {installment.installment_number} · "
                 f"Vence {fecha(installment.due_date)} · {gs(installment.amount_due)}"
             )
+            if _es_monto_positivo(installment.late_fee):
+                label += f" + mora {gs(installment.late_fee)}"
             self._payment_installment_combo.addItem(
-                label, (installment.installment_number, installment.amount_due)
+                label,
+                (
+                    installment.installment_number,
+                    installment.amount_due,
+                    installment.late_fee,
+                ),
             )
         has_pending = self._payment_installment_combo.count() > 0
         self._record_payment_button.setEnabled(
@@ -2092,9 +2221,24 @@ class LoansView(BaseView):
         data = self._payment_installment_combo.itemData(index)
         if data is None:
             self._payment_amount_display.clear()
+            self._payment_breakdown.hide()
             return
-        _numero, monto_pendiente = data
-        self._payment_amount_display.set_amount(monto_pendiente)
+        _numero, monto_pendiente, mora = data
+        # El campo muestra el TOTAL que el servidor va a registrar: cuota más
+        # la mora devengada (BR-LOAN-017). Mostrar sólo la cuota dejaría al
+        # operador confirmando un monto distinto del que se cobra.
+        total = Decimal(monto_pendiente) + (
+            Decimal(mora) if _es_monto_positivo(mora) else Decimal("0")
+        )
+        self._payment_amount_display.set_amount(str(total))
+        if _es_monto_positivo(mora):
+            self._payment_breakdown.setText(
+                f"Incluye {gs(mora)} de mora por atraso, además de la cuota de "
+                f"{gs(monto_pendiente)}."
+            )
+            self._payment_breakdown.show()
+        else:
+            self._payment_breakdown.hide()
 
     def _on_record_payment(self) -> None:
         index = self._payment_installment_combo.currentIndex()
@@ -2102,7 +2246,7 @@ class LoansView(BaseView):
         if data is None:
             self._toast.show_message("No hay cuotas pendientes para registrar un pago.")
             return
-        numero_cuota, _monto = data
+        numero_cuota, _monto, _mora = data
         medio = self._payment_method_combo.currentData()
         reference = self._payment_reference_input.text().strip()
         # BR-CAJA-004: en efectivo no hay referencia que pedir -- la
@@ -2114,6 +2258,11 @@ class LoansView(BaseView):
             )
             return
         self._payment_reference_input.set_error(False)
+        # Apagado mientras el cobro viaja, misma razón que en CashView: hasta
+        # que vuelve el RPC el combo sigue ofreciendo la misma cuota, y un
+        # segundo clic manda un segundo cobro. Se rehabilita sólo si falla; si
+        # sale bien, la recarga del detalle deja el botón como corresponda.
+        self._record_payment_button.setEnabled(False)
         self._run_loan_action(
             self._client.record_payment,
             self._selected_loan_id,
@@ -2121,6 +2270,7 @@ class LoansView(BaseView):
             installment_number=numero_cuota,
             payment_method=medio,
             on_success=self._on_payment_recorded,
+            on_failure=lambda _mensaje: self._record_payment_button.setEnabled(True),
         )
 
     def _on_payment_recorded(self, response) -> None:
@@ -2130,11 +2280,19 @@ class LoansView(BaseView):
         cuotas = documents.cuotas_cubiertas_texto(
             response.covered_installments, response.total_installments
         )
+        # BR-LOAN-017: si se cobró mora hay que decirlo acá, porque el monto
+        # registrado no coincide con la cuota que el operador eligió.
+        mora = (
+            f" Se cobraron además {gs(response.late_fee_amount)} de mora "
+            f"(total {gs(response.total_charged)})."
+            if _es_monto_positivo(response.late_fee_amount)
+            else ""
+        )
         # _on_action_success recarga el detalle, que es lo que re-habilita la
         # fila del comprobante en la tarjeta de Documentos.
         self._on_action_success(
-            f"Pago registrado — {cuotas}. Puede descargar el comprobante en "
-            '"Documentos".'
+            f"Pago registrado — {cuotas}.{mora} Puede descargar el comprobante "
+            'en "Documentos".'
         )
 
     def _on_action_success(self, message: str) -> None:
@@ -2173,6 +2331,11 @@ class LoansView(BaseView):
             celdas = (
                 fecha_hora(entry.paid_at.ToDatetime()),
                 gs(entry.amount),
+                (
+                    gs(entry.late_fee_amount)
+                    if _es_monto_positivo(entry.late_fee_amount)
+                    else "—"
+                ),
                 _PAYMENT_METHOD_LABELS.get(entry.payment_method, entry.payment_method),
                 documents.cuotas_cubiertas_texto(
                     entry.covered_installments, response.total_installments
@@ -2287,6 +2450,9 @@ class LoansView(BaseView):
         dialog.setWindowTitle(titulo)
         if dialog.exec() != QPrintDialog.DialogCode.Accepted:
             return
+        # Después del diálogo: aceptarlo reemplaza el layout de página por el
+        # de la impresora elegida (ver page_layout.aplicar_hoja).
+        aplicar_hoja(printer)
         document = QTextDocument()
         document.setHtml(html)
         try:
@@ -2624,6 +2790,7 @@ class LoansView(BaseView):
             printer = QPrinter(QPrinter.PrinterMode.HighResolution)
             printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
             printer.setOutputFileName(path)
+            aplicar_hoja(printer)
             try:
                 document.print_(printer)
             except OSError as exc:
@@ -2634,6 +2801,7 @@ class LoansView(BaseView):
             printer = QPrinter(QPrinter.PrinterMode.HighResolution)
             dialog = QPrintDialog(printer, self)
             if dialog.exec() == QPrintDialog.DialogCode.Accepted:
+                aplicar_hoja(printer)
                 try:
                     document.print_(printer)
                 except OSError as exc:

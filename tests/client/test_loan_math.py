@@ -16,9 +16,18 @@ from cas_client.loan_math import (
     cargo_para_cuota_objetivo,
     cronograma_estimado,
     cuota_estimada,
+    tasa_vigente,
     tope_cargos,
 )
 from cas_server.services.amortization import calcular_cronograma
+
+# Los privados del servidor a propósito: son la definición contra la que se
+# compara el espejo del cliente. Compararla contra una copia escrita acá sólo
+# probaría que la copia no cambió.
+from cas_server.services.loan_service import (  # noqa: E402
+    _tasa_vigente as _tasa_vigente_servidor,
+    _tope_cargos as _tope_cargos_servidor,
+)
 
 TASA = Decimal("0.20")  # BR-LOAN-007, tope legal de interés
 
@@ -168,3 +177,53 @@ def test_cronograma_estimado_rechaza_plazo_o_capital_invalidos():
         cronograma_estimado(Decimal("1000"), TASA, 0)
     with pytest.raises(CuotaInalcanzable):
         cronograma_estimado(Decimal("0"), TASA, 12)
+
+
+# ---- Tasa por plazo (BR-LOAN-007, revisado 2026-09-22) --------------------
+#
+# El cliente calcula la tasa por su cuenta para la vista previa y para la
+# "cuota deseada", con una copia manual de la fórmula del servidor (no hay
+# fuente compartida entre los dos procesos). Estas pruebas comparan contra el
+# servidor de verdad, que es el único que decide.
+
+
+@pytest.mark.parametrize("plazo", [1, 3, 6, 9, 11, 12, 18, 24, 36])
+def test_la_tasa_del_cliente_es_la_del_servidor(plazo):
+    assert tasa_vigente(plazo, TASA, 12) == _tasa_vigente_servidor(plazo)
+
+
+@pytest.mark.parametrize("plazo", [1, 3, 6, 9, 12])
+def test_un_plazo_corto_rinde_el_veinte_por_ciento(plazo):
+    """La promesa comercial: ningún plazo rinde menos que uno de 12 meses.
+
+    Se verifica sobre el interés total del cronograma y no sobre la tasa
+    porque la tasa es el medio, no el resultado.
+    """
+    capital = Decimal("1200000")
+    cronograma = calcular_cronograma(capital, tasa_vigente(plazo, TASA, 12), plazo)
+    interes = sum(fila.interes for fila in cronograma)
+
+    assert abs(interes - capital * TASA) < Decimal("300.00")
+
+
+@pytest.mark.parametrize("plazo, proporcion", [(18, "0.30"), (24, "0.40")])
+def test_un_plazo_largo_no_cambio(plazo, proporcion):
+    """El piso es piso, no techo: de 13 meses en adelante todo sigue igual.
+
+    Si alguien copia mal la asimetría (min para la tasa, max para los cargos)
+    esto lo detecta: con `max` en los dos lados, 18 y 24 meses rinden 20% en
+    vez de 30% y 40%.
+    """
+    capital = Decimal("1200000")
+    cronograma = calcular_cronograma(capital, tasa_vigente(plazo, TASA, 12), plazo)
+    interes = sum(fila.interes for fila in cronograma)
+
+    assert abs(interes - capital * Decimal(proporcion)) < Decimal("1.00")
+
+
+@pytest.mark.parametrize("plazo", [1, 6, 12, 18, 24])
+def test_el_tope_de_cargos_del_cliente_es_el_del_servidor(plazo):
+    capital = Decimal("7000000")
+    assert tope_cargos(capital, Decimal("0.40"), plazo, 12) == _tope_cargos_servidor(
+        capital, plazo
+    )

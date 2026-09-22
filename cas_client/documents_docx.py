@@ -17,7 +17,7 @@ from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches, Pt, RGBColor
+from docx.shared import Inches, Mm, Pt, RGBColor
 
 from cas_client import assets, documents, theme
 from cas_client.formatting import (
@@ -239,13 +239,16 @@ def comprobante_pago_docx(loan, client, payment) -> Document:
     """DOCX de documents.py's comprobante_pago_html() -- BR-LOAN-011. Sin
     banner de borrador, mismo criterio que el Cronograma: no tiene texto legal
     a revisar, solo el detalle de un pago ya registrado."""
-    document = Document()
+    document = _nuevo_documento()
     _add_header(document, "Comprobante de Pago")
     _add_client_block(document, client)
     _add_labeled_lines(document, [("Préstamo", loan.id)])
 
     filas = [
-        ("Monto abonado", gs(payment.amount_paid)),
+        # BR-LOAN-017: el desglose de importes sale de documents.filas_cobro,
+        # la misma función que usan el comprobante HTML y el ticket, para que
+        # los tres papeles del mismo cobro no puedan decir cifras distintas.
+        *documents.filas_cobro(payment),
         (
             "Cuota(s) abonada(s)",
             documents.cuotas_cubiertas_texto(
@@ -301,7 +304,7 @@ def ficha_cliente_docx(loan, client) -> Document:
     reúne datos del cliente + referencias + préstamo solicitado en un solo
     papel). Sin banner de borrador ni cláusulas legales, mismo criterio que
     cronograma_docx."""
-    document = Document()
+    document = _nuevo_documento()
     _add_header(document, "Ficha de Cliente — Análisis de Crédito")
 
     _add_section_heading(document, "Datos personales")
@@ -435,19 +438,21 @@ def _add_decision_block(document: Document) -> None:
     condiciones.add_paragraph("Plazo aprobado: ")
     condiciones.add_paragraph("Fecha de la decisión: ")
 
+    # Un párrafo de aire por firma en vez de dos, y uno solo en
+    # observaciones: mismos recortes que la versión HTML, por la misma razón
+    # (la ficha tiene que entrar en una hoja). Queda espacio para firmar sin
+    # empujar el bloque a una segunda página.
     for celda, etiqueta in (
         (tabla.rows[1].cells[0], "Analista que estudió el legajo"),
         (tabla.rows[1].cells[1], "Responsable que autoriza"),
     ):
         celda.text = etiqueta
         celda.add_paragraph("")
-        celda.add_paragraph("")
         celda.add_paragraph("Firma y aclaración: ")
 
     observaciones = tabla.rows[2].cells[0]
     observaciones.merge(tabla.rows[2].cells[1])
     observaciones.text = "Observaciones:"
-    observaciones.add_paragraph("")
     observaciones.add_paragraph("")
 
 
@@ -457,7 +462,7 @@ def reporte_periodo_docx(report, generated_by: str = "") -> Document:
     igual criterio que cronograma_docx.
 
     report: dashboard_service_pb2.GetPeriodReportResponse"""
-    document = Document()
+    document = _nuevo_documento()
     _add_header(document, "Reporte de Cierre de Período")
 
     lineas = [
@@ -506,7 +511,7 @@ def reporte_arqueo_docx(detail, generated_by: str = "") -> Document:
 
     detail: cash_service_pb2.CashSessionDetail
     """
-    document = Document()
+    document = _nuevo_documento()
     _add_header(document, "Arqueo de Caja")
 
     filas = documents._filas_arqueo(detail)
@@ -561,6 +566,22 @@ def reporte_arqueo_docx(detail, generated_by: str = "") -> Document:
     return document
 
 
+def _nuevo_documento() -> Document:
+    """Documento en blanco con la hoja ya declarada en A4.
+
+    La plantilla por defecto de python-docx usa **Carta** (216 × 279 mm), que
+    es 17,6 mm más corta que A4: la Ficha de Cliente, diseñada para A4, se
+    pasaba a una segunda página en el .docx sin importar qué papel tuviera la
+    impresora, porque el tamaño es una propiedad del archivo. Declararlo acá
+    deja los nueve documentos del módulo en la misma hoja que sus versiones
+    PDF (ver cas_client/page_layout.py para por qué A4 y no Oficio).
+    """
+    document = Document()
+    seccion = document.sections[0]
+    seccion.page_width, seccion.page_height = Mm(210), Mm(297)
+    return document
+
+
 def _apaisar(document: Document) -> None:
     """Pasa la hoja a orientación horizontal.
 
@@ -584,7 +605,7 @@ def reporte_estado_pagos_docx(report, generated_by: str = "") -> Document:
     horizontal -- ver dashboard_view.py.
 
     report: dashboard_service_pb2.GetClientPaymentStatusReportResponse"""
-    document = Document()
+    document = _nuevo_documento()
     _apaisar(document)
     _add_header(document, "Estado de Pago de Clientes")
 
@@ -634,7 +655,7 @@ def liquidacion_docx(loan, client, schedule) -> Document:
     """loan: loan_service_pb2.GetLoanByIdResponse
     client: client_service_pb2.GetClientByIdResponse
     schedule: loan_service_pb2.GetAmortizationScheduleResponse"""
-    document = Document()
+    document = _nuevo_documento()
     _add_header(document, "Liquidación de Préstamo")
     _add_client_block(document, client)
 
@@ -714,7 +735,7 @@ def _add_pagare_header(document: Document, loan) -> None:
 
 
 def pagare_docx(loan, client) -> Document:
-    document = Document()
+    document = _nuevo_documento()
     _add_pagare_header(document, loan)
 
     # "DECLARO(AMOS) ADEUDAR A ..." va en negrita como frase de apertura
@@ -793,7 +814,7 @@ def cronograma_docx(loan, client, schedule) -> Document:
     """DOCX de documents.py's cronograma_html() -- ver ese docstring para el
     razonamiento (documento standalone para entregar al cliente, con nombre
     del cliente y asesor responsable)."""
-    document = Document()
+    document = _nuevo_documento()
     _add_header(document, "Cronograma de Pago")
     _add_client_block(document, client)
 
@@ -846,7 +867,7 @@ def cronograma_docx(loan, client, schedule) -> Document:
 
 
 def contrato_docx(loan, client) -> Document:
-    document = Document()
+    document = _nuevo_documento()
     _add_header(document, "Contrato de Préstamo")
 
     intro = document.add_paragraph()

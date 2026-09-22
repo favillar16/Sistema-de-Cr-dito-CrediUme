@@ -50,40 +50,50 @@ def servicer():
     return LoanServicer()
 
 
-# BR-LOAN-007: la tasa dejó de ser un parámetro del préstamo -- CreateLoan
-# solo acepta la estándar (o el campo vacío). Los tests que necesitan otra
-# tasa construyen la fila Loan directamente, como ya hacen varios.
-_TASA_ESTANDAR = str(config.LOAN_FIXED_INTEREST_RATE)
+# Un primer vencimiento válido: futuro respecto de hoy, que es lo que el
+# servidor exige. **Derivado de la fecha actual y no escrito a mano**: acá
+# había un "2026-10-01" literal en cinco lugares, y este archivo se rompía
+# entero el día que el calendario lo alcanzaba (ya pasó una vez, ver
+# CLAUDE.md). Un test no puede caducar.
+_PRIMER_VENCIMIENTO = (date.today() + timedelta(days=30)).isoformat()
 
 
 def _create_loan(
     servicer,
     client_id,
     principal="1000.00",
-    rate=_TASA_ESTANDAR,
+    rate=None,
     term=6,
     **cargos,
 ):
     """Crea un préstamo por la RPC y, si el test pide una tasa distinta a la
-    estándar, se la escribe después directamente en la fila.
+    vigente, se la escribe después directamente en la fila.
 
-    CreateLoan ya no acepta otra tasa (BR-LOAN-007), pero varios tests de
-    aritmética usan `rate="0.00"` justamente para que los montos den redondos y
-    la aserción hable del cobro y no del redondeo del interés. Forzarlos a la
-    tasa real cambiaría lo que esas pruebas verifican; escribir la tasa a mano
-    conserva su intención sin dejar un agujero en la regla.
+    Manda `interest_rate` **vacío**, que es lo que manda el cliente real desde
+    que se le sacó el campo del formulario y significa "la tasa que
+    corresponda". Mandarla explícita ataba el helper a una tasa única, y desde
+    que la tasa depende del plazo (BR-LOAN-007, 2026-09-22) eso hacía que
+    cualquier préstamo de menos de 12 meses fuera rechazado por pedir una tasa
+    que ya no es la suya.
+
+    `rate` sigue existiendo porque varios tests de aritmética usan `"0.00"`
+    justamente para que los montos den redondos y la aserción hable del cobro
+    y no del redondeo del interés. Forzarlos a la tasa real cambiaría lo que
+    esas pruebas verifican; escribir la tasa a mano conserva su intención sin
+    dejar un agujero en la regla. `None` (el caso normal) deja la que asignó
+    el servidor.
     """
     creado = servicer.CreateLoan(
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount=principal,
-            interest_rate=_TASA_ESTANDAR,
+            interest_rate="",
             term_months=term,
             **cargos,
         ),
         FakeContext(),
     )
-    if rate != _TASA_ESTANDAR:
+    if rate is not None:
         with SessionLocal() as session:
             prestamo = session.get(Loan, uuid.UUID(creado.loan_id))
             prestamo.interest_rate = Decimal(rate)
@@ -135,7 +145,7 @@ def test_update_loan_proposal_success_changes_terms(servicer):
             loan_id=loan.loan_id,
             principal_amount="1500.00",
             term_months=9,
-            first_due_date="2026-10-01",
+            first_due_date=_PRIMER_VENCIMIENTO,
         ),
         FakeContext(),
     )
@@ -147,7 +157,7 @@ def test_update_loan_proposal_success_changes_terms(servicer):
     )
     assert fetched.principal_amount == "1500.00"
     assert fetched.term_months == 9
-    assert fetched.first_due_date == "2026-10-01"
+    assert fetched.first_due_date == _PRIMER_VENCIMIENTO
 
 
 def test_update_loan_proposal_non_pending_is_failed_precondition(servicer):
@@ -163,7 +173,7 @@ def test_update_loan_proposal_non_pending_is_failed_precondition(servicer):
                 loan_id=loan.loan_id,
                 principal_amount="1500.00",
                 term_months=9,
-                first_due_date="2026-10-01",
+                first_due_date=_PRIMER_VENCIMIENTO,
             ),
             FakeContext(),
         )
@@ -182,7 +192,7 @@ def test_update_loan_proposal_installment_exceeds_income_ratio_is_failed_precond
                 loan_id=loan.loan_id,
                 principal_amount="1000.00",
                 term_months=12,
-                first_due_date="2026-10-01",
+                first_due_date=_PRIMER_VENCIMIENTO,
             ),
             FakeContext(),
         )
@@ -215,7 +225,7 @@ def test_update_loan_proposal_not_found(servicer):
                 loan_id="00000000-0000-0000-0000-000000000000",
                 principal_amount="1000.00",
                 term_months=6,
-                first_due_date="2026-10-01",
+                first_due_date=_PRIMER_VENCIMIENTO,
             ),
             FakeContext(),
         )
@@ -575,14 +585,17 @@ def test_create_loan_rejects_a_rate_other_than_the_fixed_one(servicer):
 
 def test_create_loan_without_a_rate_uses_the_fixed_one(servicer):
     """El cliente ya no manda tasa (se le sacó el campo del formulario): el
-    campo vacío es la forma normal de pedir la tasa vigente."""
-    client_id = _create_client(declared_monthly_income=Decimal("100000.00"))
+    campo vacío es la forma normal de pedir la tasa vigente.
+
+    A 12 meses o más esa tasa es la de siempre, LOAN_FIXED_INTEREST_RATE.
+    """
+    client_id = _create_client(declared_monthly_income=Decimal("1000000.00"))
 
     creado = servicer.CreateLoan(
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount="1000.00",
-            term_months=6,
+            term_months=12,
         ),
         FakeContext(),
     )
@@ -590,6 +603,79 @@ def test_create_loan_without_a_rate_uses_the_fixed_one(servicer):
         loan_service_pb2.GetLoanByIdRequest(loan_id=creado.loan_id), FakeContext()
     )
     assert Decimal(detalle.interest_rate) == config.LOAN_FIXED_INTEREST_RATE
+
+
+@pytest.mark.parametrize("plazo", [1, 3, 6, 9, 12])
+def test_un_plazo_corto_rinde_el_mismo_interes_que_uno_de_doce_meses(servicer, plazo):
+    """BR-LOAN-007 (revisado 2026-09-22): ningún plazo rinde menos que uno de
+    12 meses.
+
+    La aserción es sobre el **interés total**, no sobre la tasa: la tasa es el
+    medio (sube al acortarse el plazo, porque se aplica mes a mes) y lo que la
+    entidad decidió es el resultado -- un préstamo de 6 meses deja el mismo
+    20% del monto financiado que uno de 12. Verificarlo sobre la tasa dejaría
+    pasar un cambio en la fórmula del cronograma que rompiera la promesa.
+    """
+    client_id = _create_client(declared_monthly_income=Decimal("10000000.00"))
+    creado = _create_loan(servicer, client_id, principal="1200000.00", term=plazo)
+
+    detalle = servicer.GetLoanById(
+        loan_service_pb2.GetLoanByIdRequest(loan_id=creado.loan_id), FakeContext()
+    )
+
+    esperado = Decimal("1200000.00") * config.LOAN_FIXED_INTEREST_RATE
+    # Tolerancia de centavos: la tasa se guarda con 4 decimales (Numeric(6,4)),
+    # así que en los plazos que no dividen a 12 el total queda a centésimas.
+    assert abs(Decimal(detalle.total_interest) - esperado) < Decimal("300.00")
+
+
+def test_un_plazo_largo_sigue_rindiendo_lo_proporcional_al_plazo(servicer):
+    """El piso es un piso, no un techo: de 13 meses en adelante nada cambió.
+
+    Sin esta prueba, implementar el piso con `max()` en vez de `min()` -- el
+    error que efectivamente se cometió al escribirlo -- pasa desapercibido y
+    abarata la cartera larga a la mitad.
+    """
+    client_id = _create_client(declared_monthly_income=Decimal("10000000.00"))
+    creado = _create_loan(servicer, client_id, principal="1200000.00", term=24)
+
+    detalle = servicer.GetLoanById(
+        loan_service_pb2.GetLoanByIdRequest(loan_id=creado.loan_id), FakeContext()
+    )
+
+    assert Decimal(detalle.interest_rate) == config.LOAN_FIXED_INTEREST_RATE
+    # 24 meses al 20% anual = 40% del capital, igual que antes del cambio.
+    assert abs(Decimal(detalle.total_interest) - Decimal("480000.00")) < Decimal("1.00")
+
+
+def test_editar_el_plazo_de_una_propuesta_vuelve_a_tasarla(servicer):
+    """BR-LOAN-007: UpdateLoanProposal re-tasa cuando cambia el plazo.
+
+    Es la única excepción a "UpdateLoanProposal no toca interest_rate", y
+    existe porque sin ella bajar una propuesta de 12 a 6 meses la dejaría
+    cobrando la mitad de interés en silencio -- justo lo que el piso de plazo
+    vino a evitar.
+    """
+    client_id = _create_client(declared_monthly_income=Decimal("10000000.00"))
+    creado = _create_loan(servicer, client_id, principal="1200000.00", term=12)
+
+    servicer.UpdateLoanProposal(
+        loan_service_pb2.UpdateLoanProposalRequest(
+            loan_id=creado.loan_id,
+            principal_amount="1200000.00",
+            term_months=6,
+            first_due_date=(datetime.now(timezone.utc).date()).isoformat(),
+        ),
+        FakeContext(),
+    )
+
+    detalle = servicer.GetLoanById(
+        loan_service_pb2.GetLoanByIdRequest(loan_id=creado.loan_id), FakeContext()
+    )
+    assert detalle.term_months == 6
+    assert Decimal(detalle.interest_rate) == Decimal("0.4000")
+    esperado = Decimal("1200000.00") * config.LOAN_FIXED_INTEREST_RATE
+    assert abs(Decimal(detalle.total_interest) - esperado) < Decimal("1.00")
 
 
 def test_update_loan_charges_rejects_charges_that_break_the_income_cap(servicer):
@@ -1529,7 +1615,7 @@ def test_update_loan_proposal_reports_a_client_without_declared_income(servicer)
                 loan_id=loan.loan_id,
                 principal_amount="1500.00",
                 term_months=9,
-                first_due_date="2026-10-01",
+                first_due_date=_PRIMER_VENCIMIENTO,
             ),
             FakeContext(),
         )

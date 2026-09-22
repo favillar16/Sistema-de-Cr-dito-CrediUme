@@ -636,6 +636,11 @@ class CobroHistorico:
 
     def __init__(self, entry, total_installments: int):
         self.amount_paid = entry.amount
+        # BR-LOAN-017: la mora del historial es la que quedó guardada, no una
+        # recalculada -- ver ListLoanPayments. "" en los cobros anteriores a
+        # la regla, que es lo que `hay_mora()` lee como "no hubo".
+        self.late_fee_amount = entry.late_fee_amount
+        self.total_charged = entry.total_charged
         self.covered_installments = entry.covered_installments
         self.total_installments = total_installments
         self.paid_at = entry.paid_at
@@ -653,6 +658,43 @@ def _es_cero(monto: str) -> bool:
         return Decimal(monto or "0") == Decimal("0")
     except (ArithmeticError, ValueError):
         return False
+
+
+def hay_mora(payment) -> bool:
+    """Si este cobro incluyó mora (BR-LOAN-017).
+
+    Se pregunta por el monto y no por la existencia del campo: los cobros
+    anteriores a la regla lo traen vacío, y los posteriores sin atraso lo
+    traen en cero. En los dos casos el papel no menciona la mora, porque un
+    renglón "Mora: 0 Gs" en un comprobante invita a preguntar por qué está.
+    """
+    valor = getattr(payment, "late_fee_amount", "")
+    if not valor:
+        return False
+    try:
+        return Decimal(valor) > 0
+    except (ArithmeticError, ValueError):
+        return False
+
+
+def filas_cobro(payment) -> list[tuple[str, str]]:
+    """Renglones de importe del comprobante y del ticket (BR-LOAN-017).
+
+    Una sola definición para los dos papeles -- y para sus versiones DOCX --
+    por la misma razón que `filas_medio_de_pago`: son el mismo cobro, y que
+    cada documento arme el desglose por su cuenta es cómo terminan diciendo
+    cosas distintas del mismo dinero.
+
+    Sin mora devuelve un único renglón, idéntico al que había antes de que la
+    mora existiera.
+    """
+    if not hay_mora(payment):
+        return [("Importe abonado", gs(payment.amount_paid))]
+    return [
+        ("Cuota abonada", gs(payment.amount_paid)),
+        ("Mora por atraso", gs(payment.late_fee_amount)),
+        ("Total abonado", gs(payment.total_charged)),
+    ]
 
 
 def es_reimpresion(payment) -> bool:
@@ -687,6 +729,15 @@ def comprobante_pago_html(loan, client, payment) -> str:
         f'<tr><td>{concepto}</td><td align="right">{detalle}</td></tr>'
         for concepto, detalle in filas_medio_de_pago(payment)
     )
+    # BR-LOAN-017: el último renglón de importe va en negrita -- es el total
+    # que el cliente entregó, y con mora no coincide con la cuota.
+    filas_importe = filas_cobro(payment)
+    importe_filas = "".join(
+        f'<tr><td>{concepto}</td><td align="right">'
+        + (f"<b>{detalle}</b>" if indice == len(filas_importe) - 1 else detalle)
+        + "</td></tr>"
+        for indice, (concepto, detalle) in enumerate(filas_importe)
+    )
     saldado = payment.status == "PAID"
     cierre = (
         '<p style="font-weight:700; color:%s;">Con este pago el pr&eacute;stamo '
@@ -713,8 +764,7 @@ def comprobante_pago_html(loan, client, payment) -> str:
       <tr style="background-color:{theme.PRIMARY}; color:white;">
         <th align="left">Concepto</th><th align="right">Detalle</th>
       </tr>
-      <tr><td>Monto abonado</td>
-          <td align="right"><b>{gs(payment.amount_paid)}</b></td></tr>
+      {importe_filas}
       <tr><td>Cuota(s) abonada(s)</td><td align="right">{cuotas}</td></tr>
       <tr><td>Fecha y hora del pago</td><td align="right">{fecha_pago}</td></tr>
       {medio_filas}
@@ -975,8 +1025,8 @@ def _banda(numero: int, titulo: str) -> str:
     de la p&aacute;gina, pero s&iacute; el de una celda (misma raz&oacute;n por la que
     _signature_block usa una tabla)."""
     return f"""
-    <table width="100%" cellspacing="0" cellpadding="4" border="0">
-      <tr><td style="background-color:{_FICHA_BANDA}; font-size:10pt;
+    <table width="100%" cellspacing="0" cellpadding="2" border="0">
+      <tr><td style="background-color:{_FICHA_BANDA}; font-size:8pt;
                      font-weight:700; color:{theme.PRIMARY};">
         {numero}. {titulo}
       </td></tr>
@@ -994,9 +1044,9 @@ def _celda(etiqueta: str, valor: str, ancho: str = "", columnas: int = 1) -> str
     atributo_ancho = f' width="{ancho}"' if ancho else ""
     atributo_colspan = f' colspan="{columnas}"' if columnas > 1 else ""
     return f"""
-    <td{atributo_ancho}{atributo_colspan} valign="top" style="padding:3px 6px;">
-      <span style="font-size:7pt; color:{theme.TEXT_MUTED};">{etiqueta}</span><br/>
-      <span style="font-size:9pt; color:{theme.TEXT_PRIMARY};">{valor or "&mdash;"}</span>
+    <td{atributo_ancho}{atributo_colspan} valign="top" style="padding:1px 6px;">
+      <span style="font-size:6.5pt; color:{theme.TEXT_MUTED};">{etiqueta}:</span>
+      <span style="font-size:8pt; color:{theme.TEXT_PRIMARY};">{valor or "&mdash;"}</span>
     </td>
     """
 
@@ -1016,8 +1066,8 @@ def _casilla(texto: str) -> str:
     return f"""
     <table cellspacing="0" cellpadding="0" border="0"><tr>
       <td width="13" style="border:1px solid {theme.TEXT_PRIMARY};
-                            font-size:10pt;">&nbsp;</td>
-      <td style="padding-left:5px; font-size:9pt;">{texto}</td>
+                            font-size:8pt;">&nbsp;</td>
+      <td style="padding-left:5px; font-size:8pt;">{texto}</td>
     </tr></table>
     """
 
@@ -1026,9 +1076,9 @@ def _renglon_a_completar(etiqueta: str) -> str:
     """Campo en blanco para llenar a mano: etiqueta y l&iacute;nea punteada."""
     return f"""
     <table width="100%" cellspacing="0" cellpadding="0" border="0">
-      <tr><td style="font-size:7pt; color:{theme.TEXT_MUTED};">{etiqueta}</td></tr>
+      <tr><td style="font-size:6.5pt; color:{theme.TEXT_MUTED};">{etiqueta}</td></tr>
       <tr><td style="border-bottom:1px dotted {theme.TEXT_PRIMARY};
-                     height:15px;">&nbsp;</td></tr>
+                     font-size:7pt;">&nbsp;</td></tr>
     </table>
     """
 
@@ -1038,11 +1088,11 @@ def _firma_interna(etiqueta: str) -> str:
     debajo. Los &lt;br/&gt; son el recurso ya conocido para forzar alto -- un
     height= en un &lt;td&gt; lo ignora QTextDocument."""
     return f"""
-    <span style="font-size:7pt; color:{theme.TEXT_MUTED};">{etiqueta}</span>
-    <br/><br/><br/>
+    <span style="font-size:6.5pt; color:{theme.TEXT_MUTED};">{etiqueta}</span>
+    <br/>
     <table width="100%" cellspacing="0" cellpadding="0" border="0">
       <tr><td style="border-bottom:1px solid {theme.TEXT_PRIMARY};">&nbsp;</td></tr>
-      <tr><td style="font-size:7pt; color:{theme.TEXT_MUTED}; padding-top:3px;">
+      <tr><td style="font-size:6.5pt; color:{theme.TEXT_MUTED}; padding-top:3px;">
         Firma y aclaraci&oacute;n</td></tr>
     </table>
     """
@@ -1055,29 +1105,24 @@ def _ficha_encabezado() -> str:
     return f"""
     <table width="100%" cellspacing="0" cellpadding="0" border="0">
       <tr>
-        <td width="120" valign="middle">
-          <img src="{assets.logo_full_data_uri()}" width="100"/>
+        <td width="80" valign="middle">
+          <img src="{assets.logo_full_data_uri()}" width="70"/>
         </td>
         <td valign="middle" align="center">
-          <div style="font-size:13pt; font-weight:700; text-transform:uppercase;
+          <div style="font-size:12pt; font-weight:700; text-transform:uppercase;
                       color:{theme.PRIMARY};">Ficha de cliente</div>
-          <div style="font-size:8pt; color:{theme.TEXT_MUTED};">
+          <div style="font-size:7pt; color:{theme.TEXT_MUTED};">
             An&aacute;lisis previo a la aprobaci&oacute;n del cr&eacute;dito
+            &mdash; {_COMPANY_NAME}, RUC {_COMPANY_RUC},
+            {_COMPANY_ADDRESS}, Cel: {_COMPANY_PHONE}
           </div>
         </td>
-        <td width="150" valign="middle">
+        <td width="140" valign="middle">
           {_renglon_a_completar("Legajo N&deg;")}
-          <span style="font-size:7pt; color:{theme.TEXT_MUTED};">Fecha de
-            emisi&oacute;n</span><br/>
-          <span style="font-size:9pt;">{fecha_hora(datetime.now(timezone.utc))}</span>
+          <span style="font-size:6.5pt; color:{theme.TEXT_MUTED};">Emitida:</span>
+          <span style="font-size:8pt;">{fecha_hora(datetime.now(timezone.utc))}</span>
         </td>
       </tr>
-    </table>
-    <table width="100%" cellspacing="0" cellpadding="0" border="0">
-      <tr><td style="font-size:8pt; color:{theme.TEXT_MUTED}; padding:6px 0 10px 0;">
-        {_COMPANY_NAME} &mdash; RUC: {_COMPANY_RUC} &mdash; {_COMPANY_ADDRESS}
-        &mdash; Cel: {_COMPANY_PHONE}
-      </td></tr>
     </table>
     """
 
@@ -1148,7 +1193,7 @@ def ficha_cliente_html(loan, client) -> str:
     )
 
     referencias = f"""
-    <table width="100%" cellspacing="0" cellpadding="4" border="1"
+    <table width="100%" cellspacing="0" cellpadding="2" border="1"
            style="border-color:{theme.BORDER};">
       <tr style="background-color:{_FICHA_BANDA};">
         <th align="left" width="21%" style="font-size:8pt;">Tipo</th>
@@ -1159,23 +1204,23 @@ def ficha_cliente_html(loan, client) -> str:
       </tr>
       <tr>
         <td style="font-size:9pt;">Referencia personal 1</td>
-        <td style="font-size:9pt;">{client.personal_reference_1_name}</td>
-        <td style="font-size:9pt;">{client.personal_reference_1_relationship}</td>
-        <td style="font-size:9pt;">{client.personal_reference_1_phone}</td>
+        <td style="font-size:8pt;">{client.personal_reference_1_name}</td>
+        <td style="font-size:8pt;">{client.personal_reference_1_relationship}</td>
+        <td style="font-size:8pt;">{client.personal_reference_1_phone}</td>
         <td>{_casilla("S&iacute;")}</td>
       </tr>
       <tr>
         <td style="font-size:9pt;">Referencia personal 2</td>
-        <td style="font-size:9pt;">{client.personal_reference_2_name}</td>
-        <td style="font-size:9pt;">{client.personal_reference_2_relationship}</td>
-        <td style="font-size:9pt;">{client.personal_reference_2_phone}</td>
+        <td style="font-size:8pt;">{client.personal_reference_2_name}</td>
+        <td style="font-size:8pt;">{client.personal_reference_2_relationship}</td>
+        <td style="font-size:8pt;">{client.personal_reference_2_phone}</td>
         <td>{_casilla("S&iacute;")}</td>
       </tr>
       <tr>
         <td style="font-size:9pt;">Referencia laboral</td>
-        <td style="font-size:9pt;">{client.employment_reference_employer}</td>
-        <td style="font-size:9pt;">{client.employment_reference_position}</td>
-        <td style="font-size:9pt;">{client.employment_reference_phone}</td>
+        <td style="font-size:8pt;">{client.employment_reference_employer}</td>
+        <td style="font-size:8pt;">{client.employment_reference_position}</td>
+        <td style="font-size:8pt;">{client.employment_reference_phone}</td>
         <td>{_casilla("S&iacute;")}</td>
       </tr>
     </table>
@@ -1206,11 +1251,11 @@ def ficha_cliente_html(loan, client) -> str:
     )
 
     dictamen = f"""
-    <table width="100%" cellspacing="0" cellpadding="6" border="1"
+    <table width="100%" cellspacing="0" cellpadding="3" border="1"
            style="border-color:{theme.BORDER};">
       <tr>
         <td width="50%" valign="top">
-          <span style="font-size:7pt; color:{theme.TEXT_MUTED};">Dictamen</span>
+          <span style="font-size:6.5pt; color:{theme.TEXT_MUTED};">Dictamen</span>
           {_casilla("Aprobado")}
           {_casilla("Aprobado con modificaciones")}
           {_casilla("Rechazado")}
@@ -1227,8 +1272,8 @@ def ficha_cliente_html(loan, client) -> str:
       </tr>
       <tr>
         <td colspan="2" valign="top">
-          <span style="font-size:7pt; color:{theme.TEXT_MUTED};">Observaciones</span>
-          <br/><br/>
+          <span style="font-size:6.5pt; color:{theme.TEXT_MUTED};">Observaciones</span>
+          <br/>
         </td>
       </tr>
     </table>
@@ -1237,19 +1282,19 @@ def ficha_cliente_html(loan, client) -> str:
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
     {_ficha_encabezado()}
-    {_banda(1, "DATOS GENERALES DEL CLIENTE")}
+    {_banda(1, "DATOS DEL CLIENTE Y SITUACI&Oacute;N FINANCIERA DECLARADA")}
     {generales}
-    {_banda(2, "SITUACI&Oacute;N FINANCIERA DECLARADA")}
     {financiera}
-    {_banda(3, "REFERENCIAS")}
+    {_banda(2, "REFERENCIAS")}
     {referencias}
-    {_banda(4, "CR&Eacute;DITO SOLICITADO")}
+    {_banda(3, "CR&Eacute;DITO SOLICITADO")}
     {credito}
-    {_banda(5, "ESPACIO PARA USO EXCLUSIVO DE " + _COMPANY_NAME)}
+    {_banda(4, "ESPACIO PARA USO EXCLUSIVO DE " + _COMPANY_NAME)}
     {dictamen}
-    {_footer("Ficha generada por el sistema de CREDIMED UME. Uso interno para el "
-             "an&aacute;lisis y la decisi&oacute;n de aprobaci&oacute;n del cr&eacute;dito "
-             "-- no constituye un documento legal ni se entrega al cliente.")}
+    <p style="margin-top:4px; font-size:7pt; color:{theme.TEXT_MUTED};">
+      Uso interno de {_COMPANY_NAME} para decidir el cr&eacute;dito &mdash; no es
+      un documento legal ni se entrega al cliente.
+    </p>
     </body></html>
     """
 

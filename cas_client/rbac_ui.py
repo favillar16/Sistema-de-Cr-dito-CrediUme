@@ -82,6 +82,17 @@ def fixed_interest_rate_percent() -> str:
 # dos procesos).
 MAX_CHARGES_RATIO = Decimal("0.40")
 
+# BR-LOAN-007/006 (revisado 2026-09-22). Piso de plazo para cobrar: un
+# préstamo más corto que un año se cobra como uno de un año, así que ningún
+# plazo rinde menos que 12 meses. Espeja a cas_server/config.py's
+# LOAN_RATE_MIN_TERM_MONTHS. La aritmética concreta (la tasa divide por
+# min(plazo, 12), el tope de cargos multiplica por max(plazo, 12)) vive en
+# loan_math.tasa_vigente/tope_cargos, con la advertencia de por qué son
+# inversas entre sí. **FIXED_INTEREST_RATE dejó de ser la tasa de todos los
+# préstamos**: es la base de la que se deriva la de cada plazo, y un préstamo
+# a 6 meses se guarda a 0,40 anual.
+RATE_MIN_TERM_MONTHS = 12
+
 
 def can_edit_interest_rate(role: str | None) -> bool:
     """Nadie -- la tasa es fija para todos los roles (BR-LOAN-007).

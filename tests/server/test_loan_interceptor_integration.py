@@ -13,7 +13,6 @@ import loan_service_pb2
 import loan_service_pb2_grpc
 import pytest
 
-from cas_server.config import LOAN_FIXED_INTEREST_RATE
 from cas_server.db.base import SessionLocal
 from cas_server.db.models import (
     AuditLog,
@@ -29,11 +28,12 @@ from cas_server.security.passwords import hash_password
 from cas_server.services.auth_service import AuthServicer
 from cas_server.services.loan_service import LoanServicer
 
-# BR-LOAN-007: la tasa que un rol Estándar tiene permitido mandar. Se lee de la
-# config en vez de repetirse a mano acá para que un cambio de tasa (p. ej. el
-# paso de 24% a 18% anual) no rompa media docena de tests que sólo la usaban
-# como "una tasa cualquiera que el servidor debería aceptar".
-_TASA_ESTANDAR = str(LOAN_FIXED_INTEREST_RATE)
+# BR-LOAN-007: lo que manda el cliente real en `interest_rate` desde que se le
+# sacó el campo del formulario -- vacío, o sea "la tasa que corresponda a este
+# plazo". Antes acá iba la tasa fija leída de la config, pero desde que la tasa
+# depende del plazo (revisado 2026-09-22) mandarla explícita rechaza cualquier
+# préstamo de menos de 12 meses, que es el plazo que usan estos tests.
+_TASA_VIGENTE = ""
 
 
 @pytest.fixture
@@ -135,7 +135,7 @@ def test_create_loan_requires_credit_analyst_or_above(stubs):
     solicitud = loan_service_pb2.CreateLoanRequest(
         client_id=str(client_id),
         principal_amount="1000.00",
-        interest_rate=_TASA_ESTANDAR,
+        interest_rate=_TASA_VIGENTE,
         term_months=6,
     )
 
@@ -439,7 +439,7 @@ def test_get_loan_by_id_reports_creating_advisor(stubs):
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount="1000.00",
-            interest_rate=_TASA_ESTANDAR,
+            interest_rate=_TASA_VIGENTE,
             term_months=6,
         ),
         metadata=metadata,
@@ -501,7 +501,7 @@ def test_get_loan_by_id_reports_advisor_personal_data(stubs):
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount="1000.00",
-            interest_rate=_TASA_ESTANDAR,
+            interest_rate=_TASA_VIGENTE,
             term_months=6,
         ),
         metadata=metadata,
@@ -526,7 +526,7 @@ def test_get_loan_by_id_advisor_personal_data_empty_for_legacy_user(stubs):
         loan_service_pb2.CreateLoanRequest(
             client_id=str(client_id),
             principal_amount="1000.00",
-            interest_rate=_TASA_ESTANDAR,
+            interest_rate=_TASA_VIGENTE,
             term_months=6,
         ),
         metadata=metadata,

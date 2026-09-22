@@ -33,6 +33,7 @@ from cas_client.documents import (
     cuotas_cubiertas_texto,
     es_reimpresion,
     filas_medio_de_pago,
+    hay_mora,
     numero_ticket,
     responsable,
 )
@@ -161,9 +162,18 @@ def ticket_cobro_escpos(loan, client, payment) -> bytes:
     partes.append(_fila("Fecha y hora", fecha_pago))
     partes.append(_separador())
 
+    # BR-LOAN-017: con mora, el número grande es el TOTAL entregado y el
+    # desglose va arriba en letra normal. Sin mora queda exactamente como
+    # antes: un solo importe, sin renglones en cero que inviten a preguntar.
+    if hay_mora(payment):
+        partes.append(_fila("Cuota abonada", gs(payment.amount_paid)))
+        partes.append(_fila("Mora por atraso", gs(payment.late_fee_amount)))
+        destacado, etiqueta = payment.total_charged, "TOTAL ABONADO"
+    else:
+        destacado, etiqueta = payment.amount_paid, "MONTO ABONADO"
     partes.append(_DOBLE_ALTO_ANCHO + _NEGRITA_ON)
-    partes.append(_texto("MONTO ABONADO"))
-    partes.append(_centrado(gs(payment.amount_paid)))
+    partes.append(_texto(etiqueta))
+    partes.append(_centrado(gs(destacado)))
     partes.append(_NEGRITA_OFF + _TAMANO_NORMAL)
     partes.append(_separador())
 

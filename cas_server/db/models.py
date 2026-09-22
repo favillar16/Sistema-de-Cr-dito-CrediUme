@@ -321,7 +321,21 @@ class LoanPayment(Base):
     loan_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("loans.id"), nullable=False, index=True
     )
+    # Lo imputado al **cronograma**, y sólo eso. La mora cobrada junto con la
+    # cuota va aparte, en late_fee_amount: si se sumara acá, el préstamo
+    # pasaría a PAID antes de tiempo y toda la imputación FIFO (BR-LOAN-009 a
+    # 011) contaría el recargo como si fuera capital e interés.
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # BR-LOAN-017: mora efectivamente cobrada en este pago. Se **guarda** en
+    # vez de recalcularse porque es un hecho, no una función del cronograma:
+    # recalcularla más tarde daría otro número (la cuota ya está cubierta y no
+    # devenga más) y el comprobante reimpreso contradiría al original -- la
+    # misma razón por la que el pago guarda su propio responsable.
+    # Nullable y sin backfill: los cobros anteriores a la regla no tuvieron
+    # mora y se informan vacíos, mismo criterio que recorded_by_user_id.
+    late_fee_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )
     # Código/número de transferencia, descuento directo o descuento en cuenta
     # específica -- el cobro en efectivo ya no se usa (rol CASHIER fuera de
     # uso), así que loan_service.py exige este dato en la capa de aplicación.
