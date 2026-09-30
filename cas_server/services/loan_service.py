@@ -650,6 +650,10 @@ def _prestamo_a_respuesta(
         created_at=a_marca_tiempo(prestamo.created_at),
         total_paid=str(total_pagado),
         remaining_balance=str(saldo_restante),
+        # BR-LOAN-018: total_paid incluye lo condonado; la ficha lo desglosa.
+        total_discount=str(
+            sum((pago.discount_amount or CERO for pago in prestamo.payments), CERO)
+        ),
         first_due_date=prestamo.first_due_date.isoformat(),
         guarantee_type=prestamo.guarantee_type or "",
         guarantee_amount=(
@@ -1247,13 +1251,33 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
         # recalcula acá mismo a partir del cronograma -- nunca se confía en
         # un `amount` que mande el cliente para ese caso, así el monto
         # registrado siempre es el fijo que corresponde a esa cuota.
-        numero_cuota = request.installment_number
+        #
+        # BR-LOAN-018: la cancelación total tampoco confía en el cliente --
+        # el saldo lo calcula el servidor con la fila bloqueada, y `amount` e
+        # `installment_number` se ignoran. Lo único que decide el operador es
+        # el descuento, y ese se valida contra el saldo más abajo.
+        pago_total = request.pay_in_full
+        descuento_texto = request.discount_amount.strip()
+        if descuento_texto and not pago_total:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "El descuento sólo se admite al cancelar el préstamo en un solo pago",
+            )
+        descuento = (
+            analizar_decimal(descuento_texto, "discount_amount", context).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if descuento_texto
+            else CERO
+        )
+
+        numero_cuota = 0 if pago_total else request.installment_number
         usa_cuota_fija = numero_cuota > 0
-        if not usa_cuota_fija and not request.amount:
+        if not pago_total and not usa_cuota_fija and not request.amount:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "amount es obligatorio")
         monto = (
             None
-            if usa_cuota_fija
+            if usa_cuota_fija or pago_total
             else analizar_decimal(
                 request.amount, "amount", context, permitir_cero=False
             )
@@ -1300,6 +1324,29 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 monto = pendiente
 
             total_programado, total_pagado = _totales_prestamo(prestamo)
+
+            if pago_total:
+                # BR-LOAN-018: se imputa el saldo ENTERO, no el neto del
+                # descuento. Es lo que deja el préstamo en PAID por el mismo
+                # camino que cualquier otro cobro, y lo que hace que la
+                # imputación FIFO (comprobante, historial, mora) cubra todas
+                # las cuotas pendientes sin un caso especial.
+                monto = total_programado - total_pagado
+                if monto <= CERO:
+                    context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "El préstamo no tiene saldo pendiente",
+                    )
+                # Tiene que quedar algo del saldo por cobrar: condonarlo
+                # entero sería castigar la deuda, no cobrarla. La mora nunca
+                # entra en el descuento (se cobra completa, BR-LOAN-017).
+                if descuento >= monto:
+                    context.abort(
+                        grpc.StatusCode.INVALID_ARGUMENT,
+                        f"El descuento debe ser menor que el saldo pendiente "
+                        f"({monto} Gs)",
+                    )
+
             nuevo_total_pagado = total_pagado + monto
 
             # BR-LOAN-017: la mora del atraso se cobra junto con la cuota, y
@@ -1345,6 +1392,9 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 # lo que se imputa al cronograma, y sumarle el recargo haría
                 # que el préstamo se diera por pagado antes de tiempo.
                 late_fee_amount=mora_cobrada,
+                # BR-LOAN-018: NULL (no 0,00) fuera de una cancelación, para
+                # que "sin descuento" y "cobro normal" no se confundan.
+                discount_amount=descuento if pago_total else None,
                 transfer_reference=referencia_transferencia or None,
                 payment_method=medio_pago,
                 paid_at=ahora,
@@ -1381,6 +1431,7 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                         f"medio={medio_pago.value} "
                         f"referencia={referencia_transferencia}"
                         + (f" cuota={numero_cuota}" if usa_cuota_fija else "")
+                        + (f" pago_total=1 descuento={descuento}" if pago_total else "")
                         + (f" caja={sesion_caja.id}" if sesion_caja is not None else "")
                     ),
                     ip_address=ip_remota(context),
@@ -1423,7 +1474,9 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 payment_method=medio_pago.value,
                 payment_id=str(pago.id),
                 late_fee_amount=str(mora_cobrada),
-                total_charged=str(monto + mora_cobrada),
+                total_charged=str(monto - descuento + mora_cobrada),
+                discount_amount=str(descuento),
+                paid_in_full=pago_total,
             )
 
     def ListLoanPayments(self, request, context):
@@ -1492,7 +1545,17 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                             if pago.late_fee_amount is None
                             else str(pago.late_fee_amount)
                         ),
-                        total_charged=str(pago.amount + (pago.late_fee_amount or CERO)),
+                        total_charged=str(
+                            pago.amount
+                            - (pago.discount_amount or CERO)
+                            + (pago.late_fee_amount or CERO)
+                        ),
+                        # BR-LOAN-018: leído de la fila, igual que la mora.
+                        discount_amount=(
+                            ""
+                            if pago.discount_amount is None
+                            else str(pago.discount_amount)
+                        ),
                     )
                 )
             entradas.reverse()

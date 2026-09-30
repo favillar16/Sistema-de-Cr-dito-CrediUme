@@ -32,7 +32,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cas_client import documents, documents_docx, documents_xlsx, printing, theme
+from cas_client import (
+    documents,
+    documents_docx,
+    documents_xlsx,
+    payoff,
+    printing,
+    theme,
+)
 from cas_client.formatting import (
     DISPLAY_DATE_PLACEHOLDER,
     es_fecha_valida,
@@ -450,6 +457,15 @@ class CashView(BaseView):
         # recibir en la mano; el desglose va en _collection_breakdown.
         self._collection_amount.setReadOnly(True)
         selectors.add_widget(amount_field)
+        # BR-LOAN-018: sólo aplica a "Pago total del préstamo". Deshabilitado
+        # y no oculto -- ResponsiveGrid no reacomoda un widget oculto, y es el
+        # mismo criterio que el campo de referencia en efectivo.
+        discount_field, self._collection_discount = labeled_field(
+            "Descuento por pago total (Gs)", "0", input_cls=CurrencyInput
+        )
+        self._collection_discount.setEnabled(False)
+        self._collection_discount.textChanged.connect(self._refresh_collection_total)
+        selectors.add_widget(discount_field)
         reference_field, self._collection_reference = labeled_field(
             "Código/número de transferencia"
         )
@@ -1262,6 +1278,11 @@ class CashView(BaseView):
                 etiqueta,
                 (cuota.installment_number, cuota.amount_due, cuota.late_fee),
             )
+        # BR-LOAN-018: al final y no primero -- lo normal en ventanilla sigue
+        # siendo cobrar la cuota más vieja, que queda elegida por defecto.
+        opcion_total = payoff.payoff_item(response)
+        if opcion_total is not None:
+            self._installment_combo.addItem(*opcion_total)
         hay_pendientes = self._installment_combo.count() > 0
         self._collect_button.setEnabled(hay_pendientes)
         if not hay_pendientes:
@@ -1271,24 +1292,39 @@ class CashView(BaseView):
 
     def _on_installment_changed(self, index: int) -> None:
         data = self._installment_combo.itemData(index)
+        # El descuento es sólo de la cancelación total (BR-LOAN-018): al pasar
+        # a una cuota se borra, para que no viaje escondido en el próximo
+        # pago total que se elija.
+        es_total = payoff.is_pay_in_full(data)
+        self._collection_discount.setEnabled(es_total)
+        if not es_total:
+            self._collection_discount.clear()
+            self._collection_discount.set_error(False)
+        self._refresh_collection_total()
+
+    def _refresh_collection_total(self) -> None:
+        """Monto a recibir + desglose, recalculados al elegir cuota o al
+        escribir el descuento."""
+        data = self._installment_combo.itemData(self._installment_combo.currentIndex())
         if data is None:
             self._collection_amount.clear()
             self._collection_breakdown.hide()
             return
         _numero, monto, mora = data
-        # El campo muestra el TOTAL a recibir (BR-LOAN-017). Mostrar sólo la
-        # cuota dejaría al cajero cobrando de menos y al arqueo corto, porque
-        # el servidor cobra cuota + mora igual.
-        total = Decimal(monto) + (Decimal(mora) if _hay_mora(mora) else Decimal("0"))
+        es_total = payoff.is_pay_in_full(data)
+        descuento = self._collection_discount.raw_value() if es_total else ""
+        # El campo muestra el TOTAL a recibir (BR-LOAN-017/018). Mostrar sólo
+        # la cuota o el saldo dejaría al cajero cobrando otra cifra que la que
+        # registra el servidor, y al arqueo descuadrado.
+        total = payoff.amount_to_collect(monto, mora, descuento)
         self._collection_amount.set_amount(str(total))
-        if _hay_mora(mora):
-            self._collection_breakdown.setText(
-                f"Incluye {gs(mora)} de mora por atraso, además de la cuota de "
-                f"{gs(monto)}."
+        if es_total:
+            self._collection_discount.set_error(
+                payoff.discount_error(descuento, monto) is not None
             )
-            self._collection_breakdown.show()
-        else:
-            self._collection_breakdown.hide()
+        texto = payoff.breakdown_text(monto, mora, descuento, es_total)
+        self._collection_breakdown.setText(texto)
+        self._collection_breakdown.setVisible(bool(texto))
 
     def _on_method_changed(self, _index: int) -> None:
         """En efectivo no hay referencia que pedir (BR-CAJA-004). Se
@@ -1306,7 +1342,14 @@ class CashView(BaseView):
         if data is None:
             self._toast.show_message("Elija la cuota que está abonando.")
             return
-        numero_cuota, _monto, _mora = data
+        numero_cuota, monto, _mora = data
+        es_total = payoff.is_pay_in_full(data)
+        descuento = self._collection_discount.raw_value() if es_total else ""
+        error_descuento = payoff.discount_error(descuento, monto) if es_total else None
+        if error_descuento:
+            self._collection_discount.set_error(True)
+            self._toast.show_message(error_descuento)
+            return
         medio = self._method_combo.currentData()
         referencia = self._collection_reference.text().strip()
         if medio != "EFECTIVO" and not referencia:
@@ -1332,8 +1375,10 @@ class CashView(BaseView):
             self._session.access_token,
             self._selected_loan.id,
             referencia,
-            installment_number=numero_cuota,
+            installment_number=0 if es_total else numero_cuota,
             payment_method=medio,
+            pay_in_full=es_total,
+            discount_amount=descuento,
             on_success=self._on_payment_recorded,
             on_failure=lambda _mensaje: self._collect_button.setEnabled(True),
         )
@@ -1350,7 +1395,14 @@ class CashView(BaseView):
         )
         # El toast dice el TOTAL cobrado, no sólo la cuota: es el número que
         # el cajero acaba de recibir y contra el que va a cuadrar el arqueo.
-        if _hay_mora(payment.late_fee_amount):
+        if payment.paid_in_full:
+            detalle = f"{gs(payment.total_charged)} (pago total"
+            if documents.hay_descuento(payment):
+                detalle += f", descuento {gs(payment.discount_amount)}"
+            if _hay_mora(payment.late_fee_amount):
+                detalle += f", mora {gs(payment.late_fee_amount)}"
+            detalle += ")"
+        elif _hay_mora(payment.late_fee_amount):
             detalle = (
                 f"{gs(payment.total_charged)} ({gs(payment.amount_paid)} de cuota "
                 f"+ {gs(payment.late_fee_amount)} de mora)"
@@ -1421,7 +1473,7 @@ class CashView(BaseView):
             self._payments_table.insertRow(row)
             celdas = (
                 fecha_hora(entry.paid_at.ToDatetime()),
-                gs(entry.amount),
+                payoff.history_amount_text(entry),
                 gs(entry.late_fee_amount) if _hay_mora(entry.late_fee_amount) else "—",
                 documents.cuotas_cubiertas_texto(
                     entry.covered_installments, response.total_installments

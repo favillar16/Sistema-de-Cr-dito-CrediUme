@@ -454,6 +454,8 @@ class LoanServiceClient:
         installment_number: int = 0,
         amount: str = "",
         payment_method: str = "",
+        pay_in_full: bool = False,
+        discount_amount: str = "",
     ) -> loan_service_pb2.RecordPaymentResponse:
         """`installment_number` (BR-LOAN-010) is the normal path from the UI
         now -- the server recalculates and enforces the fixed amount owed
@@ -465,6 +467,10 @@ class LoanServiceClient:
         `payment_method` (BR-CAJA-004) is "EFECTIVO" or "TRANSFERENCIA"; an
         empty string means TRANSFERENCIA server-side. EFECTIVO needs an open
         cash session for the logged-in user and ignores transfer_reference.
+
+        `pay_in_full` (BR-LOAN-018) settles the whole loan: the server computes
+        the balance itself and ignores `amount`/`installment_number`.
+        `discount_amount` is only accepted together with it.
         """
         return _invoke(
             self._stub.RecordPayment,
@@ -474,6 +480,8 @@ class LoanServiceClient:
                 transfer_reference=transfer_reference,
                 installment_number=installment_number,
                 payment_method=payment_method,
+                pay_in_full=pay_in_full,
+                discount_amount=discount_amount,
             ),
             access_token=access_token,
             error_cls=ApiError,

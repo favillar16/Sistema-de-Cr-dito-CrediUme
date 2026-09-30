@@ -32,7 +32,10 @@ from cas_client.documents import (
     _COMPANY_RUC,
     cuotas_cubiertas_texto,
     es_reimpresion,
+    etiqueta_total_pagado,
+    filas_cobro,
     filas_medio_de_pago,
+    hay_descuento,
     hay_mora,
     numero_ticket,
     responsable,
@@ -165,9 +168,12 @@ def ticket_cobro_escpos(loan, client, payment) -> bytes:
     # BR-LOAN-017: con mora, el número grande es el TOTAL entregado y el
     # desglose va arriba en letra normal. Sin mora queda exactamente como
     # antes: un solo importe, sin renglones en cero que inviten a preguntar.
-    if hay_mora(payment):
-        partes.append(_fila("Cuota abonada", gs(payment.amount_paid)))
-        partes.append(_fila("Mora por atraso", gs(payment.late_fee_amount)))
+    # BR-LOAN-018: con descuento, igual -- el desglose arriba (sale de
+    # filas_cobro, la misma fuente que el A4) y el total entregado en grande.
+    if hay_mora(payment) or hay_descuento(payment):
+        *desglose, _total = filas_cobro(payment)
+        for concepto, valor in desglose:
+            partes.append(_fila(concepto, valor))
         destacado, etiqueta = payment.total_charged, "TOTAL ABONADO"
     else:
         destacado, etiqueta = payment.amount_paid, "MONTO ABONADO"
@@ -179,7 +185,7 @@ def ticket_cobro_escpos(loan, client, payment) -> bytes:
 
     for concepto, valor in filas_medio_de_pago(payment):
         partes.append(_fila(concepto, valor))
-    partes.append(_fila("Total pagado del préstamo", gs(payment.total_paid)))
+    partes.append(_fila(etiqueta_total_pagado(payment), gs(payment.total_paid)))
     partes.append(_fila("Saldo restante", gs(payment.remaining_balance), negrita=True))
     if payment.status == "PAID":
         partes.append(_centrado_negrita("PRÉSTAMO TOTALMENTE CANCELADO"))

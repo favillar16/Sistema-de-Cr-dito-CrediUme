@@ -65,7 +65,8 @@ _CRONOGRAMA = SimpleNamespace(
     installments=[
         _cuota(1, "240000.00", "1064.00"),
         _cuota(2, "240000.00", "0.00"),
-    ]
+    ],
+    remaining_balance="480000.00",
 )
 
 
@@ -115,7 +116,10 @@ def test_la_caja_cobra_cuota_mas_mora(caja):
 
 def test_la_caja_no_menciona_la_mora_cuando_no_hay(caja):
     caja._on_schedule_loaded(
-        SimpleNamespace(installments=[_cuota(2, "240000.00", "0.00")])
+        SimpleNamespace(
+            installments=[_cuota(2, "240000.00", "0.00")],
+            remaining_balance="240000.00",
+        )
     )
 
     assert _monto(caja._collection_amount) == Decimal("240000.00")
@@ -163,7 +167,10 @@ def test_el_detalle_del_prestamo_cobra_cuota_mas_mora(prestamos):
 
 def test_el_detalle_no_menciona_la_mora_cuando_no_hay(prestamos):
     prestamos._on_pending_installments_loaded(
-        SimpleNamespace(installments=[_cuota(2, "240000.00", "0.00")])
+        SimpleNamespace(
+            installments=[_cuota(2, "240000.00", "0.00")],
+            remaining_balance="240000.00",
+        )
     )
 
     assert _monto(prestamos._payment_amount_display) == Decimal("240000.00")

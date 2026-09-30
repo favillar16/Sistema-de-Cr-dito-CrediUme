@@ -556,6 +556,36 @@ def test_cash_payment_posts_an_income_movement_to_the_open_session(stubs):
     assert movimiento.loan_payment_id
 
 
+def test_cashier_pays_a_loan_in_full_with_a_discount_and_the_till_gets_the_net(stubs):
+    """BR-LOAN-018 + BR-CAJA-004: un CASHIER (mismo tier que RecordPayment)
+    cancela en efectivo con descuento; el préstamo queda PAID y a la caja
+    entra sólo lo que se recibió, no el saldo entero que se imputó."""
+    auth_stub, cash_stub, loan_stub = stubs
+    metadata = _cajero(auth_stub)
+    _abrir(cash_stub, metadata, "100000.00")
+    loan_id = _crear_prestamo_activo()
+
+    pago = loan_stub.RecordPayment(
+        loan_service_pb2.RecordPaymentRequest(
+            loan_id=str(loan_id),
+            payment_method="EFECTIVO",
+            pay_in_full=True,
+            discount_amount="50.00",
+        ),
+        metadata=metadata,
+    )
+
+    assert pago.status == "PAID"
+    assert pago.paid_in_full is True
+    neto = Decimal(pago.amount_paid) - Decimal("50.00")
+    assert Decimal(pago.total_charged) == neto
+    detalle = cash_stub.GetCurrentCashSession(
+        cash_service_pb2.GetCurrentCashSessionRequest(), metadata=metadata
+    ).session
+    assert Decimal(detalle.total_loan_collections) == neto
+    assert Decimal(detalle.expected_amount) == Decimal("100000.00") + neto
+
+
 def test_cash_payment_does_not_require_a_transfer_reference(stubs):
     """En efectivo no hay número de transferencia que pedir; exigir uno solo
     llevaría a inventarlo."""

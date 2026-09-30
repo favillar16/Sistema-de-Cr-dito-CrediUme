@@ -215,7 +215,11 @@ class DashboardServicer(dashboard_service_pb2_grpc.DashboardServiceServicer):
                 for pago in sesion.query(LoanPayment).all()
                 if _en_rango(pago.paid_at, desde, hasta)
             ]
-            total_cobrado = sum((pago.amount for pago in pagos), CERO)
+            # BR-LOAN-018: el descuento de una cancelación se imputó al
+            # cronograma pero no se cobró -- no es dinero que haya entrado.
+            total_cobrado = sum(
+                (pago.amount - (pago.discount_amount or CERO) for pago in pagos), CERO
+            )
 
             return dashboard_service_pb2.GetPeriodReportResponse(
                 start_date=fecha_inicio.isoformat(),

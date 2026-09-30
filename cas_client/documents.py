@@ -302,6 +302,7 @@ def liquidacion_html(loan, client, schedule) -> str:
         f"<td>{gs(i.remaining_balance)}</td></tr>"
         for i in schedule.installments
     )
+    pagado_etiqueta, pagado_valor = fila_total_pagado_prestamo(loan)  # BR-LOAN-018
     return f"""
     <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
     {_header("Liquidaci&oacute;n de Pr&eacute;stamo")}
@@ -315,7 +316,7 @@ def liquidacion_html(loan, client, schedule) -> str:
     ({rate_percent_mensual(loan.interest_rate)} mensual sobre el monto
     original)<br/>
     <b>Plazo:</b> {loan.term_months} meses<br/>
-    <b>Total pagado:</b> {gs(loan.total_paid)}<br/>
+    <b>{pagado_etiqueta}:</b> {pagado_valor}<br/>
     <b>Saldo restante:</b> {gs(loan.remaining_balance)}</p>
     {_cargos_y_garantia_block(loan)}
     <h3 style="color:{theme.PRIMARY};">Cronograma de amortizaci&oacute;n</h3>
@@ -641,6 +642,11 @@ class CobroHistorico:
         # la regla, que es lo que `hay_mora()` lee como "no hubo".
         self.late_fee_amount = entry.late_fee_amount
         self.total_charged = entry.total_charged
+        # BR-LOAN-018: leído de la fila como la mora. Una cancelación se
+        # reconoce por el descuento guardado (o por dejar saldo cero, que el
+        # papel ya dice con "PRÉSTAMO TOTALMENTE CANCELADO").
+        self.discount_amount = entry.discount_amount
+        self.paid_in_full = hay_descuento(entry)
         self.covered_installments = entry.covered_installments
         self.total_installments = total_installments
         self.paid_at = entry.paid_at
@@ -677,24 +683,75 @@ def hay_mora(payment) -> bool:
         return False
 
 
+def hay_descuento(payment) -> bool:
+    """Si este cobro fue una cancelación con descuento (BR-LOAN-018). Mismo
+    criterio que `hay_mora`: un renglón "Descuento: 0 Gs" no se imprime."""
+    valor = getattr(payment, "discount_amount", "")
+    if not valor:
+        return False
+    try:
+        return Decimal(valor) > 0
+    except (ArithmeticError, ValueError):
+        return False
+
+
+def fila_total_pagado_prestamo(loan) -> tuple[str, str]:
+    """Renglón "Total pagado" de la ficha del préstamo (Liquidación PDF/DOCX).
+
+    `loan.total_paid` es lo imputado al cronograma: en un préstamo cancelado
+    con descuento (BR-LOAN-018) incluye la parte condonada. Sin descuento el
+    renglón queda exactamente como antes. Sin acentos a propósito: sirve tal
+    cual para el HTML y para el DOCX.
+    """
+    descuento = getattr(loan, "total_discount", "")
+    try:
+        hubo_descuento = bool(descuento) and Decimal(descuento) > 0
+    except (ArithmeticError, ValueError):
+        hubo_descuento = False
+    if not hubo_descuento:
+        return "Total pagado", gs(loan.total_paid)
+    incluye = f"incluye {gs(descuento)} de descuento por pago total"
+    return "Total cancelado", f"{gs(loan.total_paid)} ({incluye})"
+
+
+def etiqueta_total_pagado(payment, html: bool = False) -> str:
+    """Rótulo del acumulado del préstamo en los papeles de cobro.
+
+    Con descuento (BR-LOAN-018) el acumulado incluye la parte condonada --
+    es lo imputado al cronograma --, así que "pagado" diría que el cliente
+    entregó más de lo que entregó.
+    """
+    verbo = "cancelado" if hay_descuento(payment) else "pagado"
+    prestamo = "pr&eacute;stamo" if html else "préstamo"
+    return f"Total {verbo} del {prestamo}"
+
+
 def filas_cobro(payment) -> list[tuple[str, str]]:
-    """Renglones de importe del comprobante y del ticket (BR-LOAN-017).
+    """Renglones de importe del comprobante y del ticket (BR-LOAN-017/018).
 
     Una sola definición para los dos papeles -- y para sus versiones DOCX --
     por la misma razón que `filas_medio_de_pago`: son el mismo cobro, y que
     cada documento arme el desglose por su cuenta es cómo terminan diciendo
     cosas distintas del mismo dinero.
 
-    Sin mora devuelve un único renglón, idéntico al que había antes de que la
-    mora existiera.
+    Sin mora ni descuento devuelve un único renglón, idéntico al que había
+    antes de que existieran. El último renglón es siempre lo que el cliente
+    entregó (el ticket lo imprime en grande).
     """
-    if not hay_mora(payment):
+    if not hay_mora(payment) and not hay_descuento(payment):
         return [("Importe abonado", gs(payment.amount_paid))]
-    return [
-        ("Cuota abonada", gs(payment.amount_paid)),
-        ("Mora por atraso", gs(payment.late_fee_amount)),
-        ("Total abonado", gs(payment.total_charged)),
+    filas = [
+        (
+            "Saldo cancelado" if hay_descuento(payment) else "Cuota abonada",
+            gs(payment.amount_paid),
+        )
     ]
+    if hay_descuento(payment):
+        filas.append(("Descuento por pago total", "- " + gs(payment.discount_amount)))
+    if hay_mora(payment):
+        filas.append(("Mora por atraso", gs(payment.late_fee_amount)))
+    filas.append(("Total abonado", gs(payment.total_charged)))
+    return filas
 
 
 def es_reimpresion(payment) -> bool:
@@ -768,7 +825,7 @@ def comprobante_pago_html(loan, client, payment) -> str:
       <tr><td>Cuota(s) abonada(s)</td><td align="right">{cuotas}</td></tr>
       <tr><td>Fecha y hora del pago</td><td align="right">{fecha_pago}</td></tr>
       {medio_filas}
-      <tr><td>Total pagado del pr&eacute;stamo</td>
+      <tr><td>{etiqueta_total_pagado(payment, html=True)}</td>
           <td align="right">{gs(payment.total_paid)}</td></tr>
       <tr><td>Saldo restante</td>
           <td align="right"><b>{gs(payment.remaining_balance)}</b></td></tr>
@@ -949,11 +1006,21 @@ def ticket_cobro_html(loan, client, payment) -> str:
     detalle_pago = _ticket_filas(
         list(filas_medio_de_pago(payment))
         + [
-            ("Total pagado del pr&eacute;stamo", gs(payment.total_paid)),
+            (etiqueta_total_pagado(payment, html=True), gs(payment.total_paid)),
             ("Saldo restante", gs(payment.remaining_balance)),
         ],
         destacar_ultima=True,
     )
+    # Mismo criterio que el ticket ESC/POS (escpos.ticket_cobro_escpos): con
+    # mora o descuento (BR-LOAN-017/018) el desglose va arriba y el número
+    # grande es lo que el cliente entregó, no lo imputado al cronograma.
+    if hay_mora(payment) or hay_descuento(payment):
+        *filas_desglose, _total = filas_cobro(payment)
+        desglose_importe = _ticket_filas(filas_desglose)
+        importe_destacado, etiqueta_importe = payment.total_charged, "TOTAL ABONADO"
+    else:
+        desglose_importe = ""
+        importe_destacado, etiqueta_importe = payment.amount_paid, "MONTO ABONADO"
     cierre = (
         '<p style="text-align:center; font-size:8pt; font-weight:700; '
         'margin:6px 0 0 0;">PR&Eacute;STAMO TOTALMENTE CANCELADO</p>'
@@ -983,11 +1050,12 @@ def ticket_cobro_html(loan, client, payment) -> str:
     {_ticket_separador()}
     {datos_prestamo}
     {_ticket_separador()}
+    {desglose_importe}
     <table width="100%" cellspacing="0" cellpadding="1" border="0">
       <tr>
-        <td style="font-size:10pt; font-weight:700;">MONTO ABONADO</td>
+        <td style="font-size:10pt; font-weight:700;">{etiqueta_importe}</td>
         <td align="right" style="font-size:13pt; font-weight:700;">
-          {gs(payment.amount_paid)}
+          {gs(importe_destacado)}
         </td>
       </tr>
     </table>

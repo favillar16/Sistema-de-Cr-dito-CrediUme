@@ -101,6 +101,9 @@ def _cobrar(vista, loan):
             # que estas pruebas de estado de sesión ejercitan.
             late_fee_amount="0.00",
             total_charged="100000.00",
+            # BR-LOAN-018: un cobro por cuota, no una cancelación.
+            discount_amount="0.00",
+            paid_in_full=False,
         )
     )
 

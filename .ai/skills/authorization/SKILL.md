@@ -36,7 +36,9 @@ mapped per RPC method:
     `CREDIT_ANALYST_AND_ABOVE`, while lookup, `RecordPayment`,
     `ListLoanPayments` (`BR-LOAN-016` — the teller is who gets asked
     "¿ya pagué?") and the whole of `CashService` stay
-    `CASHIER_AND_ABOVE`. This was an
+    `CASHIER_AND_ABOVE`. The early payoff with discount (`BR-LOAN-018`)
+    is a mode of `RecordPayment`, not a new RPC, so it deliberately has
+    the same tier — the entity chose to let the teller grant it. This was an
     earlier-model-corrected change: those origination methods used to
     be `CASHIER_AND_ABOVE` back when nobody had the role.
 -   The two dashboard reports sit at **different** tiers on purpose:

@@ -93,6 +93,12 @@ Dos decisiones estructurales atraviesan el módulo:
     exactamente por la mora cobrada, y el faltante aparecería como un error del
     cajero.
 
+    **Y resta el descuento de una cancelación (BR-LOAN-018, desde
+    2026-09-30).** En el pago total `amount` es el saldo entero, pero por la
+    ventanilla entró el saldo menos el descuento: el movimiento imputa
+    `amount - discount_amount + late_fee_amount`. Contar el saldo entero
+    dejaría el arqueo sobrando exactamente el descuento.
+
 *   **BR-CAJA-005 (Alcance del rol Cajero):** el cajero es un puesto de
     **ventanilla, no de originación**. Cuando el rol volvió a usarse, las RPC de
     alta y edición subieron a `CREDIT_ANALYST_AND_ABOVE`:

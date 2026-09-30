@@ -103,6 +103,18 @@ Maneja el ciclo de vida completo de un préstamo: Solicitud, Aprobación, Desemb
 
     **La caducidad de plazos de la cláusula (3 cuotas vencidas) sigue siendo manual**, tal como está redactada: "facultará a CREDIMED UME a exigir el total adeudado". Nada declara el vencimiento anticipado de forma automática; para eso está `MarkDefaulted`, que es una decisión de un operador.
 
+*   **BR-LOAN-018 (Cancelación en un solo pago con descuento):** Un préstamo `ACTIVE` se puede cancelar entero en un único cobro, con un **descuento en guaraníes que decide el operador** (sin porcentaje ni tabla; decisión de la entidad, 2026-09-30). No es una RPC nueva sino un modo de `RecordPayment` (`pay_in_full` + `discount_amount`), así que lo puede hacer **el mismo rol que cobra (Cajero o superior)**, en efectivo o por transferencia, y con las mismas reglas de medio de pago y caja.
+
+    **El saldo lo calcula el servidor**, con la fila del préstamo bloqueada, e ignora `amount` e `installment_number` -- el mismo criterio que BR-LOAN-010. Lo único que decide el operador es el descuento.
+
+    **Tres límites, decididos por la entidad:** (1) **la mora no se descuenta** -- la de las cuotas vencidas se cobra completa, igual que en un cobro por cuota (BR-LOAN-017); el descuento se aplica sólo al saldo. (2) **El descuento tiene que ser menor que el saldo**: tiene que quedar algo por cobrar, porque condonar el saldo entero sería castigar la deuda, no cobrarla (`INVALID_ARGUMENT`). (3) **No se pide motivo**: queda auditado quién lo concedió y por cuánto (`PRESTAMO_PAGO_REGISTRADO … pago_total=1 descuento=…`). Un descuento sin `pay_in_full` se rechaza.
+
+    **`amount` guarda el saldo ENTERO, y el descuento va aparte** (`loan_payments.discount_amount`). Así el préstamo pasa a `PAID` por el mismo camino que cualquier otro cobro y la imputación FIFO (comprobante, historial, mora) cubre todas las cuotas pendientes sin un caso especial. Lo que el cliente entregó es `amount - discount_amount + late_fee_amount` (`total_charged`), y eso es lo que imputa **el movimiento de caja** y lo que suma el total cobrado del **reporte de período** (BR-DASH-002): el descuento se imputó, pero no entró.
+
+    **El descuento se guarda, no se reconstruye** -- es una decisión del operador, no una función del cronograma --, igual que la mora cobrada, y el historial de BR-LOAN-016 lo devuelve tal cual para que el comprobante reimpreso diga lo mismo que el original. Nullable y sin backfill: ningún cobro anterior tuvo descuento.
+
+    **Del lado del cliente**, las dos entradas de cobro (Caja y detalle del préstamo) ofrecen "Pago total del préstamo" al final del combo de cuotas y muestran saldo − descuento + mora antes de confirmar; los papeles de cobro desglosan saldo cancelado, descuento, mora y total abonado, y rotulan el acumulado "Total cancelado" en vez de "Total pagado", porque incluye la parte condonada. Por el mismo motivo `GetLoanByIdResponse` informa `total_discount` (suma de los descuentos del préstamo), y la ficha del préstamo -- pantalla de detalle, Liquidación PDF/DOCX, cronograma e historial de cobros -- aclara el descuento junto al total en vez de presentarlo como cobrado.
+
 *   **Medio de pago (BR-CAJA-004, definido en `specs/cash/README`):** `RecordPayment` acepta `payment_method` = `EFECTIVO` | `TRANSFERENCIA`. `TRANSFERENCIA` -- y también el valor vacío, por compatibilidad con los clientes anteriores a la caja -- exige `transfer_reference`, que es el único rastro del cobro cuando no pasa por ventanilla. `EFECTIVO` no la pide y en cambio exige un **turno de caja abierto** del operador, donde genera un movimiento de ingreso vinculado al pago. La regla completa vive en `specs/cash/README`; acá queda anotada porque cambia el contrato de `RecordPayment`.
 
 ## 3. Modelo de Datos (PostgreSQL)
@@ -128,6 +140,7 @@ Maneja el ciclo de vida completo de un préstamo: Solicitud, Aprobación, Desemb
 *   `paid_at` (Timestamp)
 *   `recorded_by_user_id` (UUID, FK -> users.id, nullable) - Operador que registró el cobro (BR-LOAN-016); nullable y sin backfill, los pagos anteriores se leen como "sin responsable registrado"
 *   `late_fee_amount` (Decimal, nullable) - Mora efectivamente cobrada en ese pago (BR-LOAN-017), **separada de `amount`**, que sigue siendo sólo lo imputado al cronograma; nullable y sin backfill, los cobros anteriores a la regla se informan vacíos
+*   `discount_amount` (Decimal, nullable) - Descuento concedido al cancelar el préstamo en un solo pago (BR-LOAN-018). En ese cobro `amount` es el saldo entero y lo recibido es `amount - discount_amount + late_fee_amount`; NULL en todo cobro que no sea una cancelación
 
 **Tabla: `loan_installment_adjustments`** (BR-LOAN-008)
 *   `id` (UUID, PK)

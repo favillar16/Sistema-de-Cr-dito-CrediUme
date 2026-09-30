@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cas_client import documents, documents_docx, printing, theme
+from cas_client import documents, documents_docx, payoff, printing, theme
 from cas_client.formatting import (
     DISPLAY_DATE_PLACEHOLDER,
     es_fecha_valida,
@@ -1531,6 +1531,7 @@ class LoansView(BaseView):
         # crédito, total a pagar, a desembolsar) que se parecen entre sí, y
         # confundirlos es cobrarle mal al cliente.
         self._detail_amount_labels: dict[str, QLabel] = {}
+        self._detail_amount_captions: dict[str, QLabel] = {}
         amounts = ResponsiveGrid(min_cell_width=180, spacing=8)
         for field_name, label_text, destacada in _SUMMARY_ROWS:
             cell = QWidget()
@@ -1553,6 +1554,7 @@ class LoansView(BaseView):
             )
             column.addWidget(value)
             self._detail_amount_labels[field_name] = value
+            self._detail_amount_captions[field_name] = caption
             amounts.add_widget(cell)
         summary.addWidget(amounts)
 
@@ -1646,6 +1648,16 @@ class LoansView(BaseView):
         # _payment_breakdown, debajo de la fila.
         self._payment_amount_display.setReadOnly(True)
         payment_row.add_widget(amount_field)
+
+        # BR-LOAN-018: sólo con "Pago total del préstamo". Deshabilitado y no
+        # oculto, mismo criterio (y mismo motivo) que en la tarjeta de cobro
+        # de CashView.
+        discount_field, self._payment_discount_input = labeled_field(
+            "Descuento por pago total (Gs)", "0", input_cls=CurrencyInput
+        )
+        self._payment_discount_input.setEnabled(False)
+        self._payment_discount_input.textChanged.connect(self._refresh_payment_total)
+        payment_row.add_widget(discount_field)
 
         # BR-CAJA-004: el efectivo volvió a ser un medio de cobro válido, y se
         # imputa a la caja abierta del operador. El campo de referencia solo
@@ -1890,6 +1902,11 @@ class LoansView(BaseView):
                         else f"color: {theme.TEXT_MUTED};"
                     )
                 )
+        # BR-LOAN-018: con descuento, total_paid incluye lo condonado. Misma
+        # fila (y mismo texto) que la Liquidación, para que no discrepen.
+        pagado_etiqueta, pagado_valor = documents.fila_total_pagado_prestamo(loan)
+        self._detail_amount_captions["total_paid"].setText(pagado_etiqueta)
+        self._detail_amount_labels["total_paid"].setText(pagado_valor)
         self._detail_charges_breakdown.setText(_charges_breakdown_text(loan))
 
         puede_pagare_contrato = loan.status in ("APPROVED", "ACTIVE", "PAID")
@@ -2197,6 +2214,10 @@ class LoansView(BaseView):
                     installment.late_fee,
                 ),
             )
+        # BR-LOAN-018: al final, igual que en CashView.
+        opcion_total = payoff.payoff_item(response)
+        if opcion_total is not None:
+            self._payment_installment_combo.addItem(*opcion_total)
         has_pending = self._payment_installment_combo.count() > 0
         self._record_payment_button.setEnabled(
             has_pending and self._record_payment_button.isEnabled()
@@ -2219,26 +2240,39 @@ class LoansView(BaseView):
 
     def _on_payment_installment_changed(self, index: int) -> None:
         data = self._payment_installment_combo.itemData(index)
+        # El descuento es sólo de la cancelación total (BR-LOAN-018): al pasar
+        # a una cuota se borra, para que no viaje escondido después.
+        es_total = payoff.is_pay_in_full(data)
+        self._payment_discount_input.setEnabled(es_total)
+        if not es_total:
+            self._payment_discount_input.clear()
+            self._payment_discount_input.set_error(False)
+        self._refresh_payment_total()
+
+    def _refresh_payment_total(self) -> None:
+        data = self._payment_installment_combo.itemData(
+            self._payment_installment_combo.currentIndex()
+        )
         if data is None:
             self._payment_amount_display.clear()
             self._payment_breakdown.hide()
             return
         _numero, monto_pendiente, mora = data
-        # El campo muestra el TOTAL que el servidor va a registrar: cuota más
-        # la mora devengada (BR-LOAN-017). Mostrar sólo la cuota dejaría al
-        # operador confirmando un monto distinto del que se cobra.
-        total = Decimal(monto_pendiente) + (
-            Decimal(mora) if _es_monto_positivo(mora) else Decimal("0")
-        )
+        es_total = payoff.is_pay_in_full(data)
+        descuento = self._payment_discount_input.raw_value() if es_total else ""
+        # El campo muestra el TOTAL que el servidor va a registrar: monto
+        # menos descuento más la mora devengada (BR-LOAN-017/018). Mostrar
+        # otra cifra dejaría al operador confirmando un monto distinto del que
+        # se cobra.
+        total = payoff.amount_to_collect(monto_pendiente, mora, descuento)
         self._payment_amount_display.set_amount(str(total))
-        if _es_monto_positivo(mora):
-            self._payment_breakdown.setText(
-                f"Incluye {gs(mora)} de mora por atraso, además de la cuota de "
-                f"{gs(monto_pendiente)}."
+        if es_total:
+            self._payment_discount_input.set_error(
+                payoff.discount_error(descuento, monto_pendiente) is not None
             )
-            self._payment_breakdown.show()
-        else:
-            self._payment_breakdown.hide()
+        texto = payoff.breakdown_text(monto_pendiente, mora, descuento, es_total)
+        self._payment_breakdown.setText(texto)
+        self._payment_breakdown.setVisible(bool(texto))
 
     def _on_record_payment(self) -> None:
         index = self._payment_installment_combo.currentIndex()
@@ -2246,7 +2280,14 @@ class LoansView(BaseView):
         if data is None:
             self._toast.show_message("No hay cuotas pendientes para registrar un pago.")
             return
-        numero_cuota, _monto, _mora = data
+        numero_cuota, monto, _mora = data
+        es_total = payoff.is_pay_in_full(data)
+        descuento = self._payment_discount_input.raw_value() if es_total else ""
+        error_descuento = payoff.discount_error(descuento, monto) if es_total else None
+        if error_descuento:
+            self._payment_discount_input.set_error(True)
+            self._toast.show_message(error_descuento)
+            return
         medio = self._payment_method_combo.currentData()
         reference = self._payment_reference_input.text().strip()
         # BR-CAJA-004: en efectivo no hay referencia que pedir -- la
@@ -2267,8 +2308,10 @@ class LoansView(BaseView):
             self._client.record_payment,
             self._selected_loan_id,
             reference,
-            installment_number=numero_cuota,
+            installment_number=0 if es_total else numero_cuota,
             payment_method=medio,
+            pay_in_full=es_total,
+            discount_amount=descuento,
             on_success=self._on_payment_recorded,
             on_failure=lambda _mensaje: self._record_payment_button.setEnabled(True),
         )
@@ -2288,6 +2331,23 @@ class LoansView(BaseView):
             if _es_monto_positivo(response.late_fee_amount)
             else ""
         )
+        # BR-LOAN-018: el monto imputado es el saldo entero; lo que se recibió
+        # es otro número, y el operador tiene que verlo.
+        if response.paid_in_full:
+            mora = (
+                f" Préstamo cancelado: se recibieron {gs(response.total_charged)}"
+                + (
+                    f" con un descuento de {gs(response.discount_amount)}"
+                    if _es_monto_positivo(response.discount_amount)
+                    else ""
+                )
+                + (
+                    f" (incluye {gs(response.late_fee_amount)} de mora)"
+                    if _es_monto_positivo(response.late_fee_amount)
+                    else ""
+                )
+                + "."
+            )
         # _on_action_success recarga el detalle, que es lo que re-habilita la
         # fila del comprobante en la tarjeta de Documentos.
         self._on_action_success(
@@ -2330,7 +2390,7 @@ class LoansView(BaseView):
             self._payments_table.insertRow(row)
             celdas = (
                 fecha_hora(entry.paid_at.ToDatetime()),
-                gs(entry.amount),
+                payoff.history_amount_text(entry),
                 (
                     gs(entry.late_fee_amount)
                     if _es_monto_positivo(entry.late_fee_amount)
@@ -2345,9 +2405,24 @@ class LoansView(BaseView):
             for col, texto in enumerate(celdas):
                 self._payments_table.setItem(row, col, QTableWidgetItem(texto))
         if self._payment_entries:
+            # BR-LOAN-018: total_paid incluye lo condonado en una cancelación.
+            descuentos = sum(
+                (
+                    Decimal(entry.discount_amount)
+                    for entry in self._payment_entries
+                    if _es_monto_positivo(entry.discount_amount)
+                ),
+                Decimal("0"),
+            )
+            pagado = (
+                f"Total cancelado {gs(response.total_paid)} "
+                f"(desc. {gs(str(descuentos))})"
+                if descuentos > 0
+                else f"Total pagado {gs(response.total_paid)}"
+            )
             self._payments_caption.setText(
-                f"{len(self._payment_entries)} cobro(s) · Total pagado "
-                f"{gs(response.total_paid)} · Saldo {gs(response.remaining_balance)}. "
+                f"{len(self._payment_entries)} cobro(s) · {pagado} · "
+                f"Saldo {gs(response.remaining_balance)}. "
                 "Elegí un cobro para volver a imprimir su comprobante."
             )
         else:
@@ -2589,7 +2664,19 @@ class LoansView(BaseView):
                     self._schedule_actions_widget(installment),
                 )
 
-        self._schedule_paid_value.setText(gs(response.total_paid))
+        # BR-LOAN-018: el cronograma no trae el descuento; sale del préstamo
+        # abierto, que es el mismo cuyo cronograma se está mostrando.
+        # Texto corto (el tile es angosto); el detalle completo está en la
+        # ficha y en la Liquidación.
+        pagado = gs(response.total_paid)
+        loan = self._detail_loan
+        if (
+            loan is not None
+            and loan.id == self._selected_loan_id
+            and _es_monto_positivo(loan.total_discount)
+        ):
+            pagado += f" (desc. {gs(loan.total_discount)})"
+        self._schedule_paid_value.setText(pagado)
         self._schedule_remaining_value.setText(gs(response.remaining_balance))
         self._stack.setCurrentIndex(_PAGE_SCHEDULE)
 

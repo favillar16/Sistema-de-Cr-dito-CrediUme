@@ -214,6 +214,11 @@ message GetLoanByIdResponse {
     // **No es lo mismo que overdue_amount**: ése es la cuota que se atrasó,
     // éste el recargo por el atraso. "0.00" cuando no hay nada devengado.
     string accrued_late_fee = 30;
+    // BR-LOAN-018: suma de los descuentos concedidos al cancelar el préstamo
+    // en un solo pago. `total_paid` es lo imputado al cronograma e INCLUYE
+    // esa parte condonada; lo efectivamente recibido (sin mora) es
+    // total_paid - total_discount. "0.00" si nunca hubo descuento.
+    string total_discount = 31;
 }
 
 message ListClientLoansRequest {
@@ -289,6 +294,16 @@ message RecordPaymentRequest {
     // cambios. EFECTIVO exige que el operador tenga un turno de caja abierto
     // y genera un movimiento de INGRESO en él.
     string payment_method = 5;
+    // BR-LOAN-018: cancelación del préstamo en un solo pago. El servidor
+    // calcula el saldo completo por su cuenta e ignora `amount` e
+    // `installment_number` -- mismo criterio que BR-LOAN-010: el cliente no
+    // decide cuánto se imputa. La mora de las cuotas vencidas se cobra
+    // completa (BR-LOAN-017), igual que en un cobro por cuota.
+    bool pay_in_full = 6;
+    // Decimal como string. Descuento que el operador decide sobre el saldo,
+    // sólo con pay_in_full. Vacío o "0" = sin descuento. Nunca alcanza a la
+    // mora y tiene que dejar al menos algo del saldo por cobrar.
+    string discount_amount = 7;
 }
 
 message RecordPaymentResponse {
@@ -331,7 +346,15 @@ message RecordPaymentResponse {
     // suma que el cliente entregó de verdad. El comprobante y el ticket los
     // desglosan: el deudor tiene derecho a ver por qué pagó más que la cuota.
     string late_fee_amount = 14;
-    string total_charged = 15; // amount_paid + late_fee_amount
+    // amount_paid - discount_amount + late_fee_amount: lo que el cliente
+    // entregó de verdad (y lo que entra a la caja si fue en efectivo).
+    string total_charged = 15;
+    // BR-LOAN-018. `amount_paid` sigue siendo lo imputado al cronograma --
+    // en una cancelación, el saldo entero, que es lo que deja el préstamo en
+    // PAID --; esto es la parte de ese saldo que la entidad resignó. "0.00"
+    // en un cobro normal.
+    string discount_amount = 16;
+    bool paid_in_full = 17;
 }
 
 message ListLoanPaymentsRequest {
@@ -363,7 +386,10 @@ message LoanPaymentEntry {
     // el comprobante reimpreso contradiría al original. "" en los cobros
     // anteriores a la regla, que no tuvieron mora.
     string late_fee_amount = 11;
-    string total_charged = 12; // amount + late_fee_amount
+    string total_charged = 12; // amount - discount_amount + late_fee_amount
+    // BR-LOAN-018: descuento concedido en ESE pago, tal como quedó guardado.
+    // "" en los cobros que no fueron una cancelación con descuento.
+    string discount_amount = 13;
 }
 
 message ListLoanPaymentsResponse {

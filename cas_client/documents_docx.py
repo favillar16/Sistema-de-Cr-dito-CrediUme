@@ -260,7 +260,7 @@ def comprobante_pago_docx(loan, client, payment) -> Document:
         # directo sobre el naive UTC que devuelve ToDatetime().
         ("Fecha y hora del pago", fecha_hora(payment.paid_at.ToDatetime())),
         *documents.filas_medio_de_pago(payment),  # BR-CAJA-004
-        ("Total pagado del préstamo", gs(payment.total_paid)),
+        (documents.etiqueta_total_pagado(payment), gs(payment.total_paid)),
         ("Saldo restante", gs(payment.remaining_balance)),
     ]
     table = document.add_table(rows=1 + len(filas), cols=2)
@@ -673,7 +673,7 @@ def liquidacion_docx(loan, client, schedule) -> Document:
                 "el monto original)",
             ),
             ("Plazo", f"{loan.term_months} meses"),
-            ("Total pagado", gs(loan.total_paid)),
+            documents.fila_total_pagado_prestamo(loan),  # BR-LOAN-018
             ("Saldo restante", gs(loan.remaining_balance)),
         ],
     )

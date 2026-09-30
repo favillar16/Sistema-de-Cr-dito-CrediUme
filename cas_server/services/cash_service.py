@@ -125,11 +125,17 @@ def registrar_cobro_en_efectivo(
     Imputa **cuota + mora** (BR-LOAN-017): `pago.amount` es sólo la parte que
     va contra el cronograma, pero por la ventanilla entró también el recargo,
     y un arqueo que no lo cuente cierra corto justo por esa diferencia.
+
+    Y **resta el descuento** de una cancelación (BR-LOAN-018): `pago.amount`
+    es el saldo entero, pero por la ventanilla entró sólo lo que quedó después
+    del descuento. Contarlo entero dejaría el arqueo sobrando exactamente eso.
     """
     movimiento = CashMovement(
         cash_session_id=sesion_caja.id,
         movement_type=CashMovementTypeEnum.INGRESO,
-        amount=pago.amount + (pago.late_fee_amount or Decimal("0.00")),
+        amount=pago.amount
+        - (pago.discount_amount or Decimal("0.00"))
+        + (pago.late_fee_amount or Decimal("0.00")),
         concept=_CONCEPTO_COBRO,
         loan_payment_id=pago.id,
         created_by_user_id=user_id,

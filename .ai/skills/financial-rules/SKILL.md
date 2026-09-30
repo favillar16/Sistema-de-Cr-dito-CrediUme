@@ -118,6 +118,15 @@ what the signed document discloses.
     the sum. Before that date it existed only as clause text on the
     Pagaré — if a figure here and one in `documents.py`'s `_TERM_*`
     disagree, the paper and the charge disagree.
+-   Early payoff discount — **implemented since 2026-09-30**
+    (`BR-LOAN-018`): `RecordPayment(pay_in_full=True, discount_amount)`.
+    The server computes the balance; the operator only chooses the
+    discount, in guaraníes (no percentage — entity decision). It must be
+    `< balance`, never touches the mora (charged in full), and needs no
+    reason. `amount` stores the **whole** balance (so the loan reaches
+    `PAID` the normal way) and `loan_payments.discount_amount` the part
+    forgiven; money received is `amount - discount + late_fee`, which is
+    what the cash movement and the period report's collected total use.
 -   Installment amount.
 -   Due dates.
 -   Outstanding balance.

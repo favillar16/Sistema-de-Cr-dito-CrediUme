@@ -45,6 +45,11 @@ establishment reincorporated a teller position, so:
     because folding the surcharge into `amount` would mark the loan
     `PAID` before the capital was amortised. The cash movement, in
     contrast, imputes **the sum** — that is what crossed the counter.
+-   `LoanPayment.discount_amount` (nullable, no backfill, `BR-LOAN-018`,
+    2026-09-30) is the part of the balance forgiven when a loan is paid
+    off in one go. In that payment `amount` is the whole balance, and
+    what crossed the counter is `amount - discount_amount +
+    late_fee_amount` — the figure the cash movement imputes.
 -   The expected amount of an arqueo is always recomputed server-side
     from the opening balance and the session's movements. Never accept
     it from the client — a close where the client supplies both the

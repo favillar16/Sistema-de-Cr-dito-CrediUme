@@ -336,6 +336,15 @@ class LoanPayment(Base):
     late_fee_amount: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2), nullable=True
     )
+    # BR-LOAN-018: parte del saldo que la entidad resignó al cancelar el
+    # préstamo en un solo pago. `amount` sigue siendo el saldo ENTERO (lo
+    # imputado al cronograma, que es lo que lo deja en PAID); lo que entró de
+    # verdad es amount - discount_amount + late_fee_amount. Se guarda porque es
+    # una decisión del operador, no una derivación del cronograma. Nullable y
+    # sin backfill: ningún cobro anterior tuvo descuento.
+    discount_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 2), nullable=True
+    )
     # Código/número de transferencia, descuento directo o descuento en cuenta
     # específica -- el cobro en efectivo ya no se usa (rol CASHIER fuera de
     # uso), así que loan_service.py exige este dato en la capa de aplicación.
