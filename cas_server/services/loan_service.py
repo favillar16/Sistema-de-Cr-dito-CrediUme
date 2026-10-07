@@ -10,6 +10,7 @@ from cas_server import config
 from cas_server.db.base import SessionLocal
 from cas_server.db.models import (
     AuditLog,
+    CashMovement,
     Client,
     Loan,
     LoanInstallmentAdjustment,
@@ -45,18 +46,6 @@ from cas_server.services.common import (
 CERO = Decimal("0.00")
 
 _ESTADOS_ACTIVOS = (LoanStatusEnum.APPROVED, LoanStatusEnum.ACTIVE)
-
-# BR-LOAN-012: estados desde los que un préstamo cargado por error se puede
-# eliminar. El criterio no es "todavía no terminó" sino "todavía no movió
-# dinero": ACTIVE/PAID/DEFAULTED implican un desembolso ya hecho, y borrarlos
-# haría desaparecer pagos que pueden estar imputados a un arqueo de caja ya
-# firmado (CashMovement.loan_payment_id -> loan_payments -> loans). Para esos
-# casos existen MarkDefaulted y el resto del ciclo de vida, no el borrado.
-_ESTADOS_ELIMINABLES = (
-    LoanStatusEnum.PENDING,
-    LoanStatusEnum.APPROVED,
-    LoanStatusEnum.EXPIRED,
-)
 
 
 def _tal_vez_vencer_prestamo(prestamo: Loan, ahora: datetime) -> bool:
@@ -1909,20 +1898,18 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
             )
 
     def DeleteLoan(self, request, context):
-        """BR-LOAN-012: elimina definitivamente un préstamo cargado por error.
+        """BR-LOAN-012: elimina definitivamente un préstamo, en cualquier estado.
 
-        Es la única operación de este servicer que borra una fila en vez de
-        cambiarle el estado, así que está acotada por los dos lados: por rol
-        (MANAGER_AND_ABOVE en rbac.py) y por estado -- solo PENDING, APPROVED
-        o EXPIRED, y únicamente si no tiene ningún pago registrado. Un
-        préstamo que ya cobró plata no se borra: sus LoanPayment pueden estar
-        imputados a un movimiento de caja de un arqueo ya cerrado, y hacerlos
-        desaparecer cambiaría un arqueo firmado (ver BR-CAJA-003).
-
-        La comprobación de pagos es redundante con la de estado (solo un
-        préstamo ACTIVE puede recibir pagos), y es a propósito: es la que
-        expresa el invariante real -- si mañana se admitiera borrar algún
-        estado más, el dinero sigue siendo la línea que no se cruza.
+        Hasta 2026-10-07 sólo se aceptaban PENDING/APPROVED/EXPIRED sin pagos.
+        Por decisión explícita de la entidad ahora se borra cualquier préstamo
+        -- ACTIVE, PAID y DEFAULTED incluidos -- y el riesgo lo asume el
+        personal; el único cerco que queda es el rol (CREDIT_ANALYST_AND_ABOVE)
+        y el motivo obligatorio. Mismo criterio y misma cascada que
+        DeleteClient (BR-CLI-008): se borran los pagos y ajustes de cuota del
+        préstamo, pero los CashMovement de cobros en efectivo NO -- sólo se
+        les limpia `loan_payment_id`, porque ya pueden estar sumados en un
+        arqueo cerrado y firmado (BR-CAJA-003), y borrarlos cambiaría ese
+        cierre en silencio.
         """
         loan_id = analizar_uuid(request.loan_id, "loan_id", context)
         motivo = request.reason.strip()
@@ -1936,44 +1923,40 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
 
         with SessionLocal() as sesion:
             # Mismo bloqueo que ApproveLoan/RecordPayment y por el mismo
-            # motivo: sin él, un pago concurrente podría entrar entre la
-            # verificación de "no tiene pagos" y el DELETE.
+            # motivo: sin él, un pago concurrente podría entrar entre leer
+            # los pagos y el DELETE, y quedar huérfano.
             prestamo = sesion.get(Loan, loan_id, with_for_update=True)
             if prestamo is None:
                 context.abort(grpc.StatusCode.NOT_FOUND, "Préstamo no encontrado")
 
-            if prestamo.status not in _ESTADOS_ELIMINABLES:
-                context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "Solo se puede eliminar un préstamo que todavía no fue "
-                    "desembolsado (Pendiente, Aprobado o Rechazado); este está "
-                    f"en estado {prestamo.status.value} (BR-LOAN-012)",
-                )
-
-            if prestamo.payments:
-                context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "El préstamo tiene pagos registrados y no puede eliminarse "
-                    "(BR-LOAN-012)",
-                )
-
             # Datos del préstamo antes de borrarlo: una vez hecho el DELETE la
             # fila no existe, así que el AuditLog tiene que ser autosuficiente
-            # para reconstruir qué se eliminó.
+            # para reconstruir qué se eliminó -- incluida la plata cobrada,
+            # que ahora también desaparece con él.
             client_id = prestamo.client_id
             estado_previo = prestamo.status.value
+            _, total_cobrado = _totales_prestamo(prestamo)
+            payment_ids = [pago.id for pago in prestamo.payments]
             resumen = (
                 f"capital={prestamo.principal_amount} "
                 f"tasa={prestamo.interest_rate} cuotas={prestamo.term_months} "
-                f"primer_vencimiento={prestamo.first_due_date.isoformat()}"
+                f"primer_vencimiento={prestamo.first_due_date.isoformat()} "
+                f"pagos_eliminados={len(payment_ids)} total_cobrado={total_cobrado}"
             )
 
-            # Los ajustes de cuota solo existen para préstamos ACTIVE, que no
-            # son eliminables -- se borran igual para que la FK no dependa de
-            # esa coincidencia si algún día cambia.
+            if payment_ids:
+                sesion.query(CashMovement).filter(
+                    CashMovement.loan_payment_id.in_(payment_ids)
+                ).update({"loan_payment_id": None}, synchronize_session=False)
+                sesion.query(LoanPayment).filter(
+                    LoanPayment.loan_id == prestamo.id
+                ).delete(synchronize_session=False)
             sesion.query(LoanInstallmentAdjustment).filter(
                 LoanInstallmentAdjustment.loan_id == prestamo.id
             ).delete(synchronize_session=False)
+            # Los hijos ya se borraron por consulta; se expulsan de la sesión
+            # para que el ORM no intente volver a tocarlos al borrar el padre.
+            sesion.expire(prestamo)
             sesion.delete(prestamo)
 
             sesion.add(

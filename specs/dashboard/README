@@ -84,6 +84,22 @@ Cubre tres cosas distintas, que deliberadamente no se mezclan:
     Es una foto de *ahora* (`generated_at`), no de un período: no recibe rango
     de fechas.
 
+*   **BR-DASH-004 (Clientes con préstamos cancelados):**
+    `GetPaidLoansReport` devuelve **una fila por préstamo** en estado `PAID`
+    (un cliente con dos préstamos cancelados aparece dos veces; la respuesta
+    cuenta además los clientes distintos). Cada fila lleva cliente, documento,
+    teléfono, capital, plazo, el momento de cancelación y lo cobrado.
+    *   **Fecha de cancelación = último pago.** `Loan` no tiene columna de
+        cancelación; es el mismo criterio que `loans_paid` en BR-DASH-002.
+        Viaja como `Timestamp` para que el cliente lo pase a hora local.
+    *   **"Total cobrado" = `amount - discount + late_fee`** de sus pagos:
+        el dinero efectivamente recibido. Restar el descuento es obligatorio
+        (BR-LOAN-018 guarda el saldo entero en `amount`).
+    *   Orden: cancelación más reciente primero; a igual momento, por nombre.
+    *   Foto de *ahora*, sin filtros ni rango de fechas (la request queda
+        vacía para poder agregarlos sin romper el contrato). Sale en pantalla,
+        PDF, DOCX e impresión, **apaisado** como BR-DASH-003 (8 columnas).
+
 ## 3. Modelo de Datos (PostgreSQL)
 Ninguno propio. Lee `clients`, `loans`, `loan_payments` y
 `loan_installment_adjustments` (estos últimos vía el cálculo de cronograma
@@ -99,6 +115,8 @@ EXPIRED al consultarse el panel, y queda auditada igual que en
 *   `GetPeriodReportRequest` / `GetPeriodReportResponse`
 *   `GetClientPaymentStatusReportRequest` / `GetClientPaymentStatusReportResponse`
     (+ `ClientPaymentStatusRow`, una por cliente) — BR-DASH-003
+*   `GetPaidLoansReportRequest` / `GetPaidLoansReportResponse`
+    (+ `PaidLoanRow`, una por préstamo) — BR-DASH-004
 
 Todos definidos en `protos/dashboard_service.proto`.
 
@@ -114,9 +132,13 @@ Todos definidos en `protos/dashboard_service.proto`.
     **Cajero** queda afuera por el mismo criterio que BR-CAJA-005 (consulta y
     cobra el préstamo que tiene delante, no gestiona la cartera). Reflejado en
     la interfaz por `rbac_ui.can_view_payment_status_report()`.
+*   `GetPaidLoansReport` — mismo nivel que el anterior
+    (`CREDIT_ANALYST_AND_ABOVE`): listado nominal de cartera, no consulta de
+    ventanilla. Reflejado por `rbac_ui.can_view_paid_loans_report()`.
 
 ## 6. Terminología en la interfaz
-El estado `EXPIRED` de `LoanStatusEnum` se presenta al usuario como
+El estado `PAID` se presenta como **"Cancelado"** (antes "Pagado", desde
+2026-10-07). El estado `EXPIRED` de `LoanStatusEnum` se presenta al usuario como
 **"Rechazado"** (antes "Caducado") tanto en el panel como en la vista de
 préstamos y en los documentos generados. Es un cambio de etiqueta por decisión
 de producto: el valor del enum, el nombre del campo

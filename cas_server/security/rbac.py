@@ -86,10 +86,10 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     # un préstamo equivocado es quien lo detecta, y obligarlo a escalar cada
     # error de tipeo no agregaba control real. El único rol excluido es el
     # cajero, coherente con BR-CAJA-005: ventanilla consulta y cobra, no
-    # origina ni deshace originación. Lo que sigue conteniendo el riesgo no es
-    # el rol sino el estado: el servicer restringe *qué* préstamos se pueden
-    # borrar (solo los que nunca movieron dinero, y sin pagos registrados),
-    # ver _ESTADOS_ELIMINABLES.
+    # origina ni deshace originación. Desde 2026-10-07 ya no hay restricción
+    # por estado (decisión de la entidad, igual que DeleteClient): el rol es
+    # el único cerco, y el riesgo de borrar un préstamo que movió dinero lo
+    # asume el personal. Ver DeleteLoan en loan_service.py.
     "/loans.LoanService/DeleteLoan": CREDIT_ANALYST_AND_ABOVE,
     "/dashboard.DashboardService/GetDashboardStats": CASHIER_AND_ABOVE,
     # BR-DASH-002: el reporte de cierre de período es material de gestión
@@ -110,6 +110,10 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     # hacia adelante (cuotas por vencer) en vez de gestionar cartera ya
     # atrasada, mismo criterio de "consulta operativa" que GetDashboardStats.
     "/dashboard.DashboardService/GetUpcomingDueReport": CASHIER_AND_ABOVE,
+    # BR-DASH-004. Mismo nivel que GetClientPaymentStatusReport: es un
+    # listado nominal de cartera (quién terminó de pagar, cuándo y cuánto
+    # dejó), material de gestión y no de ventanilla -- BR-CAJA-005.
+    "/dashboard.DashboardService/GetPaidLoansReport": CREDIT_ANALYST_AND_ABOVE,
     # BR-CAJA-*. Todas son CASHIER_AND_ABOVE porque el turno sobre el que
     # operan se resuelve desde el token, no desde el request: cada rol opera
     # su propia caja. Las dos asimetrías por rol (un Gerente puede cerrar la

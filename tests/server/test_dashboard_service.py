@@ -708,3 +708,109 @@ def test_upcoming_due_orders_rows_by_due_date(servicer):
     filas = _cartera_por_vencer(servicer).rows
 
     assert [fila.client_id for fila in filas] == [str(cerca), str(lejos)]
+
+
+# ---- BR-DASH-004: clientes con préstamos cancelados ------------------------
+
+
+def _cancelados(servicer):
+    return servicer.GetPaidLoansReport(
+        dashboard_service_pb2.GetPaidLoansReportRequest(), FakeContext()
+    )
+
+
+def test_paid_loans_lists_only_paid_loans(servicer):
+    client_id = _create_client("9400001", "paid1@example.com")
+    pagado = _create_loan(client_id, LoanStatusEnum.PAID)
+    _record_payment(pagado, "1060.00")
+    for estado in (
+        LoanStatusEnum.ACTIVE,
+        LoanStatusEnum.DEFAULTED,
+        LoanStatusEnum.PENDING,
+        LoanStatusEnum.EXPIRED,
+    ):
+        _create_loan(client_id, estado)
+
+    report = _cancelados(servicer)
+
+    assert [fila.loan_id for fila in report.rows] == [str(pagado)]
+    assert report.loans_count == 1
+    assert report.clients_count == 1
+    assert report.rows[0].national_id == "9400001"
+    assert report.rows[0].principal_amount == "1000.00"
+
+
+def test_paid_loans_one_row_per_loan_but_counts_distinct_clients(servicer):
+    client_id = _create_client("9400002", "paid2@example.com")
+    for _ in range(2):
+        _record_payment(_create_loan(client_id, LoanStatusEnum.PAID), "1060.00")
+
+    report = _cancelados(servicer)
+
+    assert report.loans_count == 2
+    assert report.clients_count == 1
+    assert report.total_principal == "2000.00"
+
+
+def test_paid_loans_total_collected_subtracts_the_discount_and_adds_mora(servicer):
+    """BR-LOAN-018: `amount` guarda el saldo entero aunque parte se haya
+    condonado. Si el reporte sumara `amount` a secas, exageraría lo cobrado
+    exactamente en el descuento."""
+    client_id = _create_client("9400003", "paid3@example.com")
+    loan_id = _create_loan(client_id, LoanStatusEnum.PAID)
+    _record_payment(loan_id, "200.00")
+    with SessionLocal() as session:
+        session.add(
+            LoanPayment(
+                loan_id=loan_id,
+                amount=Decimal("860.00"),
+                discount_amount=Decimal("60.00"),
+                late_fee_amount=Decimal("5.00"),
+                transfer_reference="TRF-PAYOFF",
+                paid_at=datetime.now(timezone.utc),
+            )
+        )
+        session.commit()
+
+    fila = _cancelados(servicer).rows[0]
+
+    assert Decimal(fila.total_collected) == Decimal("1005.00")  # 1060 - 60 + 5
+    assert Decimal(fila.total_discount) == Decimal("60.00")
+    assert Decimal(fila.total_late_fee) == Decimal("5.00")
+
+
+def test_paid_loans_cancellation_date_is_the_last_payment(servicer):
+    client_id = _create_client("9400004", "paid4@example.com")
+    loan_id = _create_loan(client_id, LoanStatusEnum.PAID)
+    ultimo = datetime(2026, 9, 15, 14, 30, tzinfo=timezone.utc)
+    _record_payment(loan_id, "500.00", paid_at=ultimo - timedelta(days=30))
+    _record_payment(loan_id, "560.00", paid_at=ultimo)
+
+    fila = _cancelados(servicer).rows[0]
+
+    assert fila.paid_off_at.ToDatetime(tzinfo=timezone.utc) == ultimo
+
+
+def test_paid_loans_orders_the_most_recent_cancellation_first(servicer):
+    ahora = datetime.now(timezone.utc)
+    viejo = _create_loan(
+        _create_client("9400005", "paid5@example.com"), LoanStatusEnum.PAID
+    )
+    _record_payment(viejo, "1060.00", paid_at=ahora - timedelta(days=60))
+    nuevo = _create_loan(
+        _create_client("9400006", "paid6@example.com"), LoanStatusEnum.PAID
+    )
+    _record_payment(nuevo, "1060.00", paid_at=ahora - timedelta(days=1))
+
+    report = _cancelados(servicer)
+
+    assert [fila.loan_id for fila in report.rows] == [str(nuevo), str(viejo)]
+
+
+def test_paid_loans_empty_when_nothing_was_cancelled(servicer):
+    _create_loan(_create_client("9400007", "paid7@example.com"), LoanStatusEnum.ACTIVE)
+
+    report = _cancelados(servicer)
+
+    assert report.loans_count == 0
+    assert report.total_collected == "0.00"

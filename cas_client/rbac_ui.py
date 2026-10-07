@@ -128,6 +128,14 @@ def can_view_payment_status_report(role: str | None) -> bool:
     return role_at_least(role, "CREDIT_ANALYST")
 
 
+def can_view_paid_loans_report(role: str | None) -> bool:
+    """BR-DASH-004: listado de préstamos cancelados -- mirrors rbac.py's
+    CREDIT_ANALYST_AND_ABOVE gate on GetPaidLoansReport. Mismo nivel que
+    can_view_payment_status_report(): los dos son listados nominales de
+    cartera, no consultas de ventanilla."""
+    return role_at_least(role, "CREDIT_ANALYST")
+
+
 def is_teller(role: str | None) -> bool:
     """El cajero es el único rol con una navegación distinta: su pantalla
     principal es Caja y solo se le ofrece, además, la Consulta de cliente
@@ -158,9 +166,9 @@ def can_delete_loan(role: str | None) -> bool:
     (MANAGER_AND_ABOVE) por considerarse supervisión; por decisión del negocio
     ahora coincide con can_originate_credit(): quien origina puede deshacer su
     propia carga. El único rol excluido es el cajero (BR-CAJA-005), que ni
-    origina ni deshace originación. El servidor limita además *qué* préstamos
-    son eliminables (solo sin desembolsar y sin pagos), lo que esta función no
-    puede saber -- por eso la vista combina las dos condiciones."""
+    origina ni deshace originación. Desde 2026-10-07 el servidor ya no
+    restringe por estado (decisión de la entidad), así que esta función es la
+    única condición que la vista necesita, igual que can_delete_client()."""
     return role_at_least(role, "CREDIT_ANALYST")
 
 
@@ -168,7 +176,7 @@ def can_delete_client(role: str | None) -> bool:
     """BR-CLI-008: eliminar un cliente cargado por error -- mirrors rbac.py's
     CREDIT_ANALYST_AND_ABOVE gate on DeleteClient. A propósito el mismo nivel
     que can_originate_credit(): quien da de alta/edita un cliente es quien
-    nota el error y no necesita escalar para deshacerlo. A diferencia de
+    nota el error y no necesita escalar para deshacerlo. Igual que
     can_delete_loan(), no hay ningún estado que lo restrinja del lado del
     servidor -- por decisión del negocio, un cliente se borra sin excepción
     (y en cascada con todos sus préstamos), así que esta función es la única

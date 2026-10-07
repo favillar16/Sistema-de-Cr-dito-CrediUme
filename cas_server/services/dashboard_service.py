@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 import grpc
+from sqlalchemy.orm import selectinload
 
 import dashboard_service_pb2
 import dashboard_service_pb2_grpc
@@ -427,4 +428,86 @@ class DashboardServicer(dashboard_service_pb2_grpc.DashboardServiceServicer):
                 generated_at=a_marca_tiempo(ahora),
                 days_ahead=dias,
                 rows=filas,
+            )
+
+    def GetPaidLoansReport(self, request, context):
+        """BR-DASH-004: listado de clientes con préstamos cancelados (PAID).
+
+        Una fila por préstamo, no por cliente: cada préstamo cancelado tiene
+        su propia fecha de cancelación y su propio total cobrado, y sumarlos
+        por cliente perdería justamente eso.
+
+        "Total cobrado" es el dinero recibido -- `amount - discount + mora` --
+        y no `amount` a secas: en una cancelación con descuento (BR-LOAN-018)
+        `amount` guarda el saldo entero, y sin restar el descuento el reporte
+        exageraría lo cobrado exactamente en lo condonado.
+        """
+        ahora = datetime.now(timezone.utc)
+
+        with SessionLocal() as sesion:
+            prestamos = (
+                sesion.query(Loan)
+                .options(selectinload(Loan.payments), selectinload(Loan.client))
+                .filter(Loan.status == LoanStatusEnum.PAID)
+                .all()
+            )
+
+            filas = []
+            total_capital = CERO
+            total_cobrado = CERO
+            total_descuento = CERO
+            for prestamo in prestamos:
+                cliente = prestamo.client
+                descuento = sum(
+                    (pago.discount_amount or CERO for pago in prestamo.payments), CERO
+                )
+                mora = sum(
+                    (pago.late_fee_amount or CERO for pago in prestamo.payments), CERO
+                )
+                cobrado = (
+                    sum((pago.amount for pago in prestamo.payments), CERO)
+                    - descuento
+                    + mora
+                )
+                ultimo_pago = max(
+                    (pago.paid_at for pago in prestamo.payments), default=None
+                )
+                fila = dashboard_service_pb2.PaidLoanRow(
+                    client_id=str(cliente.id),
+                    client_name=f"{cliente.first_name} {cliente.last_name}",
+                    national_id=cliente.national_id,
+                    phone_number=cliente.phone_number,
+                    loan_id=str(prestamo.id),
+                    principal_amount=str(prestamo.principal_amount),
+                    term_months=prestamo.term_months,
+                    total_collected=str(cobrado),
+                    total_discount=str(descuento),
+                    total_late_fee=str(mora),
+                )
+                if ultimo_pago is not None:
+                    fila.paid_off_at.CopyFrom(a_marca_tiempo(ultimo_pago))
+                filas.append((ultimo_pago, fila))
+                total_capital += prestamo.principal_amount
+                total_cobrado += cobrado
+                total_descuento += descuento
+
+            # Lo cancelado más recientemente primero; a igual momento, por
+            # nombre, para que dos ejecuciones seguidas den el mismo orden.
+            # Los que no tienen pagos (no debería haber) van al final.
+            filas.sort(
+                key=lambda par: (
+                    -par[0].timestamp() if par[0] is not None else float("inf"),
+                    par[1].client_name,
+                )
+            )
+            ordenadas = [fila for _momento, fila in filas]
+
+            return dashboard_service_pb2.GetPaidLoansReportResponse(
+                generated_at=a_marca_tiempo(ahora),
+                rows=ordenadas,
+                clients_count=len({fila.client_id for fila in ordenadas}),
+                loans_count=len(ordenadas),
+                total_principal=str(total_capital),
+                total_collected=str(total_cobrado),
+                total_discount=str(total_descuento),
             )

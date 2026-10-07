@@ -11,6 +11,7 @@ from cas_client.rbac_ui import (
     can_manage_users,
     can_originate_credit,
     can_supervise_cash_sessions,
+    can_view_paid_loans_report,
     can_view_payment_status_report,
     can_view_period_report,
     is_teller,
@@ -297,3 +298,14 @@ def test_remove_installment_adjustment_gate_matches_rbac_tables_exactly():
     for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
         esperado = any(permitido.value == role for permitido in permitidos)
         assert can_edit_installment_amount(role) == esperado, role
+
+
+def test_paid_loans_report_gate_matches_rbac_tables_exactly():
+    """BR-DASH-004. Contra la tabla METHOD_ROLES real, no una expectativa
+    repetida a mano."""
+    from cas_server.security.rbac import allowed_roles
+
+    permitidos = allowed_roles("/dashboard.DashboardService/GetPaidLoansReport")
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+        esperado = any(permitido.value == role for permitido in permitidos)
+        assert can_view_paid_loans_report(role) == esperado, role

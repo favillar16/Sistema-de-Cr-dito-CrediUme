@@ -151,7 +151,10 @@ _ESTADOS_LABEL = {
     "PENDING": "Pendiente",
     "APPROVED": "Aprobado",
     "ACTIVE": "Activo",
-    "PAID": "Pagado",
+    # LoanStatusEnum.PAID se muestra como "Cancelado" (antes "Pagado") por
+    # pedido de la entidad: es el término con que la agencia nombra un
+    # préstamo saldado. Sólo cambia la etiqueta, igual que EXPIRED abajo.
+    "PAID": "Cancelado",
     "DEFAULTED": "Incumplido",
     # LoanStatusEnum.EXPIRED se muestra como "Rechazado" por decisión de
     # producto (antes "Caducado") -- el estado del servidor no cambió, solo la
@@ -244,13 +247,6 @@ _CHARGES_HINT = (
     "que se calcula el interés. El cliente igual recibe en mano solo el "
     "capital solicitado. Dejar un cargo vacío es no aplicarlo."
 )
-
-# BR-LOAN-012: estados desde los que el servidor acepta eliminar un préstamo.
-# Copia literal de _ESTADOS_ELIMINABLES en loan_service.py -- se mantiene a
-# mano, igual que rbac_ui.py replica los niveles de rbac.py: el servidor
-# vuelve a verificarlo, esto solo evita ofrecer un botón que respondería
-# FAILED_PRECONDITION.
-_DELETABLE_STATUSES = ("PENDING", "APPROVED", "EXPIRED")
 
 
 def _es_monto_positivo(texto: str) -> bool:
@@ -1614,8 +1610,8 @@ class LoansView(BaseView):
         self._delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._delete_button.setStyleSheet(theme.danger_button_style())
         self._delete_button.setToolTip(
-            "Elimina definitivamente un préstamo cargado por error. Solo es "
-            "posible mientras no haya sido desembolsado ni tenga pagos."
+            "Elimina definitivamente el préstamo, en cualquier estado, junto "
+            "con sus pagos registrados. No se puede deshacer."
         )
         self._delete_button.clicked.connect(self._on_delete_loan)
         delete_row.addWidget(self._delete_button)
@@ -1997,12 +1993,9 @@ class LoansView(BaseView):
             role_ok=can_revert_default(role),
         )
         # BR-LOAN-012. Se oculta (no se deshabilita) para quien no tiene el
-        # rol, misma convención que el ítem "Usuarios" del sidebar; para quien
-        # sí lo tiene queda visible pero deshabilitado en los estados no
-        # eliminables, para que se entienda que la acción existe y por qué no
-        # aplica a ESTE préstamo.
+        # rol, misma convención que el ítem "Usuarios" del sidebar. Desde
+        # 2026-10-07 ningún estado lo impide (decisión de la entidad).
         self._delete_button.setVisible(can_delete_loan(role))
-        self._delete_button.setEnabled(loan.status in _DELETABLE_STATUSES)
         can_pay = loan.status == "ACTIVE" and role_at_least(role, "CASHIER")
         self._record_payment_button.setEnabled(can_pay)
         self._payment_installment_combo.setEnabled(can_pay)
@@ -2119,12 +2112,23 @@ class LoansView(BaseView):
             return
         loan = self._detail_loan
         estado = _ESTADOS_LABEL.get(loan.status, loan.status)
+        # Desde que se puede borrar un préstamo que ya cobró, la confirmación
+        # tiene que decir cuánta plata cobrada desaparece con él: es lo que el
+        # operador necesita para asumir el riesgo sabiendo qué borra.
+        aviso_pagos = (
+            f"Se eliminarán también sus pagos registrados "
+            f"({gs(loan.total_paid)} cobrados). El efectivo ya ingresado a "
+            "caja no se modifica.\n\n"
+            if _es_monto_positivo(loan.total_paid)
+            else ""
+        )
         confirm = QMessageBox.question(
             self,
             "Eliminar préstamo",
             f"¿Eliminar definitivamente el préstamo {loan.id[:8]}… "
             f"({estado}, capital {gs(loan.principal_amount)})?\n\n"
-            "Esta acción no se puede deshacer: el préstamo desaparece del "
+            + aviso_pagos
+            + "Esta acción no se puede deshacer: el préstamo desaparece del "
             "sistema y solo queda el registro de auditoría.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -2168,9 +2172,9 @@ class LoansView(BaseView):
         self._toast.show_message("Préstamo eliminado.")
         client_id = response.client_id or self._current_client_id
         if client_id:
-            # Un préstamo eliminable nunca es ACTIVE, así que sólo se llega
-            # acá desde la lista de préstamos de un cliente -- pero se fuerza
-            # ese sub-estado igual en vez de darlo por sentado.
+            # Se vuelve siempre a la lista de préstamos del cliente, aunque
+            # se haya llegado al detalle desde otro lado (p. ej. la cartera
+            # activa): es la lista donde el borrado se nota.
             self._client_search_section.hide()
             self._loans_section.show()
             self._run_list(client_id)

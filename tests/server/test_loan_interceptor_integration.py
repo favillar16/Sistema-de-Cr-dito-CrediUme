@@ -710,10 +710,10 @@ def test_reverting_a_default_makes_the_loan_collectable_again(stubs):
     """La razón de ser de BR-LOAN-014.
 
     RecordPayment exige ACTIVE, así que mientras el préstamo esté DEFAULTED no
-    se le puede cobrar ni cuando el cliente regulariza -- y DeleteLoan tampoco
-    lo acepta, porque ya movió dinero. Sin la reversión, el préstamo queda
-    congelado para siempre. Este test recorre justamente ese callejón: cobro
-    rechazado, reversión, cobro aceptado.
+    se le puede cobrar ni cuando el cliente regulariza. Sin la reversión la
+    única salida sería borrarlo (BR-LOAN-012), perdiendo su historia. Este test
+    recorre justamente ese callejón: cobro rechazado, reversión, cobro
+    aceptado.
     """
     auth_stub, loan_stub = stubs
     _create_user("analyst_rd4", "Passw0rd!", RoleEnum.CREDIT_ANALYST)
@@ -729,17 +729,6 @@ def test_reverting_a_default_makes_the_loan_collectable_again(stubs):
 
     with pytest.raises(grpc.RpcError) as exc_info:
         loan_stub.RecordPayment(pago, metadata=metadata)
-    assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
-
-    # Y tampoco se puede borrar: BR-LOAN-012 excluye los estados que ya
-    # movieron dinero, así que sin RevertDefault no queda ninguna salida.
-    with pytest.raises(grpc.RpcError) as exc_info:
-        loan_stub.DeleteLoan(
-            loan_service_pb2.DeleteLoanRequest(
-                loan_id=str(loan_id), reason="intento de salida"
-            ),
-            metadata=metadata,
-        )
     assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
 
     loan_stub.RevertDefault(
