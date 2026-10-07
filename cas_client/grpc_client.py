@@ -600,6 +600,18 @@ class DashboardServiceClient:
             error_cls=ApiError,
         )
 
+    def get_paid_loans_report(
+        self, access_token: str
+    ) -> dashboard_service_pb2.GetPaidLoansReportResponse:
+        """BR-DASH-004: clientes con préstamos cancelados, una fila por
+        préstamo."""
+        return _invoke(
+            self._stub.GetPaidLoansReport,
+            dashboard_service_pb2.GetPaidLoansReportRequest(),
+            access_token=access_token,
+            error_cls=ApiError,
+        )
+
     def get_upcoming_due_report(
         self, access_token: str, days_ahead: int = 7
     ) -> dashboard_service_pb2.GetUpcomingDueReportResponse:

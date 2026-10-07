@@ -160,6 +160,35 @@ def test_payment_status_report_without_token_is_unauthenticated(stubs):
     assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
 
 
+@pytest.mark.parametrize(
+    "role", [RoleEnum.CREDIT_ANALYST, RoleEnum.MANAGER, RoleEnum.ADMIN]
+)
+def test_paid_loans_report_allows_credit_analyst_and_above(stubs, role):
+    auth_stub, dashboard_stub = stubs
+    username = f"paid_ok_{role.value.lower()}"
+    _create_user(username, "Passw0rd!", role)
+    metadata = _login(auth_stub, username, "Passw0rd!")
+
+    response = dashboard_stub.GetPaidLoansReport(
+        dashboard_service_pb2.GetPaidLoansReportRequest(), metadata=metadata
+    )
+    assert response.loans_count == 0
+
+
+def test_paid_loans_report_denies_the_cashier(stubs):
+    """BR-DASH-004, mismo nivel que BR-DASH-003: listado de cartera, no
+    consulta de ventanilla (BR-CAJA-005)."""
+    auth_stub, dashboard_stub = stubs
+    _create_user("paid_no_cashier", "Passw0rd!", RoleEnum.CASHIER)
+    metadata = _login(auth_stub, "paid_no_cashier", "Passw0rd!")
+
+    with pytest.raises(grpc.RpcError) as exc_info:
+        dashboard_stub.GetPaidLoansReport(
+            dashboard_service_pb2.GetPaidLoansReportRequest(), metadata=metadata
+        )
+    assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
+
+
 def _upcoming_due_request(days_ahead=7):
     return dashboard_service_pb2.GetUpcomingDueReportRequest(days_ahead=days_ahead)
 

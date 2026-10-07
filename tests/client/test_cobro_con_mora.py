@@ -54,7 +54,8 @@ def _cuota(numero, monto, mora, pagada=False):
     return SimpleNamespace(
         installment_number=numero,
         due_date="2026-08-10",
-        amount_due=monto,
+        payment_amount=monto,
+        amount_due="0.00" if pagada else monto,
         late_fee=mora,
         late_fee_days=35 if mora != "0.00" else 0,
         is_paid=pagada,

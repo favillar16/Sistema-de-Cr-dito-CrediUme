@@ -13,6 +13,7 @@ La vista nunca calcula el monto esperado por su cuenta: siempre muestra el
 recalculado acá -- el que se usa para el arqueo del cierre.
 """
 
+from datetime import date
 from decimal import Decimal
 
 import grpc
@@ -22,6 +23,7 @@ from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QProgressBar,
@@ -109,6 +111,22 @@ _PAYMENT_HEADERS = (
     "Cuota(s)",
     "Registrado por",
 )
+
+# Cronograma del préstamo elegido en la tarjeta de cobro. "A cobrar" es cuota
+# pendiente + mora (BR-LOAN-017): el mismo total que el campo "Monto a cobrar"
+# muestra al elegirla, para que la tabla y el campo no digan cifras distintas.
+_INSTALLMENT_HEADERS = (
+    "N°",
+    "Vencimiento",
+    "Cuota",
+    "Mora",
+    "A cobrar",
+    "Estado",
+)
+_INST_COL_MORA = 3
+_INST_COL_ESTADO = 5
+_INST_MONEY_COLUMNS = (2, 3, 4)
+_INST_VISIBLE_ROWS = 8
 
 # Efectivo va primero acá, al revés que en loans_view.py: esta pantalla ES la
 # caja, así que el cobro en ventanilla es el caso normal y la transferencia la
@@ -200,6 +218,103 @@ def _hay_mora(valor: str) -> bool:
         return Decimal(valor) > 0
     except (ArithmeticError, ValueError):
         return False
+
+
+def _caption(text: str) -> QLabel:
+    """Título chico dentro de la tarjeta de cobro. No es section_label(): ese
+    separa tarjetas de la página, y acá se separan bloques de una misma."""
+    label = QLabel(text)
+    label.setStyleSheet(
+        f"color: {theme.PRIMARY}; font-size: 13px; font-weight: 700; "
+        "padding-top: 4px;"
+    )
+    return label
+
+
+def _decimal(valor: str) -> Decimal:
+    """Monto del servidor como Decimal; "" o basura cuentan como cero."""
+    try:
+        return Decimal(valor or "0")
+    except (ArithmeticError, ValueError):
+        return Decimal("0")
+
+
+def _fecha_iso(texto: str) -> date | None:
+    try:
+        return date.fromisoformat(texto)
+    except (TypeError, ValueError):
+        return None
+
+
+def _estado_cuota(cuota, hoy: date, es_proxima: bool) -> tuple[str, str]:
+    """(texto, color) de la columna "Estado" de una cuota del cronograma.
+
+    "Vencida" mira la fecha, no la mora: durante los días de gracia
+    (BR-LOAN-017) la cuota ya está atrasada aunque todavía no devengue
+    recargo, y el cajero tiene que poder decírselo al cliente.
+    """
+    if cuota.is_paid:
+        return "Pagada", theme.SUCCESS
+    parcial = (
+        " · pago parcial"
+        if _decimal(cuota.amount_due) < _decimal(cuota.payment_amount)
+        else ""
+    )
+    vence = _fecha_iso(cuota.due_date)
+    if vence is not None and vence < hoy:
+        dias = (hoy - vence).days
+        return (
+            f"Vencida hace {dias} día{'s' if dias != 1 else ''}{parcial}",
+            theme.ERROR,
+        )
+    if es_proxima:
+        return f"Próxima a vencer{parcial}", theme.PRIMARY
+    return f"Pendiente{parcial}", theme.TEXT_MUTED
+
+
+def _etiqueta_prestamo(loan) -> str:
+    if loan.status == "PAID":
+        return f"Préstamo {loan.id[:8]} · {loan.term_months} cuotas · Cancelado"
+    return (
+        f"Préstamo {loan.id[:8]} · {loan.term_months} cuotas · "
+        f"saldo {gs(loan.remaining_balance)}"
+    )
+
+
+def _resaltar(item: QTableWidgetItem, color: str) -> None:
+    item.setForeground(QColor(color))
+    fuente = item.font()
+    fuente.setBold(True)
+    item.setFont(fuente)
+
+
+def _summary_chip(titulo: str, valor: str, color: str) -> QFrame:
+    """Dato corto del resumen del préstamo. Más bajo que stat_tile(): son
+    cuatro datos de lectura rápida dentro de una tarjeta, no el panel de la
+    caja."""
+    chip = QFrame()
+    chip.setObjectName("summaryChip")
+    chip.setStyleSheet(
+        f"#summaryChip {{ background-color: {theme.APP_BACKGROUND}; "
+        f"border: 1px solid {theme.BORDER}; border-left: 3px solid {color}; "
+        "border-radius: 6px; }"
+    )
+    layout = QVBoxLayout(chip)
+    layout.setContentsMargins(10, 6, 10, 6)
+    layout.setSpacing(0)
+    caption = QLabel(titulo)
+    caption.setStyleSheet(
+        f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600; "
+        "background: transparent; border: none;"
+    )
+    value = QLabel(valor)
+    value.setStyleSheet(
+        f"color: {color}; font-size: 15px; font-weight: 700; "
+        "background: transparent; border: none;"
+    )
+    layout.addWidget(caption)
+    layout.addWidget(value)
+    return chip
 
 
 class CashView(BaseView):
@@ -438,9 +553,56 @@ class CashView(BaseView):
         self._selected_client_label.setWordWrap(True)
         detail_layout.addWidget(self._selected_client_label)
 
+        loan_wrapper, self._loan_combo = labeled_combo("Préstamo")
+        self._loan_combo.currentIndexChanged.connect(self._on_loan_changed)
+        detail_layout.addWidget(loan_wrapper)
+
+        # Resumen del préstamo elegido, leído del cronograma: cuántas cuotas
+        # van, cuántas están vencidas, cuánto falta y cuándo vence la próxima.
+        # Se reconstruye en cada carga (como _totals_grid) en vez de mutar
+        # etiquetas ya visibles -- ver la nota de stat_tile() en card.py.
+        self._installment_summary = ResponsiveGrid(min_cell_width=150, spacing=8)
+        detail_layout.addWidget(self._installment_summary)
+
+        self._loan_summary = QLabel("")
+        self._loan_summary.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        self._loan_summary.setWordWrap(True)
+        detail_layout.addWidget(self._loan_summary)
+
+        # El cronograma completo, no sólo lo pendiente: el cajero ve qué está
+        # pagado, qué está vencido y desde cuándo, y qué viene. Hasta
+        # 2026-10-07 la única vista de las cuotas era el texto de cada opción
+        # del combo, ilegible con 12 cuotas y la mora pegada al final. Un clic
+        # en una cuota pendiente la elige en "Cuota a cobrar" (y al revés):
+        # el combo sigue siendo la fuente de verdad de lo que se cobra.
+        detail_layout.addWidget(_caption("Cuotas del préstamo"))
+        self._installment_table = QTableWidget(0, len(_INSTALLMENT_HEADERS))
+        self._installment_table.setHorizontalHeaderLabels(_INSTALLMENT_HEADERS)
+        size_columns(self._installment_table, stretch_column=_INST_COL_ESTADO)
+        self._installment_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._installment_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._installment_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._installment_table.itemSelectionChanged.connect(
+            self._on_installment_row_selected
+        )
+        style_table(self._installment_table)
+        self._fit_installment_table()
+        set_empty_message(
+            self._installment_table, "Elija un préstamo para ver sus cuotas."
+        )
+        detail_layout.addWidget(self._installment_table)
+        # Evita que elegir la fila desde el combo vuelva a disparar el combo
+        # desde la tabla (y viceversa).
+        self._syncing_installments = False
+
         selectors = ResponsiveGrid(min_cell_width=240)
         for caption, attribute, handler in (
-            ("Préstamo", "_loan_combo", self._on_loan_changed),
             ("Cuota a cobrar", "_installment_combo", self._on_installment_changed),
             ("Medio de pago", "_method_combo", self._on_method_changed),
         ):
@@ -489,15 +651,11 @@ class CashView(BaseView):
         self._collection_breakdown.hide()
         detail_layout.addWidget(self._collection_breakdown)
 
-        self._loan_summary = QLabel("")
-        self._loan_summary.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
-        self._loan_summary.setWordWrap(True)
-        detail_layout.addWidget(self._loan_summary)
-
         # BR-LOAN-016: cobros ya registrados de este préstamo, los haya hecho
         # quien los haya hecho. En ventanilla es la respuesta a "¿ya pagué?",
         # que antes obligaba a mirar el saldo y deducir; y es desde donde se
         # reimprime un ticket que salió mal o que el cliente perdió.
+        detail_layout.addWidget(_caption("Cobros registrados"))
         self._payments_table = QTableWidget(0, len(_PAYMENT_HEADERS))
         self._payments_table.setHorizontalHeaderLabels(_PAYMENT_HEADERS)
         size_columns(self._payments_table, stretch_column=3)
@@ -1188,6 +1346,7 @@ class CashView(BaseView):
         self._last_payment_loan_id = None
         self._loan_combo.clear()
         self._installment_combo.clear()
+        self._clear_installments()
         self._collection_amount.clear()
         self._loan_summary.setText("")
         self._payment_entries = []
@@ -1219,11 +1378,7 @@ class CashView(BaseView):
         activos = [loan for loan in response.loans if loan.status == _COBRABLE]
         self._loan_combo.clear()
         for loan in activos:
-            etiqueta = (
-                f"{loan.id[:8]} · {loan.term_months} cuotas · "
-                f"saldo {gs(loan.remaining_balance)}"
-            )
-            self._loan_combo.addItem(etiqueta, loan)
+            self._loan_combo.addItem(_etiqueta_prestamo(loan), loan)
         self._collection_detail.setVisible(True)
         if not activos:
             self._loan_summary.setText(
@@ -1237,6 +1392,7 @@ class CashView(BaseView):
         loan = self._loan_combo.itemData(index)
         self._selected_loan = loan
         self._installment_combo.clear()
+        self._clear_installments()
         self._collection_amount.clear()
         # El comprobante sigue a su préstamo: se apaga al pasar a otro y
         # vuelve si se regresa al que se acaba de cobrar (el cajero suele
@@ -1250,9 +1406,8 @@ class CashView(BaseView):
             else f"con {loan.overdue_installments_count} cuota(s) vencida(s) "
             f"por {gs(loan.overdue_amount)}"
         )
-        self._loan_summary.setText(
-            f"Saldo restante {gs(loan.remaining_balance)} · Préstamo {estado}."
-        )
+        # El saldo ya está en el resumen de arriba; acá sólo la situación.
+        self._loan_summary.setText(f"Préstamo {estado}.")
         self._run_collection(
             self._loans_client.get_amortization_schedule,
             self._session.access_token,
@@ -1262,16 +1417,16 @@ class CashView(BaseView):
         self._load_loan_payments(loan.id)
 
     def _on_schedule_loaded(self, response) -> None:
+        # La tabla va antes que el combo: el primer addItem() dispara
+        # _on_installment_changed, que marca la fila correspondiente.
+        self._render_installments(response)
         self._installment_combo.clear()
         for cuota in response.installments:
             if cuota.is_paid:
                 continue
             # BR-LOAN-017: la mora viaja junto a la cuota en el itemData para
             # que el desglose no tenga que volver a pedir el cronograma.
-            etiqueta = (
-                f"Cuota {cuota.installment_number} · Vence "
-                f"{fecha(cuota.due_date)} · {gs(cuota.amount_due)}"
-            )
+            etiqueta = f"Cuota {cuota.installment_number} · {gs(cuota.amount_due)}"
             if _hay_mora(cuota.late_fee):
                 etiqueta += f" + mora {gs(cuota.late_fee)}"
             self._installment_combo.addItem(
@@ -1300,7 +1455,181 @@ class CashView(BaseView):
         if not es_total:
             self._collection_discount.clear()
             self._collection_discount.set_error(False)
+        self._mark_installment_rows(data)
         self._refresh_collection_total()
+
+    # ---- Tabla de cuotas -------------------------------------------------
+
+    def _clear_installments(self) -> None:
+        self._installment_table.setRowCount(0)
+        self._installment_summary.clear()
+        self._fit_installment_table()
+
+    def _fit_installment_table(self) -> None:
+        """Alto justo para sus filas, hasta _INST_VISIBLE_ROWS; más allá
+        scrollea. Dentro de wrap_scrollable() una tabla sin alto fijo queda
+        en su mínimo (unas 3 filas), y un préstamo de 12 cuotas se leía por
+        una rendija."""
+        tabla = self._installment_table
+        filas = min(max(tabla.rowCount(), 3), _INST_VISIBLE_ROWS)
+        alto = (
+            tabla.horizontalHeader().sizeHint().height()
+            + filas * tabla.verticalHeader().defaultSectionSize()
+            + 2 * tabla.frameWidth()
+            + 4
+        )
+        tabla.setFixedHeight(alto)
+
+    def _render_installments(self, response) -> None:
+        """Cronograma completo con el estado de cada cuota, más el resumen."""
+        hoy = date.today()
+        self._syncing_installments = True
+        try:
+            self._installment_table.setRowCount(0)
+            proxima_marcada = False
+            primera_pendiente = None
+            for cuota in response.installments:
+                vence = _fecha_iso(cuota.due_date)
+                es_proxima = (
+                    not cuota.is_paid
+                    and not proxima_marcada
+                    and (vence is None or vence >= hoy)
+                )
+                proxima_marcada = proxima_marcada or es_proxima
+                texto_estado, color = _estado_cuota(cuota, hoy, es_proxima)
+
+                if cuota.is_paid:
+                    valores = (
+                        str(cuota.installment_number),
+                        fecha(cuota.due_date),
+                        gs(cuota.payment_amount),
+                        "—",
+                        "—",
+                        texto_estado,
+                    )
+                else:
+                    valores = (
+                        str(cuota.installment_number),
+                        fecha(cuota.due_date),
+                        gs(cuota.amount_due),
+                        gs(cuota.late_fee) if _hay_mora(cuota.late_fee) else "—",
+                        gs(str(_decimal(cuota.amount_due) + _decimal(cuota.late_fee))),
+                        texto_estado,
+                    )
+
+                row = self._installment_table.rowCount()
+                self._installment_table.insertRow(row)
+                for col, texto in enumerate(valores):
+                    item = QTableWidgetItem(texto)
+                    if col in _INST_MONEY_COLUMNS:
+                        item.setTextAlignment(
+                            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                        )
+                    if cuota.is_paid:
+                        # Visible pero no elegible: ya no hay nada que cobrar.
+                        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                        item.setForeground(QColor(theme.TEXT_MUTED))
+                    if col == _INST_COL_ESTADO:
+                        _resaltar(item, color)
+                    elif col == _INST_COL_MORA and texto != "—":
+                        _resaltar(item, theme.ERROR)
+                    if col == 0:
+                        item.setData(Qt.ItemDataRole.UserRole, cuota.installment_number)
+                    self._installment_table.setItem(row, col, item)
+                if not cuota.is_paid and primera_pendiente is None:
+                    primera_pendiente = row
+        finally:
+            self._syncing_installments = False
+        self._fit_installment_table()
+        if primera_pendiente is not None:
+            self._installment_table.scrollToItem(
+                self._installment_table.item(primera_pendiente, 0),
+                QAbstractItemView.ScrollHint.PositionAtTop,
+            )
+        self._render_installment_summary(response, hoy)
+
+    def _render_installment_summary(self, response, hoy: date) -> None:
+        cuotas = list(response.installments)
+        pagadas = sum(1 for c in cuotas if c.is_paid)
+        pendientes = [c for c in cuotas if not c.is_paid]
+        vencidas = sum(
+            1
+            for c in pendientes
+            if (vence := _fecha_iso(c.due_date)) is not None and vence < hoy
+        )
+        proxima = next(
+            (
+                c
+                for c in pendientes
+                if (vence := _fecha_iso(c.due_date)) is None or vence >= hoy
+            ),
+            None,
+        )
+        self._installment_summary.clear()
+        for titulo, valor, color in (
+            (
+                "Cuotas pagadas",
+                f"{pagadas} de {len(cuotas)}",
+                theme.SUCCESS if cuotas and pagadas == len(cuotas) else theme.PRIMARY,
+            ),
+            (
+                "Cuotas vencidas",
+                str(vencidas) if vencidas else "Ninguna",
+                theme.ERROR if vencidas else theme.SUCCESS,
+            ),
+            ("Saldo restante", gs(response.remaining_balance), theme.PRIMARY),
+            (
+                "Próximo vencimiento",
+                fecha(proxima.due_date) if proxima is not None else "—",
+                theme.PRIMARY,
+            ),
+        ):
+            self._installment_summary.add_widget(_summary_chip(titulo, valor, color))
+
+    def _mark_installment_rows(self, data) -> None:
+        """Refleja en la tabla lo elegido en el combo: la cuota elegida, o
+        todas las pendientes si se eligió el pago total."""
+        tabla = self._installment_table
+        self._syncing_installments = True
+        try:
+            tabla.clearSelection()
+            if data is None:
+                return
+            numero = data[0]
+            es_total = payoff.is_pay_in_full(data)
+            modelo = tabla.selectionModel()
+            for row in range(tabla.rowCount()):
+                item = tabla.item(row, 0)
+                if item is None or not (item.flags() & Qt.ItemFlag.ItemIsSelectable):
+                    continue
+                if es_total or item.data(Qt.ItemDataRole.UserRole) == numero:
+                    # selectionModel().select() y no selectRow(): con
+                    # SingleSelection, selectRow() dejaría sólo la última.
+                    modelo.select(
+                        tabla.model().index(row, 0),
+                        modelo.SelectionFlag.Select | modelo.SelectionFlag.Rows,
+                    )
+                    if not es_total:
+                        tabla.scrollToItem(item)
+        finally:
+            self._syncing_installments = False
+
+    def _on_installment_row_selected(self) -> None:
+        """Clic en una cuota pendiente de la tabla -> se elige en el combo."""
+        if self._syncing_installments:
+            return
+        filas = {index.row() for index in self._installment_table.selectedIndexes()}
+        if len(filas) != 1:
+            return
+        item = self._installment_table.item(filas.pop(), 0)
+        if item is None:
+            return
+        numero = item.data(Qt.ItemDataRole.UserRole)
+        for indice in range(self._installment_combo.count()):
+            datos = self._installment_combo.itemData(indice)
+            if datos is not None and datos[0] == numero:
+                self._installment_combo.setCurrentIndex(indice)
+                return
 
     def _refresh_collection_total(self) -> None:
         """Monto a recibir + desglose, recalculados al elegir cuota o al
@@ -1433,16 +1762,26 @@ class CashView(BaseView):
         indice = self._loan_combo.currentIndex()
         if indice >= 0:
             self._loan_combo.setItemData(indice, loan)
-        estado = "cancelado" if loan.status == "PAID" else "activo"
+            self._loan_combo.setItemText(indice, _etiqueta_prestamo(loan))
         self._loan_summary.setText(
-            f"Saldo restante {gs(loan.remaining_balance)} · Préstamo {estado}."
+            "Préstamo cancelado: no quedan cuotas por cobrar."
+            if loan.status == "PAID"
+            else ""
         )
         self._load_loan_payments(loan.id)
         if loan.status != _COBRABLE:
-            # Quedó saldado con este cobro: no hay más cuotas que ofrecer.
+            # Quedó saldado con este cobro: no hay más cuotas que ofrecer. El
+            # cronograma se sigue mostrando (todo "Pagada"), que es la
+            # confirmación visual de que el préstamo quedó cancelado.
             self._installment_combo.clear()
             self._collection_amount.clear()
             self._collect_button.setEnabled(False)
+            self._run_collection(
+                self._loans_client.get_amortization_schedule,
+                self._session.access_token,
+                loan.id,
+                on_success=self._render_installments,
+            )
             return
         self._run_collection(
             self._loans_client.get_amortization_schedule,

@@ -11,6 +11,7 @@ so the authorised commercial terms can't drift between the PDF and the DOCX
 of the same contract."""
 
 import html
+from decimal import Decimal
 
 from docx import Document
 from docx.enum.section import WD_ORIENT
@@ -644,6 +645,53 @@ def reporte_estado_pagos_docx(report, generated_by: str = "") -> Document:
         'El "monto vencido" es lo ya exigible e impago; el "saldo pendiente" '
         "incluye además las cuotas futuras todavía no vencidas. Los totales "
         "corresponden a los clientes listados, no a toda la cartera.",
+    )
+    _add_footer_note(
+        document, "Documento generado por el sistema de CREDIMED UME. Uso interno."
+    )
+    return document
+
+
+def reporte_cancelados_docx(report, generated_by: str = "") -> Document:
+    """BR-DASH-004, contraparte .docx de documents.reporte_cancelados_html().
+    Apaisado por la misma razón que reporte_estado_pagos_docx: 8 columnas.
+
+    report: dashboard_service_pb2.GetPaidLoansReportResponse"""
+    document = _nuevo_documento()
+    _apaisar(document)
+    _add_header(document, "Clientes con Préstamos Cancelados")
+
+    lineas = [
+        ("Fecha del reporte", fecha_hora(report.generated_at.ToDatetime())),
+        ("Clientes", str(report.clients_count)),
+        ("Préstamos cancelados", str(report.loans_count)),
+        ("Capital", gs(report.total_principal)),
+        ("Total cobrado", gs(report.total_collected)),
+    ]
+    if Decimal(report.total_discount or "0") > 0:
+        lineas.append(("Descuentos otorgados", gs(report.total_discount)))
+    if generated_by:
+        lineas.append(("Generado por", generated_by))
+    _add_labeled_lines(document, lineas)
+
+    # Mismas columnas y filas que el PDF y la tabla de la vista -- ver
+    # documents.CANCELADOS_COLUMNAS / _filas_cancelados.
+    columnas = documents.CANCELADOS_COLUMNAS
+    filas = documents._filas_cancelados(report)
+    table = document.add_table(rows=1 + len(filas), cols=len(columnas))
+    table.style = "Table Grid"
+    for col, text in enumerate(columnas):
+        table.rows[0].cells[col].text = text
+    for row_index, tupla in enumerate(filas, start=1):
+        cells = table.rows[row_index].cells
+        for col, celda in enumerate(tupla):
+            cells[col].text = celda
+
+    _add_footer_note(
+        document,
+        '"Cancelado el" es la fecha del último pago, que fue el que saldó el '
+        'préstamo. "Total cobrado" es el dinero efectivamente recibido: cuotas '
+        "y mora, menos el descuento otorgado al cancelar.",
     )
     _add_footer_note(
         document, "Documento generado por el sistema de CREDIMED UME. Uso interno."

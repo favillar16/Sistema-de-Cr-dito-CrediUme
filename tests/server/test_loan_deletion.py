@@ -3,8 +3,9 @@
 Archivo propio y no un bloque más en test_loan_interceptor_integration.py
 porque es la única operación del sistema que borra una fila de negocio, y lo
 que hay que probar acá no es sólo "quién puede llamarla" (el patrón de ese
-archivo) sino sobre todo *qué préstamos* acepta borrar y qué invariante
-protege: la plata ya cobrada no desaparece.
+archivo) sino qué arrastra el borrado: desde 2026-10-07 se acepta cualquier
+estado, y los pagos se borran con el préstamo pero el efectivo ya imputado a
+la caja no desaparece.
 
 Mismo patrón de servidor real + AuthInterceptor que el resto de las pruebas de
 RBAC -- DeleteLoan lee el actor desde el token para el AuditLog, así que una
@@ -25,6 +26,9 @@ import pytest
 from cas_server.db.base import SessionLocal
 from cas_server.db.models import (
     AuditLog,
+    CashMovement,
+    CashMovementTypeEnum,
+    CashSession,
     Client,
     Loan,
     LoanInstallmentAdjustment,
@@ -144,8 +148,7 @@ def test_delete_loan_is_denied_to_the_teller(stubs):
 
 def test_delete_loan_is_allowed_from_credit_analyst_up(stubs):
     """El gate acompaña al de originación: quien puede cargar un préstamo
-    puede deshacer su propia carga. Lo que contiene el riesgo no es el rol
-    sino el estado -- ver los tests de _ESTADOS_ELIMINABLES más abajo."""
+    puede deshacer su propia carga. El cajero es el único rol excluido."""
     auth_stub, loan_stub = stubs
     _create_user("analyst_del", RoleEnum.CREDIT_ANALYST)
     _create_user("manager_del", RoleEnum.MANAGER)
@@ -179,11 +182,11 @@ def test_delete_loan_requires_a_reason(stubs):
     assert _loan_exists(loan_id)
 
 
-@pytest.mark.parametrize(
-    "status",
-    [LoanStatusEnum.PENDING, LoanStatusEnum.APPROVED, LoanStatusEnum.EXPIRED],
-)
-def test_delete_loan_accepts_every_state_that_never_moved_money(stubs, status):
+@pytest.mark.parametrize("status", list(LoanStatusEnum))
+def test_delete_loan_accepts_every_state(stubs, status):
+    """Desde 2026-10-07 no hay estado que bloquee: por decisión de la entidad
+    se borra también un préstamo ACTIVE, PAID o DEFAULTED, y el riesgo lo
+    asume el personal (mismo criterio que DeleteClient, BR-CLI-008)."""
     auth_stub, loan_stub = stubs
     username = f"manager_ok_{status.value.lower()}"
     _create_user(username, RoleEnum.MANAGER)
@@ -200,57 +203,81 @@ def test_delete_loan_accepts_every_state_that_never_moved_money(stubs, status):
     assert not _loan_exists(loan_id)
 
 
-@pytest.mark.parametrize(
-    "status",
-    [LoanStatusEnum.ACTIVE, LoanStatusEnum.PAID, LoanStatusEnum.DEFAULTED],
-)
-def test_delete_loan_refuses_a_disbursed_loan(stubs, status):
-    """ACTIVE/PAID/DEFAULTED implican un desembolso ya hecho: borrarlos podría
-    hacer desaparecer pagos imputados a un turno de caja ya cerrado."""
-    auth_stub, loan_stub = stubs
-    username = f"manager_no_{status.value.lower()}"
-    _create_user(username, RoleEnum.MANAGER)
-    client_id = _create_client_row(
-        f"71002{status.value[:2]}", f"no_{status.value.lower()}@example.com"
-    )
-    loan_id = _create_loan_row(client_id, status)
-
-    with pytest.raises(grpc.RpcError) as exc_info:
-        loan_stub.DeleteLoan(_delete(loan_id), metadata=_login(auth_stub, username))
-    assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
-    assert _loan_exists(loan_id)
+def _create_payment_row(loan_id, amount=Decimal("100.00")):
+    with SessionLocal() as session:
+        payment = LoanPayment(
+            loan_id=loan_id,
+            amount=amount,
+            transfer_reference="TRF-BORRAR",
+            paid_at=datetime.now(timezone.utc),
+        )
+        session.add(payment)
+        session.commit()
+        session.refresh(payment)
+        return payment.id
 
 
-def test_delete_loan_never_destroys_a_registered_payment(stubs):
-    """El invariante que sostiene toda la regla: la plata cobrada no se borra.
-
-    Se arma a propósito el caso que hoy el estado ya impediría (un préstamo
-    APPROVED con un pago cargado) para probar que la verificación de pagos es
-    real y no está viva sólo por casualidad, cubierta por la de estado.
-    """
+def test_delete_loan_removes_its_payments(stubs):
+    """Un préstamo activo con cobros se borra junto con sus pagos -- si
+    quedaran, la FK impediría el DELETE."""
     auth_stub, loan_stub = stubs
     _create_user("manager_paid_del", RoleEnum.MANAGER)
     client_id = _create_client_row("7100030", "paydel@example.com")
-    loan_id = _create_loan_row(client_id, LoanStatusEnum.APPROVED)
-    with SessionLocal() as session:
-        session.add(
-            LoanPayment(
-                loan_id=loan_id,
-                amount=Decimal("100.00"),
-                transfer_reference="TRF-NO-BORRAR",
-                paid_at=datetime.now(timezone.utc),
-            )
-        )
-        session.commit()
+    loan_id = _create_loan_row(client_id, LoanStatusEnum.ACTIVE)
+    payment_id = _create_payment_row(loan_id)
 
-    with pytest.raises(grpc.RpcError) as exc_info:
-        loan_stub.DeleteLoan(
-            _delete(loan_id), metadata=_login(auth_stub, "manager_paid_del")
-        )
-    assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
-    assert _loan_exists(loan_id)
+    response = loan_stub.DeleteLoan(
+        _delete(loan_id), metadata=_login(auth_stub, "manager_paid_del")
+    )
+    assert response.success is True
+    assert not _loan_exists(loan_id)
     with SessionLocal() as session:
-        assert session.query(LoanPayment).filter_by(loan_id=loan_id).count() == 1
+        assert session.get(LoanPayment, payment_id) is None
+
+
+def test_delete_loan_preserves_a_cash_movement_but_clears_its_payment_link(stubs):
+    """BR-CAJA-003: el efectivo cobrado ya puede estar sumado en el arqueo de
+    un turno cerrado y firmado. Borrar el préstamo no debe hacer desaparecer
+    ese movimiento ni cambiar su monto -- sólo pierde el puntero al pago."""
+    auth_stub, loan_stub = stubs
+    _create_user("cajero_ldel", RoleEnum.CASHIER)
+    with SessionLocal() as session:
+        user_id = session.query(User.id).filter_by(username="cajero_ldel").scalar()
+    client_id = _create_client_row("7100034", "cajamovl@example.com")
+    loan_id = _create_loan_row(client_id, LoanStatusEnum.PAID)
+    payment_id = _create_payment_row(loan_id)
+
+    with SessionLocal() as session:
+        cash_session = CashSession(
+            user_id=user_id,
+            opening_amount=Decimal("100000.00"),
+            opened_at=datetime.now(timezone.utc),
+        )
+        session.add(cash_session)
+        session.flush()
+        movement = CashMovement(
+            cash_session_id=cash_session.id,
+            movement_type=CashMovementTypeEnum.INGRESO,
+            amount=Decimal("100.00"),
+            concept="Cobro de cuota",
+            loan_payment_id=payment_id,
+            created_by_user_id=user_id,
+        )
+        session.add(movement)
+        session.commit()
+        movement_id = movement.id
+
+    _create_user("manager_cajamov_ldel", RoleEnum.MANAGER)
+    loan_stub.DeleteLoan(
+        _delete(loan_id), metadata=_login(auth_stub, "manager_cajamov_ldel")
+    )
+
+    with SessionLocal() as session:
+        movement_after = session.get(CashMovement, movement_id)
+        assert movement_after is not None
+        assert movement_after.loan_payment_id is None
+        assert movement_after.amount == Decimal("100.00")
+        assert session.get(LoanPayment, payment_id) is None
 
 
 def test_delete_loan_removes_its_installment_adjustments(stubs):

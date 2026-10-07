@@ -35,6 +35,7 @@ from decimal import Decimal, InvalidOperation
 
 from cas_client import assets, theme
 from cas_client.formatting import (
+    DISPLAY_DATE_FORMAT,
     a_hora_local,
     fecha,
     fecha_hora,
@@ -119,7 +120,7 @@ _ESTADOS_LABEL = {
     "PENDING": "Pendiente",
     "APPROVED": "Aprobado",
     "ACTIVE": "Activo",
-    "PAID": "Pagado",
+    "PAID": "Cancelado",
     "DEFAULTED": "Incumplido",
     # Ver la nota equivalente en loans_view.py: LoanStatusEnum.EXPIRED se
     # presenta como "Rechazado" en toda la UI y en los documentos.
@@ -1582,6 +1583,108 @@ def reporte_estado_pagos_html(report, generated_by: str = "") -> str:
     El "monto vencido" es lo ya exigible e impago; el "saldo pendiente"
     incluye adem&aacute;s las cuotas futuras todav&iacute;a no vencidas. Los
     totales corresponden a los clientes listados, no a toda la cartera.</p>
+    {_footer("Documento generado por el sistema de CREDIMED UME. Uso interno.")}
+    </body></html>
+    """
+
+
+# BR-DASH-004. Columnas del listado de préstamos cancelados, compartidas por
+# el PDF, el DOCX y la tabla de dashboard_view.py -- mismo criterio que
+# ESTADO_PAGOS_COLUMNAS.
+CANCELADOS_COLUMNAS = (
+    "Cliente",
+    "Documento",
+    "Teléfono",
+    "Préstamo",
+    "Capital (Gs)",
+    "Cuotas",
+    "Cancelado el",
+    "Total cobrado (Gs)",
+)
+CANCELADOS_COLUMNAS_NUMERICAS = (4, 7)
+
+
+def _filas_cancelados(report) -> list[tuple[str, ...]]:
+    """Una tupla por préstamo, en el mismo orden que CANCELADOS_COLUMNAS.
+
+    "Total cobrado" es lo recibido (ya sin el descuento, con la mora); si
+    hubo descuento se aclara al lado, igual que en el historial de cobros --
+    si no, la fila no explicaría por qué se cobró menos que el crédito.
+
+    report: dashboard_service_pb2.GetPaidLoansReportResponse"""
+    filas = []
+    for fila in report.rows:
+        cancelado = (
+            a_hora_local(fila.paid_off_at.ToDatetime()).strftime(DISPLAY_DATE_FORMAT)
+            if fila.HasField("paid_off_at")
+            else "—"
+        )
+        cobrado = gs(fila.total_collected)
+        if Decimal(fila.total_discount or "0") > 0:
+            cobrado += f" (desc. {gs(fila.total_discount)})"
+        filas.append(
+            (
+                fila.client_name,
+                fila.national_id,
+                fila.phone_number,
+                fila.loan_id[:8],
+                gs(fila.principal_amount),
+                str(fila.term_months),
+                cancelado,
+                cobrado,
+            )
+        )
+    return filas
+
+
+def reporte_cancelados_html(report, generated_by: str = "") -> str:
+    """BR-DASH-004: clientes con préstamos cancelados, para imprimir o
+    archivar. Sólo cifras ya registradas, sin texto legal.
+
+    report: dashboard_service_pb2.GetPaidLoansReportResponse"""
+
+    def _alinear(i: int) -> str:
+        return "right" if i in CANCELADOS_COLUMNAS_NUMERICAS else "left"
+
+    encabezados = "".join(
+        f'<th align="{_alinear(i)}">{columna}</th>'
+        for i, columna in enumerate(CANCELADOS_COLUMNAS)
+    )
+    filas = "".join(
+        "<tr>"
+        + "".join(
+            f'<td align="{_alinear(i)}">{celda}</td>' for i, celda in enumerate(tupla)
+        )
+        + "</tr>"
+        for tupla in _filas_cancelados(report)
+    )
+    if not filas:
+        filas = (
+            f'<tr><td colspan="{len(CANCELADOS_COLUMNAS)}">'
+            "No hay pr&eacute;stamos cancelados.</td></tr>"
+        )
+    generado_por = f"<br/><b>Generado por:</b> {generated_by}" if generated_by else ""
+    descuentos = (
+        f" &nbsp;&nbsp;<b>Descuentos otorgados:</b> {gs(report.total_discount)}"
+        if Decimal(report.total_discount or "0") > 0
+        else ""
+    )
+    return f"""
+    <html><body style="font-family: sans-serif; color: {theme.TEXT_PRIMARY};">
+    {_header("Clientes con Pr&eacute;stamos Cancelados")}
+    <p><b>Fecha del reporte:</b> {fecha_hora(report.generated_at.ToDatetime())}{generado_por}</p>
+    <p><b>Clientes:</b> {report.clients_count} &nbsp;&nbsp;
+    <b>Pr&eacute;stamos cancelados:</b> {report.loans_count} &nbsp;&nbsp;
+    <b>Capital:</b> {gs(report.total_principal)} &nbsp;&nbsp;
+    <b>Total cobrado:</b> {gs(report.total_collected)}{descuentos}</p>
+    <table border="1" cellspacing="0" cellpadding="5" width="100%">
+      <tr style="background-color:{theme.PRIMARY}; color:white;">{encabezados}</tr>
+      {filas}
+    </table>
+    <p style="font-size:9pt; color:{theme.TEXT_MUTED}; margin-top:16px;">
+    "Cancelado el" es la fecha del &uacute;ltimo pago, que fue el que sald&oacute;
+    el pr&eacute;stamo. "Total cobrado" es el dinero efectivamente recibido:
+    cuotas y mora, menos el descuento otorgado al cancelar.</p>
     {_footer("Documento generado por el sistema de CREDIMED UME. Uso interno.")}
     </body></html>
     """

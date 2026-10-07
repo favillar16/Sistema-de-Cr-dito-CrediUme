@@ -30,6 +30,7 @@ from cas_client.formatting import (
 from cas_client.grpc_client import ApiError, DashboardServiceClient
 from cas_client.page_layout import aplicar_hoja
 from cas_client.rbac_ui import (
+    can_view_paid_loans_report,
     can_view_payment_status_report,
     can_view_period_report,
     tier_label,
@@ -52,7 +53,7 @@ _LOAN_STATUS_TILES = (
     ("pending_loans_count", "Pendientes de aprobación", "PENDING", "PE"),
     ("approved_loans_count", "Aprobados (sin desembolsar)", "APPROVED", "AP"),
     ("active_loans_count", "Activos", "ACTIVE", "AC"),
-    ("paid_loans_count", "Pagados", "PAID", "PG"),
+    ("paid_loans_count", "Cancelados", "PAID", "CA"),
     ("defaulted_loans_count", "Incumplidos", "DEFAULTED", "IN"),
     # LoanStatusEnum.EXPIRED. La etiqueta pasó de "Caducados" a "Rechazados"
     # por decisión de producto -- el estado del servidor y el nombre del campo
@@ -124,6 +125,16 @@ def _friendly_payment_status_message(exc: Exception) -> str:
     return f"No se pudo conectar con el servidor: {exc}"
 
 
+def _friendly_paid_loans_message(exc: Exception) -> str:
+    if isinstance(exc, ApiError):
+        if exc.code == grpc.StatusCode.PERMISSION_DENIED:
+            return "No tiene permisos para ver el listado de préstamos cancelados."
+        if exc.code == grpc.StatusCode.UNAVAILABLE:
+            return "No se pudo conectar con el servidor."
+        return "No se pudo generar el reporte de cancelados. Intente nuevamente."
+    return f"No se pudo conectar con el servidor: {exc}"
+
+
 def _rango_mes(anchor: date) -> tuple[date, date]:
     """Primer y último día del mes en que cae `anchor`."""
     inicio = anchor.replace(day=1)
@@ -180,6 +191,9 @@ class DashboardView(BaseView):
         self._payment_status_worker: AsyncWorker | None = None
         # último GetClientPaymentStatusReportResponse recibido (BR-DASH-003)
         self._payment_status = None
+        self._paid_loans_worker: AsyncWorker | None = None
+        # último GetPaidLoansReportResponse recibido (BR-DASH-004)
+        self._paid_loans = None
         # Bumped on every _refresh_stats() call so a stale worker's callbacks
         # (a previous refresh still in flight when the user tabs back in,
         # see showEvent()) can tell they've been superseded and no-op instead
@@ -279,6 +293,16 @@ class DashboardView(BaseView):
         # cierre de período -- GetClientPaymentStatusReport es
         # CREDIT_ANALYST_AND_ABOVE server-side (rbac.py).
         self._set_payment_status_visible(False)
+
+        self._paid_loans_section_label = section_label(
+            "Clientes con préstamos cancelados"
+        )
+        self.content_layout.addWidget(self._paid_loans_section_label)
+        self._paid_loans_card = self._build_paid_loans_card()
+        self.content_layout.addWidget(self._paid_loans_card)
+        # GetPaidLoansReport es CREDIT_ANALYST_AND_ABOVE (rbac.py): oculto
+        # hasta que set_user() sepa el rol, igual que las otras dos tarjetas.
+        self._set_paid_loans_visible(False)
 
         self.content_layout.addStretch()
 
@@ -745,7 +769,7 @@ class DashboardView(BaseView):
         printer = self._payment_status_printer()
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         printer.setOutputFileName(path)
-        aplicar_hoja(printer)
+        aplicar_hoja(printer, apaisado=True)
         try:
             document.print_(printer)
         except OSError as exc:
@@ -787,7 +811,212 @@ class DashboardView(BaseView):
         if dialog.exec() == QPrintDialog.DialogCode.Accepted:
             # Después del diálogo: aceptarlo reemplaza el layout de página
             # por el de la impresora elegida (ver page_layout.aplicar_hoja).
-            aplicar_hoja(printer)
+            # apaisado=True otra vez: sin él, esta llamada devolvía a vertical
+            # la hoja que _payment_status_printer() acababa de poner apaisada.
+            aplicar_hoja(printer, apaisado=True)
+            try:
+                document.print_(printer)
+            except OSError as exc:
+                self._toast.show_message(documents.friendly_file_error(exc))
+
+    # ---- Clientes con préstamos cancelados (BR-DASH-004) -----------------
+
+    def _build_paid_loans_card(self) -> QWidget:
+        frame, layout = card()
+
+        intro = QLabel(
+            "Listado de los préstamos que ya fueron cancelados en su totalidad: "
+            "cliente, capital, fecha de cancelación y total cobrado."
+        )
+        intro.setStyleSheet(f"color: {theme.TEXT_MUTED}; font-size: 12px;")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        actions_row = ResponsiveGrid(min_cell_width=150)
+        generate_button = QPushButton("Generar reporte")
+        generate_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        generate_button.setStyleSheet(theme.accent_button_style())
+        generate_button.clicked.connect(self._on_generate_paid_loans)
+        actions_row.add_widget(generate_button)
+
+        self._paid_loans_export_buttons: list[QPushButton] = []
+        for label, handler in (
+            ("Descargar PDF", self._on_paid_loans_download_pdf),
+            ("Descargar DOCX", self._on_paid_loans_download_docx),
+            ("Imprimir", self._on_paid_loans_print),
+        ):
+            button = QPushButton(label)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(theme.secondary_button_style())
+            button.clicked.connect(handler)
+            button.setEnabled(False)  # hasta que haya un reporte cargado
+            actions_row.add_widget(button)
+            self._paid_loans_export_buttons.append(button)
+        layout.addWidget(actions_row)
+
+        self._paid_loans_progress = QProgressBar()
+        self._paid_loans_progress.setRange(0, 0)
+        self._paid_loans_progress.setTextVisible(False)
+        self._paid_loans_progress.setFixedHeight(4)
+        self._paid_loans_progress.hide()
+        layout.addWidget(self._paid_loans_progress)
+
+        self._paid_loans_caption = QLabel("")
+        self._paid_loans_caption.setStyleSheet(
+            f"color: {theme.TEXT_MUTED}; font-size: 12px;"
+        )
+        self._paid_loans_caption.setWordWrap(True)
+        layout.addWidget(self._paid_loans_caption)
+
+        self._paid_loans_table = QTableWidget(0, len(documents.CANCELADOS_COLUMNAS))
+        self._paid_loans_table.setHorizontalHeaderLabels(
+            list(documents.CANCELADOS_COLUMNAS)
+        )
+        size_columns(self._paid_loans_table, stretch_column=0)
+        self._paid_loans_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._paid_loans_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self._paid_loans_table.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        style_table(self._paid_loans_table)
+        set_empty_message(
+            self._paid_loans_table, 'Sin datos todavía. Pulse "Generar reporte".'
+        )
+        layout.addWidget(self._paid_loans_table)
+        self._fit_paid_loans_table_height()
+
+        return frame
+
+    def _set_paid_loans_visible(self, visible: bool) -> None:
+        self._paid_loans_section_label.setVisible(visible)
+        self._paid_loans_card.setVisible(visible)
+
+    def _on_generate_paid_loans(self) -> None:
+        if not self._session.access_token:
+            return
+        self._paid_loans_progress.setRange(0, 0)
+        self._paid_loans_progress.show()
+        self._paid_loans_worker = AsyncWorker(
+            self._client.get_paid_loans_report,
+            self._session.access_token,
+            error_translator=_friendly_paid_loans_message,
+        )
+        self._paid_loans_worker.succeeded.connect(self._on_paid_loans_loaded)
+        self._paid_loans_worker.failed.connect(self._toast.show_message)
+        self._paid_loans_worker.finished.connect(self._hide_paid_loans_progress)
+        self._paid_loans_worker.start()
+
+    def _hide_paid_loans_progress(self) -> None:
+        self._paid_loans_progress.hide()
+        self._paid_loans_progress.setRange(0, 1)
+        self._paid_loans_progress.setValue(0)
+
+    def _on_paid_loans_loaded(self, report) -> None:
+        self._paid_loans = report
+        self._paid_loans_caption.setText(
+            f"{report.loans_count} préstamo(s) cancelado(s) de "
+            f"{report.clients_count} cliente(s) · Capital "
+            f"{gs(report.total_principal)} · Total cobrado "
+            f"{gs(report.total_collected)}."
+        )
+        # Mismas filas que el PDF/DOCX -- ver documents._filas_cancelados.
+        filas = documents._filas_cancelados(report)
+        self._paid_loans_table.setRowCount(0)
+        for tupla in filas:
+            row = self._paid_loans_table.rowCount()
+            self._paid_loans_table.insertRow(row)
+            for col, texto in enumerate(tupla):
+                item = QTableWidgetItem(texto)
+                if col in documents.CANCELADOS_COLUMNAS_NUMERICAS:
+                    item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+                self._paid_loans_table.setItem(row, col, item)
+        if not filas:
+            set_empty_message(
+                self._paid_loans_table, "Todavía no hay préstamos cancelados."
+            )
+        self._fit_paid_loans_table_height()
+        for button in self._paid_loans_export_buttons:
+            button.setEnabled(True)
+
+    def _fit_paid_loans_table_height(self) -> None:
+        """Mismo criterio que _fit_payment_status_table_height()."""
+        alto = self._paid_loans_table.horizontalHeader().height()
+        for row in range(self._paid_loans_table.rowCount()):
+            alto += self._paid_loans_table.rowHeight(row)
+        alto += 2 * self._paid_loans_table.frameWidth()
+        self._paid_loans_table.setFixedHeight(max(alto, 120))
+
+    def _paid_loans_default_name(self, extension: str) -> str:
+        dia = self._paid_loans.generated_at.ToDatetime().date().isoformat()
+        return f"prestamos_cancelados_{dia}.{extension}"
+
+    def _paid_loans_html(self) -> str:
+        return documents.reporte_cancelados_html(
+            self._paid_loans, self._session.username or ""
+        )
+
+    def _on_paid_loans_download_pdf(self) -> None:
+        if self._paid_loans is None:
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Guardar reporte",
+            self._paid_loans_default_name("pdf"),
+            "PDF (*.pdf)",
+        )
+        if not path:
+            return
+        document = QTextDocument()
+        document.setHtml(self._paid_loans_html())
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+        # Apaisado: 8 columnas, igual que el estado de pago.
+        aplicar_hoja(printer, apaisado=True)
+        try:
+            document.print_(printer)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Reporte guardado.")
+
+    def _on_paid_loans_download_docx(self) -> None:
+        if self._paid_loans is None:
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Guardar reporte",
+            self._paid_loans_default_name("docx"),
+            "Word (*.docx)",
+        )
+        if not path:
+            return
+        try:
+            documents_docx.reporte_cancelados_docx(
+                self._paid_loans, self._session.username or ""
+            ).save(path)
+        except OSError as exc:
+            self._toast.show_message(documents.friendly_file_error(exc))
+            return
+        self._toast.show_message("Reporte guardado.")
+
+    def _on_paid_loans_print(self) -> None:
+        if self._paid_loans is None:
+            return
+        document = QTextDocument()
+        document.setHtml(self._paid_loans_html())
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        aplicar_hoja(printer, apaisado=True)
+        dialog = QPrintDialog(printer, self)
+        if dialog.exec() == QPrintDialog.DialogCode.Accepted:
+            # Después del diálogo, que reemplaza el layout de página.
+            aplicar_hoja(printer, apaisado=True)
             try:
                 document.print_(printer)
             except OSError as exc:
@@ -801,6 +1030,7 @@ class DashboardView(BaseView):
         )
         self._set_reports_visible(can_view_period_report(role))
         self._set_payment_status_visible(can_view_payment_status_report(role))
+        self._set_paid_loans_visible(can_view_paid_loans_report(role))
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

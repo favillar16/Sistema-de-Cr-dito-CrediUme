@@ -74,7 +74,14 @@ APPROVED loan expires after 30 days, `BR-LOAN-003`, checked lazily on
 read/write rather than via a scheduler).
 
 There is no DRAFT state, and no REJECTED/CANCELLED/REFINANCED terminal
-states in the current implementation.
+states in the current implementation. The UI *labels* two of the existing
+ones with those words: `PAID` is shown as "Cancelado" (since 2026-10-07)
+and `EXPIRED` as "Rechazado" -- label only, the enum values are unchanged.
+
+`DeleteLoan` (BR-LOAN-012) removes a loan in **any** state since
+2026-10-07 (entity decision), cascading its payments and adjustments the
+same way `DeleteClient` does; cash movements are kept with their
+`loan_payment_id` cleared.
 
 ## Forbidden
 

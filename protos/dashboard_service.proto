@@ -31,6 +31,12 @@ service DashboardService {
     // del lado del cliente; no tiene versión PDF/DOCX.
     rpc GetUpcomingDueReport (GetUpcomingDueReportRequest)
         returns (GetUpcomingDueReportResponse);
+
+    // BR-DASH-004: listado de clientes con préstamos cancelados (PAID), una
+    // fila por préstamo -- un cliente con dos préstamos cancelados aparece dos
+    // veces. Es una foto de "ahora", sin rango de fechas, igual que BR-DASH-003.
+    rpc GetPaidLoansReport (GetPaidLoansReportRequest)
+        returns (GetPaidLoansReportResponse);
 }
 
 message GetDashboardStatsRequest {
@@ -184,4 +190,41 @@ message GetUpcomingDueReportResponse {
     google.protobuf.Timestamp generated_at = 1;
     int32 days_ahead = 2;        // eco de la ventana efectivamente aplicada
     repeated UpcomingDueRow rows = 3;
+}
+
+// BR-DASH-004. Sin filtros por ahora: el listado completo de préstamos
+// cancelados. El mensaje existe igual para poder agregarlos sin romper el
+// contrato.
+message GetPaidLoansReportRequest {
+}
+
+message PaidLoanRow {
+    string client_id = 1;
+    string client_name = 2;      // "Nombre Apellido"
+    string national_id = 3;
+    string phone_number = 4;
+    string loan_id = 5;
+    string principal_amount = 6; // capital desembolsado
+    int32 term_months = 7;
+    // Momento del último pago, que es el que dejó el préstamo en PAID: Loan
+    // no tiene columna de cancelación (mismo criterio que loans_paid en
+    // GetPeriodReport). Timestamp y no fecha para que el cliente lo pase a
+    // hora local (formatting.a_hora_local). Sin setear si no tiene pagos.
+    google.protobuf.Timestamp paid_off_at = 8;
+    // Dinero efectivamente recibido: sum(amount - discount + late_fee) de sus
+    // pagos. Restar el descuento es obligatorio (BR-LOAN-018): `amount`
+    // guarda el saldo entero aunque parte se haya condonado.
+    string total_collected = 9;
+    string total_discount = 10;  // BR-LOAN-018, "0.00" si no hubo
+    string total_late_fee = 11;  // BR-LOAN-017, mora cobrada
+}
+
+message GetPaidLoansReportResponse {
+    google.protobuf.Timestamp generated_at = 1;
+    repeated PaidLoanRow rows = 2;
+    int32 clients_count = 3;     // clientes distintos entre las filas
+    int32 loans_count = 4;
+    string total_principal = 5;
+    string total_collected = 6;
+    string total_discount = 7;
 }
