@@ -115,6 +115,16 @@ Maneja el ciclo de vida completo de un préstamo: Solicitud, Aprobación, Desemb
 
     **Del lado del cliente**, las dos entradas de cobro (Caja y detalle del préstamo) ofrecen "Pago total del préstamo" al final del combo de cuotas y muestran saldo − descuento + mora antes de confirmar; los papeles de cobro desglosan saldo cancelado, descuento, mora y total abonado, y rotulan el acumulado "Total cancelado" en vez de "Total pagado", porque incluye la parte condonada. Por el mismo motivo `GetLoanByIdResponse` informa `total_discount` (suma de los descuentos del préstamo), y la ficha del préstamo -- pantalla de detalle, Liquidación PDF/DOCX, cronograma e historial de cobros -- aclara el descuento junto al total en vez de presentarlo como cobrado.
 
+*   **BR-LOAN-019 (Eliminación de un cobro registrado por error):** `DeleteLoanPayment(payment_id, reason)` borra un cobro ya registrado. Decisiones de la entidad (2026-11-19):
+
+    **Cualquier rol (Cajero o superior)**, el mismo nivel que `RecordPayment`: quien cobra en ventanilla corrige su propio error sin escalar. **Cualquier cobro del préstamo**, no sólo el último. La consecuencia es asumida: la imputación es FIFO y se reconstruye (BR-LOAN-016), así que los cobros posteriores al eliminado pasan a cubrir otras cuotas y sus comprobantes ya entregados pueden dejar de coincidir con el historial; el diálogo de confirmación lo advierte cuando el cobro elegido no es el último.
+
+    **Efectivo:** el movimiento de INGRESO que el cobro dejó en la caja se **borra** mientras esa caja siga **abierta** (si no, el arqueo esperaría plata que nunca entró). Si la caja ya está **cerrada** -- arqueo firmado, BR-CAJA-003 -- el servidor **rechaza** la eliminación (`FAILED_PRECONDITION`): borrar el movimiento cambiaría el cierre en silencio, y conservarlo sin su cobro dejaría efectivo sin origen. Es deliberadamente distinto de BR-LOAN-012, que al borrar un préstamo conserva el movimiento.
+
+    **Motivo obligatorio** (`INVALID_ARGUMENT` si falta): la fila desaparece y el `AuditLog` (`COBRO_ELIMINADO`, con monto, mora, descuento, medio, referencia, fecha, caja y motivo) es lo único que queda. La mora y el descuento guardados en la fila (BR-LOAN-017/018) desaparecen con ella; la mora de esas cuotas se vuelve a devengar porque vuelven a estar impagas. Un préstamo `PAID` cuyo saldo vuelve a ser positivo regresa a `ACTIVE` (`PRESTAMO_REACTIVADO`); un `DEFAULTED` sigue `DEFAULTED`, porque esa marca la decidió un operador.
+
+    **Del lado del cliente**, las dos pantallas que muestran el historial (tarjeta de cobro de la Caja y "Cobros registrados" del detalle del préstamo) tienen el botón "Eliminar cobro" sobre la fila elegida; la confirmación y el pedido de motivo son uno solo (`cas_client/payment_deletion.py`). Si el cobro borrado es el que se acaba de registrar en la sesión, su ticket/comprobante deja de estar disponible.
+
 *   **Medio de pago (BR-CAJA-004, definido en `specs/cash/README`):** `RecordPayment` acepta `payment_method` = `EFECTIVO` | `TRANSFERENCIA`. `TRANSFERENCIA` -- y también el valor vacío, por compatibilidad con los clientes anteriores a la caja -- exige `transfer_reference`, que es el único rastro del cobro cuando no pasa por ventanilla. `EFECTIVO` no la pide y en cambio exige un **turno de caja abierto** del operador, donde genera un movimiento de ingreso vinculado al pago. La regla completa vive en `specs/cash/README`; acá queda anotada porque cambia el contrato de `RecordPayment`.
 
 ## 3. Modelo de Datos (PostgreSQL)
@@ -157,6 +167,7 @@ Maneja el ciclo de vida completo de un préstamo: Solicitud, Aprobación, Desemb
 *   `UpdateInstallmentAmountRequest` / `UpdateInstallmentAmountResponse` - Ajuste manual de una cuota de un préstamo ACTIVE (BR-LOAN-008)
 *   `RemoveInstallmentAdjustmentRequest` / `RemoveInstallmentAdjustmentResponse` - Quita un ajuste manual y devuelve la cuota al monto calculado (BR-LOAN-015)
 *   `ListLoanPaymentsRequest` / `ListLoanPaymentsResponse` - Historial de cobros del préstamo, con las cifras de cada comprobante, para consulta y reimpresión (BR-LOAN-016)
+*   `DeleteLoanPaymentRequest` / `DeleteLoanPaymentResponse` - Elimina un cobro registrado por error; quita su ingreso de la caja si sigue abierta y se rechaza si ya cerró (BR-LOAN-019)
 *   `GetAmortizationScheduleRequest` / `GetAmortizationScheduleResponse`
 *   `ListActiveLoansRequest` / `ListActiveLoansResponse` - Vista consolidada de todos los préstamos ACTIVE (no filtrada por cliente), con nombre del cliente incluido para evitar N+1 llamadas a ClientService
 *   `DeleteLoanRequest` / `DeleteLoanResponse` - Eliminación definitiva de un préstamo cargado por error (BR-LOAN-012); devuelve el `client_id` del préstamo borrado para que el cliente pueda volver a listar su cartera

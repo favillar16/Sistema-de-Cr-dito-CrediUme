@@ -172,6 +172,15 @@ def can_delete_loan(role: str | None) -> bool:
     return role_at_least(role, "CREDIT_ANALYST")
 
 
+def can_delete_payment(role: str | None) -> bool:
+    """BR-LOAN-019: eliminar un cobro registrado por error -- mirrors
+    rbac.py's CASHIER_AND_ABOVE gate on DeleteLoanPayment. Todos los roles,
+    cajero incluido, por decisión de la entidad: quien cobra corrige su
+    propio error en ventanilla. El cerco real lo pone el servidor (caja ya
+    cerrada => rechazo), no el rol."""
+    return role_at_least(role, "CASHIER")
+
+
 def can_delete_client(role: str | None) -> bool:
     """BR-CLI-008: eliminar un cliente cargado por error -- mirrors rbac.py's
     CREDIT_ANALYST_AND_ABOVE gate on DeleteClient. A propósito el mismo nivel

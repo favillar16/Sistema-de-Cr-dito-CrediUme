@@ -32,6 +32,7 @@ from cas_client.views.dashboard_view import DashboardView
 from cas_client.views.loans_view import LoansView
 from cas_client.views.login_view import LoginView
 from cas_client.views.users_view import UsersView
+from cas_client.widgets.app_footer import AppFooter
 from cas_client.widgets.header_bar import HeaderBar
 from cas_client.widgets.scroll_area import wrap_scrollable
 
@@ -50,6 +51,33 @@ _TELLER_NAV_ITEMS = ("Caja", "Clientes", "Préstamos")
 # actualizar un diccionario literal aparte (el orden en que _AppShellView
 # agrega los widgets al stack tiene que seguir a NAV_ITEMS).
 _NAV_INDEX = {item: index for index, item in enumerate(NAV_ITEMS)}
+
+# Glifo de "Segoe MDL2 Assets" (theme.ICON_FONT_FAMILY) por ítem del menú.
+_NAV_ICONS = {
+    "Dashboard": "\uE80F",  # Home
+    "Caja": "\uE8C7",  # PaymentCard
+    "Clientes": "\uE716",  # People
+    "Préstamos": "\uE8A5",  # Document
+    "Usuarios": "\uE7EF",  # Admin
+}
+
+# Lo que la barra superior muestra debajo del nombre de cada pantalla: una
+# línea que dice para qué sirve. Es la parte "comprensible" del rediseño
+# 2026-11 -- un operador nuevo no tenía en ningún lado una pista de qué se
+# hace en cada sección.
+_SECTION_HELP = {
+    "Dashboard": "Resumen de clientes, préstamos y cartera, y reportes de gestión.",
+    "Caja": "Abrí y cerrá tu turno, cobrá cuotas y registrá ingresos y egresos "
+    "de efectivo.",
+    "Clientes": "Buscá, registrá y actualizá los datos de los clientes.",
+    "Préstamos": "Consultá préstamos, su cronograma y sus cobros, y gestioná "
+    "su aprobación y desembolso.",
+    "Usuarios": "Creá operadores y restablecé contraseñas.",
+}
+# Nombre visible de cada ítem (menú y barra superior). La clave interna
+# sigue siendo "Dashboard" para no tocar _NAV_INDEX ni a quien navega por
+# nombre; lo que ve el operador es "Inicio", que se entiende sin inglés.
+_SECTION_TITLES = {"Dashboard": "Inicio"}
 
 
 def _nav_item_visible(item: str, role: str) -> bool:
@@ -79,7 +107,7 @@ class _Sidebar(QWidget):
         self.setStyleSheet(f"background-color: {theme.SIDEBAR_BG};")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 24, 20, 24)
+        layout.setContentsMargins(16, 22, 16, 20)
         layout.setSpacing(4)
 
         brand_row = QHBoxLayout()
@@ -115,12 +143,24 @@ class _Sidebar(QWidget):
         brand_row.addStretch()
         brand_container = QWidget()
         brand_container.setLayout(brand_row)
-        brand_container.setStyleSheet("margin-bottom: 24px;")
+        brand_container.setStyleSheet("margin-bottom: 18px;")
         layout.addWidget(brand_container)
+
+        menu_caption = QLabel("MENÚ")
+        menu_caption.setStyleSheet(
+            f"color: {theme.ON_DARK_MUTED}; font-size: 10px; font-weight: 700; "
+            "padding: 0 12px 6px 12px;"
+        )
+        layout.addWidget(menu_caption)
 
         self._buttons: dict[str, QPushButton] = {}
         for label in NAV_ITEMS:
-            button = QPushButton(label)
+            # Glifo + texto en el mismo botón: la lista de fuentes del estilo
+            # (theme.ICON_FONT_FAMILY al final) resuelve el glifo con la
+            # fuente de íconos y las letras con la del texto.
+            button = QPushButton(
+                f"{_NAV_ICONS.get(label, '')}    {_SECTION_TITLES.get(label, label)}"
+            )
             button.setFlat(True)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(
@@ -151,21 +191,26 @@ class _Sidebar(QWidget):
         return visibles[0]
 
     def set_active(self, label: str) -> None:
+        """Ítem activo: fondo blanco translúcido + barra lima a la izquierda.
+        Antes era un bloque lima lleno, que se llevaba la atención de la
+        pantalla hacia el menú en vez de hacia el contenido."""
+        fuente = f"font-family: {theme.BODY_FONT_FAMILY}, {theme.ICON_FONT_FAMILY};"
         for item, button in self._buttons.items():
             if item == label:
                 button.setStyleSheet(
-                    f"QPushButton {{ text-align: left; border: none; "
-                    f"background-color: {theme.ACCENT}; color: {theme.PRIMARY}; "
+                    "QPushButton { text-align: left; border: none; "
+                    f"border-left: 3px solid {theme.ACCENT}; "
+                    "background-color: rgba(255, 255, 255, 30); color: white; "
                     "font-size: 14px; font-weight: 700; border-radius: 8px; "
-                    "padding: 10px 12px; }"
+                    f"padding: 10px 12px 10px 11px; {fuente} }}"
                 )
             else:
                 button.setStyleSheet(
                     "QPushButton { text-align: left; border: none; "
                     f"background: transparent; color: {theme.ON_DARK_MUTED}; "
-                    "font-size: 14px; font-weight: 400; border-radius: 8px; "
-                    "padding: 10px 12px; }"
-                    "QPushButton:hover { background-color: rgba(255, 255, 255, 20); "
+                    "font-size: 14px; font-weight: 500; border-radius: 8px; "
+                    f"padding: 10px 12px 10px 14px; {fuente} }}"
+                    "QPushButton:hover { background-color: rgba(255, 255, 255, 18); "
                     "color: white; }"
                 )
 
@@ -223,18 +268,24 @@ class _AppShellView(QWidget):
         self._loans_view = loans_view
 
     def _on_nav_selected(self, label: str) -> None:
+        self._activate(label)
+
+    def _activate(self, label: str) -> None:
+        """Único punto que cambia de pantalla: menú, contenido y la barra
+        superior (título + ayuda) se mueven juntos."""
         self._sidebar.set_active(label)
         self._content_stack.setCurrentIndex(_NAV_INDEX[label])
+        self._header_bar.set_section(
+            _SECTION_TITLES.get(label, label), _SECTION_HELP.get(label, "")
+        )
 
     def show_loans_for_client(self, client_id: str, display_name: str) -> None:
         self._loans_view.load_client(client_id, display_name)
-        self._sidebar.set_active("Préstamos")
-        self._content_stack.setCurrentIndex(_NAV_INDEX["Préstamos"])
+        self._activate("Préstamos")
 
     def show_client_detail(self, client_id: str) -> None:
         self._clients_view.open_client_detail(client_id)
-        self._sidebar.set_active("Clientes")
-        self._content_stack.setCurrentIndex(_NAV_INDEX["Clientes"])
+        self._activate("Clientes")
 
     def set_user(self, username: str, role: str) -> None:
         self._dashboard_view.set_user(username, role)
@@ -246,8 +297,7 @@ class _AppShellView(QWidget):
         # pantalla de aterrizaje: "Dashboard" para casi todos, "Caja" para el
         # Cajero, que no ve el dashboard (BR-CAJA-005).
         inicial = self._sidebar.set_role(role)
-        self._sidebar.set_active(inicial)
-        self._content_stack.setCurrentIndex(_NAV_INDEX[inicial])
+        self._activate(inicial)
 
 
 class MainWindow(QMainWindow):
@@ -266,7 +316,15 @@ class MainWindow(QMainWindow):
         self._session = Session()
 
         self._stack = QStackedWidget()
-        self.setCentralWidget(self._stack)
+        # El pie (Angiru Tech) va debajo de TODO el stack, login incluido:
+        # es la firma del producto, no contenido de una pantalla.
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self._stack, stretch=1)
+        central_layout.addWidget(AppFooter())
+        self.setCentralWidget(central)
 
         self._login_view = LoginView(self._auth_client)
         self._login_view.login_succeeded.connect(self._on_login_succeeded)

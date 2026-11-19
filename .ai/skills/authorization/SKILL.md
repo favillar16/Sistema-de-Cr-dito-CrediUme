@@ -38,7 +38,11 @@ mapped per RPC method:
     "¿ya pagué?") and the whole of `CashService` stay
     `CASHIER_AND_ABOVE`. The early payoff with discount (`BR-LOAN-018`)
     is a mode of `RecordPayment`, not a new RPC, so it deliberately has
-    the same tier — the entity chose to let the teller grant it. This was an
+    the same tier — the entity chose to let the teller grant it. Deleting a
+    payment recorded by mistake (`DeleteLoanPayment`, `BR-LOAN-019`) is also
+    `CASHIER_AND_ABOVE` by entity decision; its real fence is the cash
+    session (a cash payment whose till is closed cannot be deleted), not the
+    role. This was an
     earlier-model-corrected change: those origination methods used to
     be `CASHIER_AND_ABOVE` back when nobody had the role.
 -   The two dashboard reports sit at **different** tiers on purpose:

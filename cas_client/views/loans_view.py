@@ -23,7 +23,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cas_client import documents, documents_docx, payoff, printing, theme
+from cas_client import (
+    documents,
+    documents_docx,
+    payment_deletion,
+    payoff,
+    printing,
+    theme,
+)
 from cas_client.formatting import (
     DISPLAY_DATE_PLACEHOLDER,
     es_fecha_valida,
@@ -49,6 +56,7 @@ from cas_client.rbac_ui import (
     MAX_CHARGES_RATIO,
     RATE_MIN_TERM_MONTHS,
     can_delete_loan,
+    can_delete_payment,
     can_revert_default,
     can_edit_installment_amount,
     can_originate_credit,
@@ -393,7 +401,9 @@ class LoansView(BaseView):
         session: Session,
         parent: QWidget | None = None,
     ):
-        super().__init__(title="Préstamos", parent=parent)
+        # Sin título propio: lo muestra la barra superior (HeaderBar.set_section)
+        # junto con la línea de ayuda de la sección.
+        super().__init__(parent=parent)
         self._client = client
         self._client_service = client_service
         self._session = session
@@ -1791,6 +1801,19 @@ class LoansView(BaseView):
         self._reprint_receipt_button.setStyleSheet(theme.secondary_button_style())
         self._reprint_receipt_button.clicked.connect(self._on_reprint_receipt)
         reprint_row.add_widget(self._reprint_receipt_button)
+
+        # BR-LOAN-019. Mismo patrón que la reimpresión: se elige la fila y se
+        # actúa. Rojo de contorno (danger_button_style) para que no compita con
+        # las reimpresiones, que es lo que se aprieta casi siempre.
+        self._delete_payment_button = QPushButton("Eliminar cobro")
+        self._delete_payment_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._delete_payment_button.setStyleSheet(theme.danger_button_style())
+        self._delete_payment_button.setToolTip(
+            "Elimina el cobro elegido si se registró por error. Pide un motivo, "
+            "que queda auditado."
+        )
+        self._delete_payment_button.clicked.connect(self._on_delete_payment)
+        reprint_row.add_widget(self._delete_payment_button)
         payments_card.addWidget(reprint_row)
         self._on_payment_row_selected()
         layout.addWidget(payments_frame)
@@ -2439,6 +2462,48 @@ class LoansView(BaseView):
         hay_seleccion = self._selected_payment_entry() is not None
         self._reprint_ticket_button.setEnabled(hay_seleccion)
         self._reprint_receipt_button.setEnabled(hay_seleccion)
+        self._delete_payment_button.setEnabled(
+            hay_seleccion and can_delete_payment(self._session.role)
+        )
+
+    def _on_delete_payment(self) -> None:
+        """BR-LOAN-019: eliminar el cobro elegido. Confirmación y motivo en
+        payment_deletion.py, compartidos con CashView."""
+        entry = self._selected_payment_entry()
+        if entry is None:
+            return
+        motivo = payment_deletion.ask_delete_reason(
+            self,
+            entry,
+            self._payments_total_installments,
+            is_latest=entry is self._payment_entries[0],
+        )
+        if motivo is None:
+            return
+        if not motivo:
+            self._toast.show_message(
+                "Debe indicar el motivo de la eliminación para continuar."
+            )
+            return
+        self._run_loan_action(
+            self._client.delete_loan_payment,
+            entry.id,
+            motivo,
+            on_success=lambda response, pid=entry.id: self._on_payment_deleted(
+                pid, response
+            ),
+        )
+
+    def _on_payment_deleted(self, payment_id: str, response) -> None:
+        # El comprobante en memoria (BR-LOAN-011) no puede seguir imprimible
+        # si describe justo el cobro que se acaba de borrar.
+        if (
+            self._last_payment is not None
+            and self._last_payment.payment_id == payment_id
+        ):
+            self._last_payment = None
+            self._last_payment_loan_id = None
+        self._on_action_success(payment_deletion.success_message(response))
 
     def _selected_payment_entry(self):
         fila = self._payments_table.currentRow()

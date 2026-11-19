@@ -127,6 +127,12 @@ what the signed document discloses.
     `PAID` the normal way) and `loan_payments.discount_amount` the part
     forgiven; money received is `amount - discount + late_fee`, which is
     what the cash movement and the period report's collected total use.
+-   Deleting a payment — **since 2026-11-19** (`BR-LOAN-019`):
+    `DeleteLoanPayment(payment_id, reason)`, any role, any payment of the
+    loan (later payments are re-imputed FIFO; accepted consequence). A cash
+    payment's `CashMovement` is deleted while its till is OPEN and the call
+    is rejected once the till is CLOSED (signed arqueo). A `PAID` loan whose
+    balance becomes positive returns to `ACTIVE`.
 -   Installment amount.
 -   Due dates.
 -   Outstanding balance.

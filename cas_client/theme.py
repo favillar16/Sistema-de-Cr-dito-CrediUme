@@ -26,6 +26,33 @@ TEXT_MUTED = "#808285"  # gray (was #5A6774)
 BORDER = "#808285"  # gray dividers
 ERROR = "#C0392B"
 
+# ---- Rediseño 2026-11 (UI más liviana) -------------------------------------
+# El gris de la paleta (#808285) como borde de *cada* tarjeta, campo y tabla
+# era lo que más envejecía la interfaz: líneas pesadas en todas partes y nada
+# que guiara la vista. Estos tokens son sólo para el cromo de la UI -- BORDER
+# y APP_BACKGROUND no cambian porque también los usan los documentos
+# impresos (documents.py/documents_docx.py), que no se tocan.
+DIVIDER = "#E2E6EE"  # bordes de tarjetas, tablas y separadores
+INPUT_BORDER = "#C5CDDC"  # borde de campos y botones secundarios: visible, no pesado
+INPUT_BORDER_HOVER = "#8E9AB5"
+PRIMARY_TINT = "#EEF2FA"  # navy muy claro: hover, encabezado de tabla
+PRIMARY_TINT_STRONG = "#DCE4F4"  # navy claro: fila seleccionada, pressed
+SUCCESS_TINT = "#E6F4EA"  # fondo de la píldora "Conectado"
+ERROR_TINT = "#FBEAEA"
+TEXT_SECONDARY = "#5B6474"  # texto de apoyo con mejor contraste que TEXT_MUTED
+RADIUS = 8  # botones y campos
+CARD_RADIUS = 12
+
+# Marino de la marca de Angiru Tech (la empresa que desarrolló el sistema),
+# sólo para su nombre en el pie de página (widgets/app_footer.py).
+DEVELOPER_BRAND_COLOR = "#003049"
+
+# Íconos del menú lateral. "Segoe MDL2 Assets" viene con Windows 10 y 11 (el
+# único destino de despliegue, docs/ES-004), así que no hay que empaquetar
+# nada; va *después* de la fuente del texto en la lista para que Qt sólo la
+# use para los glifos que la otra no tiene.
+ICON_FONT_FAMILY = '"Segoe MDL2 Assets"'
+
 # TEXT_MUTED (#808285) is calibrated for light backgrounds -- too low-
 # contrast against the navy sidebar/login panel. Rather than a separate
 # invented gray-blue hex for "muted text on a dark/navy surface", this
@@ -81,7 +108,7 @@ def tooltip_style() -> str:
     return (
         "QToolTip { "
         f"background-color: #FFFFFF; color: {TEXT_PRIMARY}; "
-        f"border: 1px solid {BORDER}; border-radius: 4px; "
+        f"border: 1px solid {INPUT_BORDER}; border-radius: 6px; "
         f"padding: 6px 8px; font-family: {BODY_FONT_FAMILY}; "
         "}"
     )
@@ -106,16 +133,16 @@ def secondary_button_style(*, padding: str = "8px 14px") -> str:
     consistent hover/pressed feedback, and a readable disabled state."""
     return (
         "QPushButton { "
-        f"background-color: {APP_BACKGROUND}; color: {TEXT_PRIMARY}; "
-        f"border: 1px solid {BORDER}; border-radius: 6px; "
+        f"background-color: #FFFFFF; color: {PRIMARY}; "
+        f"border: 1px solid {INPUT_BORDER}; border-radius: {RADIUS}px; "
         f"padding: {padding}; font-weight: 600; "
         f"font-family: {BODY_FONT_FAMILY}; "
         "}"
-        f"QPushButton:hover {{ background-color: white; border: 1px solid {PRIMARY}; "
-        f"color: {PRIMARY}; }}"
-        f"QPushButton:pressed {{ background-color: {BORDER}; color: white; }}"
+        f"QPushButton:hover {{ background-color: {PRIMARY_TINT}; "
+        f"border: 1px solid {PRIMARY}; color: {PRIMARY}; }}"
+        f"QPushButton:pressed {{ background-color: {PRIMARY_TINT_STRONG}; }}"
         f"QPushButton:disabled {{ color: {TEXT_MUTED}; background-color: {APP_BACKGROUND}; "
-        f"border: 1px solid {BORDER}; }}"
+        f"border: 1px solid {DIVIDER}; }}"
     )
 
 
@@ -124,12 +151,17 @@ def accent_button_style(*, padding: str = "8px 14px") -> str:
     (5.2:1 contrast, WCAG AA), per the palette doc's contrast recommendations."""
     return (
         "QPushButton { "
-        f"background-color: {ACCENT}; color: {PRIMARY}; border-radius: 6px; "
-        f"padding: {padding}; font-weight: 600; border: none; "
+        f"background-color: {ACCENT}; color: {PRIMARY}; border-radius: {RADIUS}px; "
+        f"padding: {padding}; font-weight: 700; border: 1px solid {ACCENT}; "
         f"font-family: {BODY_FONT_FAMILY}; "
         "}"
-        f"QPushButton:hover {{ background-color: {ACCENT_HOVER}; }}"
+        f"QPushButton:hover {{ background-color: {ACCENT_HOVER}; "
+        f"border-color: {ACCENT_HOVER}; }}"
         f"QPushButton:pressed {{ background-color: {ACCENT_PRESSED}; }}"
+        # Sin esto el botón principal deshabilitado seguía en lima, igual que
+        # habilitado: el operador no veía por qué "Cobrar" no respondía.
+        f"QPushButton:disabled {{ background-color: {DIVIDER}; color: {TEXT_MUTED}; "
+        f"border-color: {DIVIDER}; }}"
     )
 
 
@@ -153,12 +185,13 @@ def combo_box_style() -> str:
     """
     return (
         "QComboBox { "
-        f"border: 1px solid {BORDER}; border-radius: 6px; padding: 8px 10px; "
+        f"border: 1px solid {INPUT_BORDER}; border-radius: {RADIUS}px; "
+        "padding: 8px 10px; "
         f"font-size: 14px; background: #FFFFFF; color: {TEXT_PRIMARY}; "
         f"font-family: {BODY_FONT_FAMILY}; "
         "}"
+        f"QComboBox:hover {{ border: 1px solid {INPUT_BORDER_HOVER}; }}"
         f"QComboBox:focus {{ border: 1px solid {PRIMARY}; }}"
-        f"QComboBox:hover {{ border: 1px solid {PRIMARY}; }}"
         f"QComboBox:disabled {{ background: {APP_BACKGROUND}; color: {TEXT_MUTED}; }}"
         "QComboBox::drop-down { border: none; width: 22px; }"
         # La lista desplegable es un widget aparte y no hereda lo de arriba --
@@ -166,8 +199,9 @@ def combo_box_style() -> str:
         # vea bien, que es justo el caso que confunde al usuario.
         "QComboBox QAbstractItemView { "
         f"background: #FFFFFF; color: {TEXT_PRIMARY}; "
-        f"border: 1px solid {BORDER}; outline: none; "
-        f"selection-background-color: {PRIMARY}; selection-color: white; "
+        f"border: 1px solid {INPUT_BORDER}; outline: none; "
+        f"selection-background-color: {PRIMARY_TINT_STRONG}; "
+        f"selection-color: {PRIMARY}; "
         "}"
     )
 
@@ -182,13 +216,76 @@ def danger_button_style(*, padding: str = "8px 14px") -> str:
     encima, cuando ya es una intención y no un accidente."""
     return (
         "QPushButton { "
-        f"background-color: {APP_BACKGROUND}; color: {ERROR}; "
-        f"border: 1px solid {ERROR}; border-radius: 6px; "
+        f"background-color: #FFFFFF; color: {ERROR}; "
+        f"border: 1px solid {ERROR}; border-radius: {RADIUS}px; "
         f"padding: {padding}; font-weight: 600; "
         f"font-family: {BODY_FONT_FAMILY}; "
         "}"
         f"QPushButton:hover {{ background-color: {ERROR}; color: white; }}"
         f"QPushButton:pressed {{ background-color: #962D21; color: white; }}"
         f"QPushButton:disabled {{ color: {TEXT_MUTED}; background-color: {APP_BACKGROUND}; "
-        f"border: 1px solid {BORDER}; }}"
+        f"border: 1px solid {DIVIDER}; }}"
+    )
+
+
+def line_edit_style() -> str:
+    """Hoja de FormInput (y de los QLineEdit de los diálogos estándar, vía
+    app_stylesheet()). Los campos de sólo lectura se pintan con el fondo de la
+    página: así se distingue a simple vista lo que el operador completa de lo
+    que el sistema calcula (p. ej. "Monto a cobrar")."""
+    return (
+        "QLineEdit { "
+        f"border: 1px solid {INPUT_BORDER}; border-radius: {RADIUS}px; "
+        "padding: 8px 10px; font-size: 14px; "
+        f"background: #FFFFFF; color: {TEXT_PRIMARY}; "
+        f"font-family: {BODY_FONT_FAMILY}; "
+        f"selection-background-color: {PRIMARY_TINT_STRONG}; "
+        f"selection-color: {PRIMARY}; "
+        "}"
+        f"QLineEdit:hover {{ border: 1px solid {INPUT_BORDER_HOVER}; }}"
+        f"QLineEdit:focus {{ border: 1px solid {PRIMARY}; }}"
+        f'QLineEdit[readOnly="true"] {{ background: {APP_BACKGROUND}; '
+        f"border: 1px solid {DIVIDER}; color: {TEXT_PRIMARY}; }}"
+        f"QLineEdit:disabled {{ background: {APP_BACKGROUND}; color: {TEXT_MUTED}; "
+        f"border: 1px solid {DIVIDER}; }}"
+        f'QLineEdit[error="true"] {{ border: 1px solid {ERROR}; '
+        f"background: {ERROR_TINT}; }}"
+    )
+
+
+def app_stylesheet() -> str:
+    """Hoja global de la aplicación (main.py).
+
+    Cubre lo que las vistas no construyen ellas mismas y que, sin estilo,
+    cae en la paleta del sistema: los diálogos estándar (QMessageBox,
+    QInputDialog -- p. ej. el motivo al eliminar un préstamo o un cobro),
+    las barras de progreso (que en Windows salían con un relleno marrón),
+    las barras de desplazamiento y el tooltip (ver tooltip_style()).
+    """
+    return (
+        "QMessageBox, QInputDialog { background-color: #FFFFFF; }"
+        f"QMessageBox QLabel, QInputDialog QLabel {{ color: {TEXT_PRIMARY}; "
+        "font-size: 13px; }"
+        + secondary_button_style(padding="6px 18px").replace(
+            "QPushButton", "QMessageBox QPushButton"
+        )
+        + secondary_button_style(padding="6px 18px").replace(
+            "QPushButton", "QInputDialog QPushButton"
+        )
+        + line_edit_style().replace("QLineEdit", "QInputDialog QLineEdit")
+        + "QProgressBar { "
+        f"background: {DIVIDER}; border: none; border-radius: 2px; "
+        "}"
+        f"QProgressBar::chunk {{ background: {ACCENT}; border-radius: 2px; }}"
+        # Barras de desplazamiento finas: la nativa de Windows es ancha y
+        # gris, y en las páginas largas (Caja, detalle del préstamo) se lleva
+        # la atención.
+        "QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }"
+        "QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }"
+        f"QScrollBar::handle {{ background: {INPUT_BORDER}; border-radius: 3px; "
+        "min-height: 32px; min-width: 32px; }"
+        f"QScrollBar::handle:hover {{ background: {INPUT_BORDER_HOVER}; }}"
+        "QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }"
+        "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }"
+        + tooltip_style()
     )

@@ -309,3 +309,16 @@ def test_paid_loans_report_gate_matches_rbac_tables_exactly():
     for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
         esperado = any(permitido.value == role for permitido in permitidos)
         assert can_view_paid_loans_report(role) == esperado, role
+
+
+def test_delete_payment_gate_matches_rbac_tables_exactly():
+    """BR-LOAN-019. Guarda de sincronización contra METHOD_ROLES real."""
+    from cas_server.security.rbac import allowed_roles
+
+    from cas_client.rbac_ui import can_delete_payment
+
+    permitidos = allowed_roles("/loans.LoanService/DeleteLoanPayment")
+    for role in ("CASHIER", "CREDIT_ANALYST", "MANAGER", "ADMIN"):
+        esperado = any(permitido.value == role for permitido in permitidos)
+        assert can_delete_payment(role) == esperado, role
+    assert can_delete_payment(None) is False

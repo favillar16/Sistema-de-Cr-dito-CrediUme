@@ -11,6 +11,8 @@ from cas_server.db.base import SessionLocal
 from cas_server.db.models import (
     AuditLog,
     CashMovement,
+    CashSession,
+    CashSessionStatusEnum,
     Client,
     Loan,
     LoanInstallmentAdjustment,
@@ -1554,6 +1556,138 @@ class LoanServicer(loan_service_pb2_grpc.LoanServiceServicer):
                 total_installments=prestamo.term_months,
                 total_paid=str(total_pagado),
                 remaining_balance=str(max(total_programado - total_pagado, CERO)),
+            )
+
+    def DeleteLoanPayment(self, request, context):
+        """BR-LOAN-019: elimina un cobro registrado por error.
+
+        Decisiones de la entidad (2026-11-19), no a "mejorar" sin otra:
+        - **Cualquier rol** (CASHIER_AND_ABOVE, mismo tier que RecordPayment):
+          quien cobra en ventanilla corrige su propio error sin escalar.
+        - **Cualquier cobro**, no sólo el último. La consecuencia es asumida:
+          como la imputación es FIFO y se reconstruye (BR-LOAN-016), los
+          cobros posteriores al eliminado pasan a cubrir otras cuotas y sus
+          comprobantes ya impresos dejan de coincidir con el historial.
+        - **Efectivo**: el INGRESO que el cobro dejó en la caja se borra
+          mientras esa caja siga abierta -- si no, el arqueo esperaría plata
+          que nunca entró. Con la caja ya cerrada el arqueo está firmado
+          (BR-CAJA-003) y se **rechaza**: borrar el movimiento cambiaría el
+          cierre en silencio, y conservarlo sin su cobro dejaría efectivo sin
+          origen. A diferencia de DeleteLoan, que conserva el movimiento.
+        - La mora y el descuento guardados en la fila (BR-LOAN-017/018)
+          desaparecen con ella; la mora de esas cuotas se vuelve a devengar
+          al recalcularse, porque vuelven a estar impagas.
+        - Un PAID cuyo saldo vuelve a ser positivo regresa a ACTIVE. Un
+          DEFAULTED sigue DEFAULTED: esa marca la decidió un operador.
+        """
+        payment_id = analizar_uuid(request.payment_id, "payment_id", context)
+        motivo = request.reason.strip()
+        if not motivo:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "reason es obligatorio: el cobro se borra y el registro de "
+                "auditoría es lo único que queda para explicar por qué",
+            )
+        ahora = datetime.now(timezone.utc)
+
+        with SessionLocal() as sesion:
+            # Primero se averigua el préstamo sin bloquear nada, para poder
+            # tomar los bloqueos en el mismo orden que RecordPayment
+            # (préstamo -> caja); después se relee el pago bajo ese bloqueo,
+            # porque otro operador pudo haberlo borrado en el medio.
+            loan_id = (
+                sesion.query(LoanPayment.loan_id)
+                .filter(LoanPayment.id == payment_id)
+                .scalar()
+            )
+            if loan_id is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Cobro no encontrado")
+
+            prestamo = sesion.get(Loan, loan_id, with_for_update=True)
+            pago = sesion.get(LoanPayment, payment_id)
+            if prestamo is None or pago is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, "Cobro no encontrado")
+
+            movimientos = (
+                sesion.query(CashMovement)
+                .filter(CashMovement.loan_payment_id == pago.id)
+                .all()
+            )
+            efectivo_quitado = CERO
+            cajas = set()
+            for movimiento in movimientos:
+                sesion_caja = sesion.get(
+                    CashSession, movimiento.cash_session_id, with_for_update=True
+                )
+                if (
+                    sesion_caja is None
+                    or sesion_caja.status != CashSessionStatusEnum.OPEN
+                ):
+                    context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "No se puede eliminar: el cobro fue en efectivo y la "
+                        "caja donde ingresó ya está cerrada (arqueo firmado)",
+                    )
+                efectivo_quitado += movimiento.amount
+                cajas.add(str(sesion_caja.id))
+
+            # Datos del cobro antes del DELETE: el AuditLog tiene que poder
+            # reconstruir qué se eliminó sin la fila.
+            resumen = (
+                f"monto={pago.amount} mora={pago.late_fee_amount or CERO} "
+                f"descuento={pago.discount_amount or CERO} "
+                f"medio={pago.payment_method.value if pago.payment_method else ''} "
+                f"referencia={pago.transfer_reference or ''} "
+                f"fecha={pago.paid_at.isoformat()}"
+                + (f" caja={','.join(sorted(cajas))}" if cajas else "")
+            )
+
+            for movimiento in movimientos:
+                sesion.delete(movimiento)
+            sesion.delete(pago)
+            sesion.flush()
+            # `prestamo.payments` todavía tiene el pago borrado en memoria.
+            sesion.expire(prestamo, ["payments"])
+
+            sesion.add(
+                AuditLog(
+                    user_id=id_actor_actual(get_current_claims()),
+                    action=(
+                        f"COBRO_ELIMINADO loan_id={prestamo.id} "
+                        f"payment_id={payment_id} {resumen} motivo={motivo}"
+                    ),
+                    ip_address=ip_remota(context),
+                    timestamp=ahora,
+                )
+            )
+
+            total_programado, total_pagado = _totales_prestamo(prestamo)
+            if (
+                prestamo.status == LoanStatusEnum.PAID
+                and total_pagado < total_programado
+            ):
+                prestamo.status = LoanStatusEnum.ACTIVE
+                sesion.add(
+                    AuditLog(
+                        user_id=id_actor_actual(get_current_claims()),
+                        action=(
+                            f"PRESTAMO_REACTIVADO loan_id={prestamo.id} "
+                            f"por COBRO_ELIMINADO payment_id={payment_id}"
+                        ),
+                        ip_address=ip_remota(context),
+                        timestamp=ahora,
+                    )
+                )
+
+            sesion.commit()
+
+            return loan_service_pb2.DeleteLoanPaymentResponse(
+                success=True,
+                loan_id=str(prestamo.id),
+                status=prestamo.status.value,
+                total_paid=str(total_pagado),
+                remaining_balance=str(max(total_programado - total_pagado, CERO)),
+                cash_amount_removed=str(efectivo_quitado) if movimientos else "",
             )
 
     def MarkDefaulted(self, request, context):

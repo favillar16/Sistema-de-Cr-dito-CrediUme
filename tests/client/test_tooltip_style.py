@@ -44,5 +44,6 @@ def test_la_hoja_de_la_aplicacion_incluye_el_tooltip():
     top-level y no lo alcanza el stylesheet del widget que lo dispara."""
     fuente = inspect.getsource(main.main)
 
-    assert "setStyleSheet" in fuente
-    assert "tooltip_style()" in fuente
+    # main.py instala theme.app_stylesheet(), que es la que lleva el tooltip.
+    assert "setStyleSheet(theme.app_stylesheet())" in fuente
+    assert theme.tooltip_style() in theme.app_stylesheet()

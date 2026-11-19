@@ -38,6 +38,7 @@ from cas_client import (
     documents,
     documents_docx,
     documents_xlsx,
+    payment_deletion,
     payoff,
     printing,
     theme,
@@ -58,7 +59,7 @@ from cas_client.grpc_client import (
     LoanServiceClient,
 )
 from cas_client.page_layout import aplicar_hoja
-from cas_client.rbac_ui import can_supervise_cash_sessions
+from cas_client.rbac_ui import can_delete_payment, can_supervise_cash_sessions
 from cas_client.session import Session
 from cas_client.widgets.async_worker import AsyncWorker
 from cas_client.widgets.base_view import BaseView
@@ -331,7 +332,9 @@ class CashView(BaseView):
         session: Session,
         parent: QWidget | None = None,
     ):
-        super().__init__("Caja", parent=parent)
+        # Sin título propio: lo muestra la barra superior (HeaderBar.set_section)
+        # junto con la línea de ayuda de la sección.
+        super().__init__(parent=parent)
         self._client = client
         # El cobro de cuotas vive en esta pantalla (es la ventanilla), así que
         # necesita los otros dos servicios: buscar al cliente que abona y leer
@@ -728,6 +731,20 @@ class CashView(BaseView):
         self._reprint_button.setEnabled(False)
         self._reprint_button.clicked.connect(self._on_reprint_ticket)
         actions.add_widget(self._reprint_button)
+
+        # BR-LOAN-019: corregir un cobro registrado por error desde la misma
+        # ventanilla, sobre la fila elegida. Si fue en efectivo y la caja
+        # sigue abierta, el ingreso sale del arqueo.
+        self._delete_payment_button = QPushButton("Eliminar cobro elegido")
+        self._delete_payment_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._delete_payment_button.setStyleSheet(theme.danger_button_style())
+        self._delete_payment_button.setToolTip(
+            "Elimina el cobro seleccionado si se registró por error. Pide un "
+            "motivo, que queda auditado."
+        )
+        self._delete_payment_button.setEnabled(False)
+        self._delete_payment_button.clicked.connect(self._on_delete_payment)
+        actions.add_widget(self._delete_payment_button)
         detail_layout.addWidget(actions)
 
         self._collection_detail.setVisible(False)
@@ -1824,7 +1841,58 @@ class CashView(BaseView):
         self._on_payment_row_selected()
 
     def _on_payment_row_selected(self) -> None:
-        self._reprint_button.setEnabled(self._selected_payment_entry() is not None)
+        hay_seleccion = self._selected_payment_entry() is not None
+        self._reprint_button.setEnabled(hay_seleccion)
+        self._delete_payment_button.setEnabled(
+            hay_seleccion and can_delete_payment(self._session.role)
+        )
+
+    def _on_delete_payment(self) -> None:
+        """BR-LOAN-019. Confirmación y motivo compartidos con LoansView
+        (payment_deletion.py)."""
+        entry = self._selected_payment_entry()
+        if entry is None or not self._session.access_token:
+            return
+        motivo = payment_deletion.ask_delete_reason(
+            self,
+            entry,
+            self._payments_total_installments,
+            is_latest=entry is self._payment_entries[0],
+        )
+        if motivo is None:
+            return
+        if not motivo:
+            self._toast.show_message(
+                "Debe indicar el motivo de la eliminación para continuar."
+            )
+            return
+        self._delete_payment_button.setEnabled(False)
+        self._run_collection(
+            self._loans_client.delete_loan_payment,
+            self._session.access_token,
+            entry.id,
+            motivo,
+            on_success=lambda response, pid=entry.id: self._on_payment_deleted(
+                pid, response
+            ),
+            on_failure=lambda _mensaje: self._on_payment_row_selected(),
+        )
+
+    def _on_payment_deleted(self, payment_id: str, response) -> None:
+        # El ticket/comprobante en memoria no puede seguir imprimible si
+        # describe justo el cobro que se borró (BR-LOAN-011).
+        if (
+            self._last_payment is not None
+            and self._last_payment.payment_id == payment_id
+        ):
+            self._last_payment = None
+            self._last_payment_loan_id = None
+            self._sync_receipt_buttons()
+        self._toast.show_message(payment_deletion.success_message(response))
+        # Saldo, cuotas y cobros del préstamo, y los totales de la caja (si
+        # salió efectivo), cambiaron: mismo refresco que tras cobrar.
+        self._reload_selected_loan()
+        self.refresh()
 
     def _selected_payment_entry(self):
         fila = self._payments_table.currentRow()

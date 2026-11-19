@@ -89,6 +89,11 @@ class LoanServiceStub(object):
                 request_serializer=loan__service__pb2.ListLoanPaymentsRequest.SerializeToString,
                 response_deserializer=loan__service__pb2.ListLoanPaymentsResponse.FromString,
                 _registered_method=True)
+        self.DeleteLoanPayment = channel.unary_unary(
+                '/loans.LoanService/DeleteLoanPayment',
+                request_serializer=loan__service__pb2.DeleteLoanPaymentRequest.SerializeToString,
+                response_deserializer=loan__service__pb2.DeleteLoanPaymentResponse.FromString,
+                _registered_method=True)
         self.MarkDefaulted = channel.unary_unary(
                 '/loans.LoanService/MarkDefaulted',
                 request_serializer=loan__service__pb2.MarkDefaultedRequest.SerializeToString,
@@ -206,6 +211,17 @@ class LoanServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def DeleteLoanPayment(self, request, context):
+        """Elimina un cobro registrado por error -- BR-LOAN-019. Cualquier rol
+        autenticado (mismo tier que RecordPayment: quien cobra corrige su error
+        en ventanilla) y cualquier cobro del préstamo. Si fue en efectivo, el
+        ingreso se quita de la caja mientras esa caja siga abierta; con la caja
+        ya cerrada (arqueo firmado, BR-CAJA-003) se rechaza. Exige un motivo.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def MarkDefaulted(self, request, context):
         """Marca un préstamo activo como incumplido (Analista de Crédito o superior)
         """
@@ -317,6 +333,11 @@ def add_LoanServiceServicer_to_server(servicer, server):
                     servicer.ListLoanPayments,
                     request_deserializer=loan__service__pb2.ListLoanPaymentsRequest.FromString,
                     response_serializer=loan__service__pb2.ListLoanPaymentsResponse.SerializeToString,
+            ),
+            'DeleteLoanPayment': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteLoanPayment,
+                    request_deserializer=loan__service__pb2.DeleteLoanPaymentRequest.FromString,
+                    response_serializer=loan__service__pb2.DeleteLoanPaymentResponse.SerializeToString,
             ),
             'MarkDefaulted': grpc.unary_unary_rpc_method_handler(
                     servicer.MarkDefaulted,
@@ -646,6 +667,33 @@ class LoanService(object):
             '/loans.LoanService/ListLoanPayments',
             loan__service__pb2.ListLoanPaymentsRequest.SerializeToString,
             loan__service__pb2.ListLoanPaymentsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteLoanPayment(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loans.LoanService/DeleteLoanPayment',
+            loan__service__pb2.DeleteLoanPaymentRequest.SerializeToString,
+            loan__service__pb2.DeleteLoanPaymentResponse.FromString,
             options,
             channel_credentials,
             insecure,
