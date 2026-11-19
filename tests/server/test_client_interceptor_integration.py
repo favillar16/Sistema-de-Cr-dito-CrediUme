@@ -90,13 +90,6 @@ def _solicitud_alta_cliente() -> client_service_pb2.CreateClientRequest:
         personal_reference_1_name="Maria Gomez",
         personal_reference_1_relationship="Hermana",
         personal_reference_1_phone="0981111111",
-        personal_reference_2_name="Carlos Ruiz",
-        personal_reference_2_relationship="Amigo",
-        personal_reference_2_phone="0981111112",
-        employment_reference_employer="ACME S.A.",
-        employment_reference_position="Vendedor",
-        employment_reference_phone="0981111113",
-        employment_reference_seniority="3 años",
     )
 
 

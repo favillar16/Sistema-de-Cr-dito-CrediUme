@@ -258,7 +258,9 @@ def test_acceleration_is_a_faculty_of_the_lender_not_automatic():
 
 class _FakeClientCompleto:
     """Cliente con todos los datos que ficha_cliente_html() necesita --
-    identidad, situación financiera y las tres referencias de BR-CLI-005."""
+    identidad, situación financiera y la referencia de BR-CLI-005. Conserva
+    la 2.ª referencia personal y la laboral de un cliente antiguo para probar
+    que ya no se imprimen."""
 
     first_name = "Fabrizio"
     last_name = "Villar"
@@ -305,16 +307,21 @@ def test_ficha_cliente_shows_all_client_data_and_references():
     assert "5.000.000 Gs" in texto  # ingreso declarado
     assert "Salario" in texto  # origen de fondos
     assert "Juan Pérez" in texto
-    assert "María López" in texto
-    assert "ACME S.A." in texto
+    assert "0981111111" in texto
+    assert "Hermano" in texto
 
 
-def test_ficha_cliente_shows_the_workplace():
-    """El lugar de trabajo (empleador) debe verse en Datos personales, no
-    solo en la tabla de Referencias."""
+def test_ficha_cliente_prints_only_the_basic_reference():
+    """BR-CLI-005: una sola referencia (nombre, celular, relación). La 2.ª
+    referencia personal y la laboral no se imprimen aunque un cliente
+    antiguo las tenga cargadas."""
     html = documents.ficha_cliente_html(_FakeLoanCompleto, _FakeClientCompleto)
     texto = _texto_plano(html)
-    assert "Lugar de trabajo" in texto
+    assert "Celular" in texto
+    assert "María López" not in texto
+    assert "ACME S.A." not in texto
+    assert "Lugar de trabajo" not in texto
+    assert "Referencia laboral" not in texto
 
 
 def test_ficha_cliente_shows_the_requested_loan_terms():

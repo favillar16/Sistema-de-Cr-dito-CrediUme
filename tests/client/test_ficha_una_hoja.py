@@ -76,8 +76,8 @@ class _ClienteConDatosLargos:
     address = "Avda. Mcal. Estigarribia c/ Cnel. Yegros N 2451, B San Blas"
     email = "maria.villalba@gmail.com"
     source_of_funds = "Comercio de indumentaria en el Mercado Municipal"
-    employment_reference_employer = "Cooperativa Coronel Oviedo Ltda."
-    employment_reference_position = "Encargada de cobranzas"
+    personal_reference_1_name = "Rosa Elizabeth Benitez de Villalba"
+    personal_reference_1_relationship = "Compañera de trabajo"
 
 
 def _paginas(html: str, ruta, alto_mm: float = _A4_ALTO_MM) -> int:

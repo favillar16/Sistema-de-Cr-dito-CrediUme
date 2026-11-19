@@ -20,8 +20,8 @@ rating, economic sector) was removed: none of them was required or fed a
 business rule, and they made the longest form in the app longer. The
 columns were dropped (migration `c7a1d4e5f6b2`) and their proto field
 numbers are `reserved` in `protos/client_service.proto`. What a client
-*must* still register is BR-CLI-005 (two personal references + one
-employment reference) and BR-CLI-006 (source of funds).
+*must* still register is BR-CLI-005 (one basic reference: name, phone,
+relationship) and BR-CLI-006 (source of funds).
 
 **Cash handling exists again** (`specs/cash/README`). It had been
 dropped, and an earlier version of this file said so; the

@@ -320,10 +320,6 @@ def ficha_cliente_docx(loan, client) -> Document:
             ("Email", client.email),
             ("Teléfono", client.phone_number),
             ("Dirección", client.address),
-            (
-                "Lugar de trabajo",
-                client.employment_reference_employer or "No registrado",
-            ),
         ],
     )
 
@@ -339,36 +335,19 @@ def ficha_cliente_docx(loan, client) -> Document:
         ],
     )
 
-    _add_section_heading(document, "Referencias")
-    table = document.add_table(rows=4, cols=4)
+    # BR-CLI-005: una sola referencia básica, igual que la ficha en PDF.
+    _add_section_heading(document, "Referencia")
+    table = document.add_table(rows=2, cols=3)
     table.style = "Table Grid"
-    for col, text in enumerate(["Tipo", "Nombre", "Relación / Cargo", "Teléfono"]):
+    for col, text in enumerate(["Nombre de la persona", "Celular", "Relación"]):
         table.rows[0].cells[col].text = text
-    filas = [
-        (
-            "Referencia personal 1",
-            client.personal_reference_1_name,
-            client.personal_reference_1_relationship,
-            client.personal_reference_1_phone,
-        ),
-        (
-            "Referencia personal 2",
-            client.personal_reference_2_name,
-            client.personal_reference_2_relationship,
-            client.personal_reference_2_phone,
-        ),
-        (
-            "Referencia laboral",
-            client.employment_reference_employer,
-            f"{client.employment_reference_position} "
-            f"({client.employment_reference_seniority})",
-            client.employment_reference_phone,
-        ),
-    ]
-    for row_index, fila in enumerate(filas, start=1):
-        cells = table.rows[row_index].cells
-        for col, valor in enumerate(fila):
-            cells[col].text = valor
+    fila = (
+        client.personal_reference_1_name,
+        client.personal_reference_1_phone,
+        client.personal_reference_1_relationship,
+    )
+    for col, valor in enumerate(fila):
+        table.rows[1].cells[col].text = valor
 
     _add_section_heading(document, "Préstamo solicitado")
     garantia = (

@@ -38,7 +38,7 @@ def test_las_secciones_van_numeradas_como_en_el_formulario():
 
     for numero, titulo in (
         (1, "DATOS DEL CLIENTE Y SITUACIÓN FINANCIERA DECLARADA"),
-        (2, "REFERENCIAS"),
+        (2, "REFERENCIA"),
         (3, "CRÉDITO SOLICITADO"),
         (4, "ESPACIO PARA USO EXCLUSIVO DE CREDIMED UME"),
     ):
@@ -56,11 +56,10 @@ def test_trae_los_datos_que_se_estudian_para_decidir():
     # ya no se calcula en esta ficha -- pedido explícito de la entidad).
     assert "5.000.000 Gs" in texto
     assert "1.768.056 Gs" in texto
-    # Origen de fondos (BR-CLI-006) y las tres referencias (BR-CLI-005).
+    # Origen de fondos (BR-CLI-006) y la referencia básica (BR-CLI-005).
     assert "Salario" in texto
     assert "Juan Pérez" in texto
-    assert "María López" in texto
-    assert "ACME S.A." in texto
+    assert "0981111111" in texto
 
 
 def test_declara_el_credito_con_los_cargos_financiados():
