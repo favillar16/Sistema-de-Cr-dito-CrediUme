@@ -73,10 +73,13 @@ def card(*, shadow: bool = True) -> tuple[QFrame, QVBoxLayout]:
     frame = QFrame()
     frame.setObjectName("cardFrame")
     frame.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+    # Borde suave (DIVIDER) en vez del gris de la paleta: con decenas de
+    # tarjetas por pantalla, el borde pesado era ruido. El hover sólo lo
+    # oscurece un poco -- una tarjeta no es un botón, no debe parecer clicable.
     frame.setStyleSheet(
-        f"#cardFrame {{ background: white; border: 1px solid {theme.BORDER}; "
-        "border-radius: 10px; }"
-        f"#cardFrame:hover {{ border: 1px solid {theme.PRIMARY}; }}"
+        f"#cardFrame {{ background: white; border: 1px solid {theme.DIVIDER}; "
+        f"border-radius: {theme.CARD_RADIUS}px; }}"
+        f"#cardFrame:hover {{ border: 1px solid {theme.INPUT_BORDER}; }}"
     )
     if shadow:
         # Qt can't share one QGraphicsEffect instance across widgets -- each
@@ -87,17 +90,22 @@ def card(*, shadow: bool = True) -> tuple[QFrame, QVBoxLayout]:
         effect.setColor(QColor(*theme.CARD_SHADOW_RGBA))
         frame.setGraphicsEffect(effect)
     layout = QVBoxLayout(frame)
-    layout.setContentsMargins(16, 16, 16, 16)
+    layout.setContentsMargins(20, 18, 20, 18)
     layout.setSpacing(10)
     return frame, layout
 
 
 def section_label(text: str) -> QLabel:
+    """Título de sección: navy y en el texto tal cual (no en mayúsculas), con
+    una marca lima a la izquierda. Antes era gris claro en mayúsculas
+    subrayado con el borde de la paleta, y se confundía con las etiquetas de
+    los campos -- justo lo contrario de lo que un título tiene que hacer."""
     label = QLabel(text)
     label.setStyleSheet(
-        f"color: {theme.TEXT_MUTED}; font-weight: 600; font-size: 12px; "
-        f"text-transform: uppercase; border-bottom: 1px solid {theme.BORDER}; "
-        "padding-bottom: 4px;"
+        f"color: {theme.PRIMARY}; font-weight: 700; font-size: 14px; "
+        f"font-family: {theme.HEADING_FONT_FAMILY}; background: transparent; "
+        f"border: none; border-left: 3px solid {theme.ACCENT}; "
+        "padding: 2px 0 2px 8px; margin-top: 4px;"
     )
     return label
 
@@ -134,8 +142,8 @@ def stat_tile(
     top_row.setSpacing(8)
     caption = _ElidingLabel(title)
     caption.setStyleSheet(
-        f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600; "
-        "text-transform: uppercase;"
+        f"color: {theme.TEXT_SECONDARY}; font-size: 12px; font-weight: 600; "
+        "background: transparent;"
     )
     top_row.addWidget(caption, stretch=1)
     if icon_text:
@@ -174,7 +182,8 @@ def labeled_combo(label_text: str) -> tuple[QWidget, QComboBox]:
     layout.setSpacing(4)
     caption = QLabel(label_text)
     caption.setStyleSheet(
-        f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600;"
+        f"color: {theme.TEXT_SECONDARY}; font-size: 12px; font-weight: 600; "
+        "background: transparent;"
     )
     layout.addWidget(caption)
     combo = QComboBox()
@@ -224,7 +233,8 @@ def labeled_field(
     else:
         caption.setText(label_text)
     caption.setStyleSheet(
-        f"color: {theme.TEXT_MUTED}; font-size: 11px; font-weight: 600;"
+        f"color: {theme.TEXT_SECONDARY}; font-size: 12px; font-weight: 600; "
+        "background: transparent;"
     )
     layout.addWidget(caption)
     field = input_cls(placeholder)

@@ -1,5 +1,12 @@
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from cas_client import theme
 from cas_client.rbac_ui import tier_label
@@ -13,57 +20,56 @@ def _initials(username: str) -> str:
 
 
 class HeaderBar(QWidget):
-    """Persistent top bar showing who's logged in + logout -- lives above the
-    content stack in _AppShellView, visible across Dashboard/Clientes/Préstamos
-    instead of being duplicated per view or buried in the sidebar."""
+    """Persistent top bar above the content stack in _AppShellView.
+
+    Rediseño 2026-11: blanca en vez de navy. Con el menú lateral también en
+    navy, la pantalla tenía dos bloques oscuros compitiendo y el contenido
+    quedaba encajonado. Además ahora dice **dónde está el operador y para qué
+    sirve esa pantalla** (`set_section`): el título de la sección y una línea
+    de ayuda, que antes no existía en ninguna parte. Por eso las vistas ya no
+    repiten su propio título.
+    """
 
     logout_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setFixedHeight(64)
+        self.setObjectName("headerBar")
+        self.setFixedHeight(68)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        # Navy fill (same as the sidebar) instead of the old plain-white bar --
-        # gives the header actual visual weight instead of blending into the
-        # content area above it.
-        self.setStyleSheet(f"background: {theme.PRIMARY};")
+        self.setStyleSheet(
+            f"#headerBar {{ background: #FFFFFF; "
+            f"border-bottom: 1px solid {theme.DIVIDER}; }}"
+            "QLabel { background: transparent; }"
+        )
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(24, 0, 24, 0)
-        layout.setSpacing(12)
+        layout.setContentsMargins(32, 0, 24, 0)
+        layout.setSpacing(14)
 
-        self._avatar = QLabel("")
-        self._avatar.setFixedSize(36, 36)
-        self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Lime-on-navy (ACCENT is background-only per theme.py's contrast
-        # rule, always paired with PRIMARY text) -- pops against the new navy
-        # header, whereas the old navy-on-navy-adjacent avatar would blend in.
-        self._avatar.setStyleSheet(
-            f"background-color: {theme.ACCENT}; color: {theme.PRIMARY}; "
-            "border-radius: 18px; font-weight: 700; font-size: 13px;"
+        # -- Izquierda: sección actual + ayuda de una línea --
+        section_column = QVBoxLayout()
+        section_column.setContentsMargins(0, 0, 0, 0)
+        section_column.setSpacing(0)
+        section_column.addStretch()
+        self._section_label = QLabel("")
+        self._section_label.setStyleSheet(
+            f"color: {theme.PRIMARY}; font-size: 18px; font-weight: 700; "
+            f"font-family: {theme.HEADING_FONT_FAMILY};"
         )
-        layout.addWidget(self._avatar)
-
-        text_column = QVBoxLayout()
-        text_column.setContentsMargins(0, 0, 0, 0)
-        text_column.setSpacing(2)
-        self._username_label = QLabel("")
-        self._username_label.setStyleSheet(
-            "color: white; font-size: 14px; font-weight: 600;"
+        section_column.addWidget(self._section_label)
+        self._section_help = QLabel("")
+        self._section_help.setStyleSheet(
+            f"color: {theme.TEXT_SECONDARY}; font-size: 12px;"
         )
-        text_column.addWidget(self._username_label)
-
-        self._role_badge = QLabel("")
-        self._role_badge.setStyleSheet(
-            f"background-color: {theme.ACCENT}; color: {theme.PRIMARY}; "
-            "border-radius: 10px; padding: 2px 10px; font-size: 11px; "
-            "font-weight: 600;"
+        # Se puede achicar (y recortar) antes que empujar al bloque del
+        # usuario fuera de la barra en la ventana mínima de 900 px.
+        self._section_help.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
-        self._role_badge.setFixedWidth(self._role_badge.sizeHint().width())
-        text_column.addWidget(self._role_badge, alignment=Qt.AlignmentFlag.AlignLeft)
-        layout.addLayout(text_column)
-
-        layout.addStretch()
+        section_column.addWidget(self._section_help)
+        section_column.addStretch()
+        layout.addLayout(section_column, stretch=1)
 
         # Indicador de enlace con el servidor. Va acá, en la barra que está
         # visible en todas las pantallas, porque el operador tiene que poder
@@ -71,45 +77,75 @@ class HeaderBar(QWidget):
         # error después de haber tomado la plata en el mostrador.
         self._connection_label = QLabel("")
         self._connection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Centrado vertical y no estirado: sin esto el QLabel crece hasta los
-        # 64px de alto del header y el estado de alarma se dibuja como un
-        # bloque rojo macizo en vez de una píldora.
+        # Centrado vertical y no estirado: sin esto el QLabel crece hasta el
+        # alto del header y el estado de alarma se dibuja como un bloque rojo
+        # macizo en vez de una píldora.
         layout.addWidget(
             self._connection_label, alignment=Qt.AlignmentFlag.AlignVCenter
         )
         self.set_connected(True)
 
+        # -- Derecha: usuario (avatar + nombre + nivel) --
+        self._avatar = QLabel("")
+        self._avatar.setFixedSize(36, 36)
+        self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._avatar.setStyleSheet(
+            f"background-color: {theme.PRIMARY}; color: white; "
+            "border-radius: 18px; font-weight: 700; font-size: 13px;"
+        )
+        layout.addWidget(self._avatar, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        user_column = QVBoxLayout()
+        user_column.setContentsMargins(0, 0, 0, 0)
+        user_column.setSpacing(0)
+        self._username_label = QLabel("")
+        self._username_label.setStyleSheet(
+            f"color: {theme.TEXT_PRIMARY}; font-size: 13px; font-weight: 700;"
+        )
+        user_column.addWidget(self._username_label)
+        self._role_badge = QLabel("")
+        self._role_badge.setStyleSheet(
+            f"color: {theme.TEXT_SECONDARY}; font-size: 11px; font-weight: 600;"
+        )
+        user_column.addWidget(self._role_badge)
+        user_wrapper = QWidget()
+        user_wrapper.setLayout(user_column)
+        user_wrapper.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred
+        )
+        layout.addWidget(user_wrapper, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         logout_button = QPushButton("Cerrar sesión")
         logout_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        logout_button.setStyleSheet(
-            "QPushButton { color: white; border: 1px solid rgba(255, 255, 255, 90); "
-            "background: transparent; border-radius: 14px; font-weight: 600; "
-            "padding: 6px 16px; }"
-            f"QPushButton:hover {{ background-color: {theme.ACCENT}; "
-            f"color: {theme.PRIMARY}; border-color: {theme.ACCENT}; }}"
-        )
+        logout_button.setStyleSheet(theme.secondary_button_style(padding="6px 14px"))
         logout_button.clicked.connect(self.logout_requested.emit)
-        layout.addWidget(logout_button)
+        layout.addWidget(logout_button, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+    def set_section(self, title: str, help_text: str) -> None:
+        """Título de la pantalla visible y una línea que dice para qué sirve."""
+        self._section_label.setText(title)
+        self._section_help.setText(help_text)
+        self._section_help.setToolTip(help_text)
 
     def set_connected(self, connected: bool) -> None:
-        """Verde discreto cuando hay línea, rojo declarado cuando no.
+        """Píldora verde discreta cuando hay línea, roja cuando no.
 
         El estado normal no debe competir por atención -- es el de siempre --
-        así que "Conectado" va en un tono translúcido sobre el navy del
-        header. La caída sí se pinta con fondo rojo lleno: es una condición
-        que obliga a parar lo que se esté haciendo.
+        así que "Conectado" va en un verde suave. La caída se pinta en rojo
+        lleno: es una condición que obliga a parar lo que se esté haciendo.
         """
         if connected:
             self._connection_label.setText("● Conectado")
             self._connection_label.setStyleSheet(
-                "color: rgba(255, 255, 255, 150); font-size: 11px; "
-                "font-weight: 600; padding: 4px 10px;"
+                f"background-color: {theme.SUCCESS_TINT}; color: {theme.SUCCESS}; "
+                "border-radius: 11px; font-size: 11px; font-weight: 700; "
+                "padding: 4px 10px;"
             )
             self._connection_label.setToolTip("Hay conexión con el servidor.")
             return
         self._connection_label.setText("● Sin conexión")
         self._connection_label.setStyleSheet(
-            f"background-color: {theme.ERROR}; color: white; border-radius: 10px; "
+            f"background-color: {theme.ERROR}; color: white; border-radius: 11px; "
             "font-size: 11px; font-weight: 700; padding: 4px 10px;"
         )
         self._connection_label.setToolTip(
@@ -127,5 +163,4 @@ class HeaderBar(QWidget):
         self._avatar.setText(_initials(username))
         self._username_label.setText(username)
         self._role_badge.setText(tier_label(role))
-        self._role_badge.setFixedWidth(self._role_badge.sizeHint().width())
         self._role_badge.show()

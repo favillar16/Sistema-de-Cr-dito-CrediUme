@@ -123,7 +123,9 @@ class ClientsView(BaseView):
         session: Session,
         parent: QWidget | None = None,
     ):
-        super().__init__(title="Clientes", parent=parent)
+        # Sin título propio: lo muestra la barra superior (HeaderBar.set_section)
+        # junto con la línea de ayuda de la sección.
+        super().__init__(parent=parent)
         self._client = client
         self._session = session
         self._worker: AsyncWorker | None = None

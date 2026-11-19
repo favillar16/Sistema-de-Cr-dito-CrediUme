@@ -199,7 +199,12 @@ class LoginView(QWidget):
 
         form_panel = QWidget()
         form_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        form_panel.setStyleSheet(f"background-color: {theme.APP_BACKGROUND};")
+        form_panel.setObjectName("loginFormPanel")
+        # Con selector por objectName: sin él la regla bajaba a cada QLabel
+        # de la tarjeta y les pintaba una franja gris detrás del texto.
+        form_panel.setStyleSheet(
+            f"#loginFormPanel {{ background-color: {theme.APP_BACKGROUND}; }}"
+        )
         form_layout = QVBoxLayout(form_panel)
         form_layout.setContentsMargins(24, 24, 24, 24)
         form_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -215,7 +220,7 @@ class LoginView(QWidget):
         card.setMaximumWidth(420)
         card.setStyleSheet(
             f"#loginCard {{ background: white; border-radius: 12px; "
-            f"border: 1px solid {theme.BORDER}; }}"
+            f"border: 1px solid {theme.DIVIDER}; }}"
         )
         shadow = QGraphicsDropShadowEffect(card)
         shadow.setBlurRadius(24)

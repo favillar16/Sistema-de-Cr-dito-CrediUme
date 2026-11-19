@@ -67,6 +67,12 @@ METHOD_ROLES: dict[str, frozenset[RoleEnum]] = {
     # el historial de cobros es información operativa de consulta -- en
     # ventanilla "¿ya pagué?" la pregunta el cliente y la contesta el cajero.
     "/loans.LoanService/ListLoanPayments": CASHIER_AND_ABOVE,
+    # BR-LOAN-019: eliminar un cobro registrado por error. Mismo tier que
+    # RecordPayment por decisión de la entidad: quien cobra en ventanilla
+    # corrige su propio error sin escalar. El cerco no es el rol sino la caja
+    # (un cobro en efectivo con la caja ya cerrada no se puede borrar) y el
+    # motivo obligatorio -- ver DeleteLoanPayment en loan_service.py.
+    "/loans.LoanService/DeleteLoanPayment": CASHIER_AND_ABOVE,
     "/loans.LoanService/GetAmortizationSchedule": CASHIER_AND_ABOVE,
     "/loans.LoanService/UpdateInstallmentAmount": MANAGER_AND_ABOVE,
     # BR-LOAN-015: simétrica con UpdateInstallmentAmount a propósito --

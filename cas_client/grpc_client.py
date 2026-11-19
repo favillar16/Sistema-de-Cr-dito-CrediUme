@@ -504,6 +504,21 @@ class LoanServiceClient:
             error_cls=ApiError,
         )
 
+    def delete_loan_payment(
+        self, access_token: str, payment_id: str, reason: str
+    ) -> loan_service_pb2.DeleteLoanPaymentResponse:
+        """BR-LOAN-019: elimina un cobro registrado por error. `reason` es
+        obligatorio. Un cobro en efectivo cuya caja ya cerró se rechaza con
+        FAILED_PRECONDITION (el arqueo firmado no se toca)."""
+        return _invoke(
+            self._stub.DeleteLoanPayment,
+            loan_service_pb2.DeleteLoanPaymentRequest(
+                payment_id=payment_id, reason=reason
+            ),
+            access_token=access_token,
+            error_cls=ApiError,
+        )
+
     def mark_defaulted(
         self, access_token: str, loan_id: str
     ) -> loan_service_pb2.MarkDefaultedResponse:

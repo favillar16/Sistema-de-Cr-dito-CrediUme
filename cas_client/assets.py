@@ -14,6 +14,10 @@ LOGO_FULL_PNG = os.path.join(
 )  # icon + wordmark, transparent bg
 LOGO_MARK_PNG = os.path.join(_ASSETS_DIR, "logo_mark.png")  # icon only, transparent bg
 APP_ICON_ICO = os.path.join(_ASSETS_DIR, "app_icon.ico")
+# Ícono de Angiru Tech, la empresa que desarrolló el sistema (pie de página
+# de la ventana). Renderizado a 96 px desde el SVG oficial de su marca
+# (marca/angiru-tech/svg/icono.svg): marino #003049, A crema, punto amarillo.
+ANGIRU_ICON_PNG = os.path.join(_ASSETS_DIR, "angiru_icon.png")
 
 # LOGO_MARK_PNG's canvas (623x143) has a lot of transparent padding around
 # the actual visible chart-and-arrow icon -- fine when the file is used at

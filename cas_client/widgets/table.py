@@ -104,39 +104,48 @@ def style_table(table: QTableWidget) -> None:
         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
     )
     table.horizontalHeader().setHighlightSections(False)
+    # Encabezado claro (tinte navy) en vez de la barra navy maciza: con varias
+    # tablas por pantalla, los bloques oscuros competían con el menú lateral y
+    # con los botones. La selección usa el mismo tinte, más fuerte, con texto
+    # navy -- se ve igual de clara sin "apagar" la fila.
     table.setStyleSheet(
         f"""
         QTableWidget {{
             background-color: white;
-            alternate-background-color: {theme.APP_BACKGROUND};
+            alternate-background-color: #FAFBFD;
             gridline-color: transparent;
-            border: 1px solid {theme.BORDER};
-            border-radius: 8px;
+            border: 1px solid {theme.DIVIDER};
+            border-radius: 10px;
+            color: {theme.TEXT_PRIMARY};
         }}
         QTableWidget::item {{
             padding: 8px 10px;
-            border-bottom: 1px solid {theme.APP_BACKGROUND};
+            border-bottom: 1px solid {theme.DIVIDER};
+        }}
+        QTableWidget::item:hover {{
+            background-color: {theme.PRIMARY_TINT};
         }}
         QTableWidget::item:selected {{
-            background-color: {theme.PRIMARY};
-            color: white;
+            background-color: {theme.PRIMARY_TINT_STRONG};
+            color: {theme.PRIMARY};
         }}
         QHeaderView::section {{
-            background-color: {theme.PRIMARY};
-            color: white;
+            background-color: {theme.PRIMARY_TINT};
+            color: {theme.PRIMARY};
             padding: 8px 10px;
             border: none;
-            font-weight: 600;
+            border-bottom: 1px solid {theme.DIVIDER};
+            font-weight: 700;
             font-size: 12px;
         }}
         QHeaderView::section:first {{
-            border-top-left-radius: 8px;
+            border-top-left-radius: 10px;
         }}
         QHeaderView::section:last {{
-            border-top-right-radius: 8px;
+            border-top-right-radius: 10px;
         }}
         QTableCornerButton::section {{
-            background-color: {theme.PRIMARY};
+            background-color: {theme.PRIMARY_TINT};
             border: none;
         }}
         """

@@ -10,25 +10,7 @@ class FormInput(QLineEdit):
         super().__init__(parent)
         if placeholder:
             self.setPlaceholderText(placeholder)
-        self.setStyleSheet(
-            f"""
-            QLineEdit {{
-                border: 1px solid {theme.BORDER};
-                border-radius: 6px;
-                padding: 8px 10px;
-                font-size: 14px;
-                background: #FFFFFF;
-                color: {theme.TEXT_PRIMARY};
-                font-family: {theme.BODY_FONT_FAMILY};
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {theme.PRIMARY};
-            }}
-            QLineEdit[error="true"] {{
-                border: 1px solid {theme.ERROR};
-            }}
-            """
-        )
+        self.setStyleSheet(theme.line_edit_style())
 
     def set_error(self, has_error: bool) -> None:
         self.setProperty("error", has_error)

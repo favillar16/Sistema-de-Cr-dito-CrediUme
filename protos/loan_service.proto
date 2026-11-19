@@ -43,6 +43,13 @@ service LoanService {
     // que registró otro sin tener que pedir el papel.
     rpc ListLoanPayments (ListLoanPaymentsRequest) returns (ListLoanPaymentsResponse);
 
+    // Elimina un cobro registrado por error -- BR-LOAN-019. Cualquier rol
+    // autenticado (mismo tier que RecordPayment: quien cobra corrige su error
+    // en ventanilla) y cualquier cobro del préstamo. Si fue en efectivo, el
+    // ingreso se quita de la caja mientras esa caja siga abierta; con la caja
+    // ya cerrada (arqueo firmado, BR-CAJA-003) se rechaza. Exige un motivo.
+    rpc DeleteLoanPayment (DeleteLoanPaymentRequest) returns (DeleteLoanPaymentResponse);
+
     // Marca un préstamo activo como incumplido (Analista de Crédito o superior)
     rpc MarkDefaulted (MarkDefaultedRequest) returns (MarkDefaultedResponse);
 
@@ -494,4 +501,24 @@ message DeleteLoanResponse {
     // préstamo ya no existe para volver a consultarlo).
     string client_id = 2;
     string deleted_status = 3; // Estado que tenía el préstamo al eliminarlo
+}
+
+message DeleteLoanPaymentRequest {
+    string payment_id = 1;
+    // Motivo obligatorio: la fila del cobro desaparece y el AuditLog es lo
+    // único que queda para explicar por qué.
+    string reason = 2;
+}
+
+message DeleteLoanPaymentResponse {
+    bool success = 1;
+    string loan_id = 2;
+    // Estado del préstamo DESPUÉS de eliminar el cobro: un PAID cuyo saldo
+    // vuelve a ser positivo regresa a ACTIVE.
+    string status = 3;
+    string total_paid = 4;
+    string remaining_balance = 5;
+    // Monto que se quitó de la caja abierta ("" si el cobro no fue en
+    // efectivo o no tenía movimiento de caja).
+    string cash_amount_removed = 6;
 }

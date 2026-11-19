@@ -17,7 +17,7 @@ class BaseView(QWidget):
         # unless this is set -- callers rely on it to paint their own bg.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(32, 32, 32, 32)
+        self._layout.setContentsMargins(32, 24, 32, 32)
         self._layout.setSpacing(16)
 
         self._title_label: QLabel | None = None
