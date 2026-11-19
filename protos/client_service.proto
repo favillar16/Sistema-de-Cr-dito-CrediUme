@@ -42,7 +42,9 @@ message CreateClientRequest {
     // Ingreso mensual declarado, como string decimal (ej. "2500.00"). Opcional al
     // registrar; requerido antes de poder crear un préstamo (BR-LOAN-002).
     optional string declared_monthly_income = 8;
-    // Referencias personales y laboral -- obligatorias (BR-CLI-005).
+    // Referencias -- BR-CLI-005: tres referencias básicas obligatorias
+    // (personal_reference_1/2/3: nombre, relación, celular). La laboral quedó
+    // opcional y fuera del formulario; se conserva por los clientes antiguos.
     string personal_reference_1_name = 9;
     string personal_reference_1_relationship = 10;
     string personal_reference_1_phone = 11;
@@ -55,6 +57,10 @@ message CreateClientRequest {
     string employment_reference_seniority = 18; // Texto libre, ej. "3 años"
     // Origen de fondos -- obligatorio (BR-CLI-006), ej. "Salario", "Negocio propio".
     string source_of_funds = 19;
+    // Tercera referencia básica (BR-CLI-005), mismo formato que la 1 y la 2.
+    string personal_reference_3_name = 27;
+    string personal_reference_3_relationship = 28;
+    string personal_reference_3_phone = 29;
     // 20-26 fueron el perfil extendido (BR-CLI-007: vencimiento de cédula,
     // estado civil, nivel de estudios, ocupación, barrio, calificación de
     // riesgo, sector económico), eliminado del sistema. Quedan reservados
@@ -98,6 +104,9 @@ message GetClientByIdResponse {
     string employment_reference_phone = 21;
     string employment_reference_seniority = 22;
     string source_of_funds = 23;
+    string personal_reference_3_name = 31;
+    string personal_reference_3_relationship = 32;
+    string personal_reference_3_phone = 33;
     // 24-30: perfil extendido eliminado (ver CreateClientRequest).
     reserved 24, 25, 26, 27, 28, 29, 30;
     reserved "national_id_expiry_date", "marital_status", "education_level";
@@ -128,7 +137,9 @@ message UpdateClientRequest {
     string first_name = 24;
     string last_name = 25;
     optional string declared_monthly_income = 5;
-    // Referencias personales y laboral -- obligatorias (BR-CLI-005).
+    // Referencias -- BR-CLI-005: tres referencias básicas obligatorias
+    // (personal_reference_1/2/3: nombre, relación, celular). La laboral quedó
+    // opcional y fuera del formulario; se conserva por los clientes antiguos.
     string personal_reference_1_name = 6;
     string personal_reference_1_relationship = 7;
     string personal_reference_1_phone = 8;
@@ -141,6 +152,9 @@ message UpdateClientRequest {
     string employment_reference_seniority = 15;
     // Origen de fondos -- obligatorio (BR-CLI-006), ej. "Salario", "Negocio propio".
     string source_of_funds = 16;
+    string personal_reference_3_name = 26;
+    string personal_reference_3_relationship = 27;
+    string personal_reference_3_phone = 28;
     // 17-23: perfil extendido eliminado (ver CreateClientRequest).
     reserved 17, 18, 19, 20, 21, 22, 23;
     reserved "national_id_expiry_date", "marital_status", "education_level";

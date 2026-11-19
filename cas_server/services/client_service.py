@@ -27,12 +27,17 @@ from cas_server.services.common import (
 
 TAMANO_PAGINA_POR_DEFECTO = 20
 
-# BR-CLI-005: campos de referencia que siguen en el proto y en la tabla (los
-# clientes antiguos los tienen cargados) pero que ya no son obligatorios.
+# BR-CLI-005: tres referencias básicas obligatorias, todas con el mismo
+# formato (nombre de la persona, relación, celular).
+_REFERENCIAS_REQUERIDAS = tuple(
+    f"personal_reference_{numero}_{campo}"
+    for numero in (1, 2, 3)
+    for campo in ("name", "relationship", "phone")
+)
+
+# BR-CLI-005: la referencia laboral sigue en el proto y en la tabla (los
+# clientes antiguos la tienen cargada) pero ya no se pide.
 _REFERENCIAS_OPCIONALES = (
-    "personal_reference_2_name",
-    "personal_reference_2_relationship",
-    "personal_reference_2_phone",
     "employment_reference_employer",
     "employment_reference_position",
     "employment_reference_phone",
@@ -74,6 +79,10 @@ def _cliente_a_respuesta(cliente: Client) -> client_service_pb2.GetClientByIdRes
         personal_reference_2_relationship=cliente.personal_reference_2_relationship
         or "",
         personal_reference_2_phone=cliente.personal_reference_2_phone or "",
+        personal_reference_3_name=cliente.personal_reference_3_name or "",
+        personal_reference_3_relationship=cliente.personal_reference_3_relationship
+        or "",
+        personal_reference_3_phone=cliente.personal_reference_3_phone or "",
         employment_reference_employer=cliente.employment_reference_employer or "",
         employment_reference_position=cliente.employment_reference_position or "",
         employment_reference_phone=cliente.employment_reference_phone or "",
@@ -100,19 +109,13 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                 "date_of_birth y address son obligatorios",
             )
 
-        referencias_requeridas = (
-            request.personal_reference_1_name,
-            request.personal_reference_1_relationship,
-            request.personal_reference_1_phone,
-        )
-        # BR-CLI-005: una sola referencia básica (nombre, relación, celular).
-        # La segunda referencia personal y la laboral pasaron a ser opcionales
-        # porque muchas veces no se pueden conseguir y trababan el alta.
-        if not all(referencias_requeridas):
+        # BR-CLI-005: tres referencias básicas (nombre, relación, celular).
+        # La referencia laboral ya no se pide.
+        if not all(getattr(request, campo) for campo in _REFERENCIAS_REQUERIDAS):
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
-                "la referencia (nombre, relación y celular) es obligatoria "
-                "(BR-CLI-005)",
+                "las tres referencias (nombre, relación y celular de cada una) "
+                "son obligatorias (BR-CLI-005)",
             )
 
         if not request.source_of_funds:
@@ -181,6 +184,9 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                 personal_reference_2_name=request.personal_reference_2_name,
                 personal_reference_2_relationship=request.personal_reference_2_relationship,
                 personal_reference_2_phone=request.personal_reference_2_phone,
+                personal_reference_3_name=request.personal_reference_3_name,
+                personal_reference_3_relationship=request.personal_reference_3_relationship,
+                personal_reference_3_phone=request.personal_reference_3_phone,
                 employment_reference_employer=request.employment_reference_employer,
                 employment_reference_position=request.employment_reference_position,
                 employment_reference_phone=request.employment_reference_phone,
@@ -284,19 +290,13 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                 "obligatorios",
             )
 
-        referencias_requeridas = (
-            request.personal_reference_1_name,
-            request.personal_reference_1_relationship,
-            request.personal_reference_1_phone,
-        )
-        # BR-CLI-005: una sola referencia básica (nombre, relación, celular).
-        # La segunda referencia personal y la laboral pasaron a ser opcionales
-        # porque muchas veces no se pueden conseguir y trababan el alta.
-        if not all(referencias_requeridas):
+        # BR-CLI-005: tres referencias básicas (nombre, relación, celular).
+        # La referencia laboral ya no se pide.
+        if not all(getattr(request, campo) for campo in _REFERENCIAS_REQUERIDAS):
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
-                "la referencia (nombre, relación y celular) es obligatoria "
-                "(BR-CLI-005)",
+                "las tres referencias (nombre, relación y celular de cada una) "
+                "son obligatorias (BR-CLI-005)",
             )
 
         if not request.source_of_funds:
@@ -334,14 +334,11 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
             cliente.address = request.address
             if request.HasField("declared_monthly_income"):
                 cliente.declared_monthly_income = ingreso
-            cliente.personal_reference_1_name = request.personal_reference_1_name
-            cliente.personal_reference_1_relationship = (
-                request.personal_reference_1_relationship
-            )
-            cliente.personal_reference_1_phone = request.personal_reference_1_phone
-            # La 2.ª referencia personal y la laboral ya no están en el
-            # formulario (BR-CLI-005): un pedido que no las trae no borra lo
-            # que un cliente antiguo tenga cargado.
+            for campo in _REFERENCIAS_REQUERIDAS:
+                setattr(cliente, campo, getattr(request, campo))
+            # La referencia laboral ya no está en el formulario (BR-CLI-005):
+            # un pedido que no la trae no borra lo que un cliente antiguo
+            # tenga cargado.
             for campo in _REFERENCIAS_OPCIONALES:
                 valor = getattr(request, campo)
                 if valor:
