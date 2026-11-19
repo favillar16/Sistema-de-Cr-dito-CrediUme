@@ -59,57 +59,25 @@ def _friendly_message(
     return f"No se pudo conectar con el servidor: {exc}"
 
 
-def _reference_cards() -> tuple[
-    tuple,
-    tuple,
-    tuple,
-]:
-    """Builds the 3 reference cards (BR-CLI-005) shared by the create and
-    detail forms: (frame, name_field, relationship_field, phone_field) for
-    each personal reference, and (frame, employer, position, phone, seniority)
-    for the employment reference."""
-    ref1_frame, ref1 = card()
-    ref1.addWidget(section_label("Referencia personal 1"))
-    name_field, ref1_name = labeled_field("Nombre completo", required=True)
-    ref1.addWidget(name_field)
-    ref1_grid = ResponsiveGrid(min_cell_width=220)
-    rel_field, ref1_relationship = labeled_field("Parentesco/relación", required=True)
-    ref1_grid.add_widget(rel_field)
-    phone_field, ref1_phone = labeled_field("Teléfono", required=True)
-    ref1_grid.add_widget(phone_field)
-    ref1.addWidget(ref1_grid)
-
-    ref2_frame, ref2 = card()
-    ref2.addWidget(section_label("Referencia personal 2"))
-    name_field2, ref2_name = labeled_field("Nombre completo", required=True)
-    ref2.addWidget(name_field2)
-    ref2_grid = ResponsiveGrid(min_cell_width=220)
-    rel_field2, ref2_relationship = labeled_field("Parentesco/relación", required=True)
-    ref2_grid.add_widget(rel_field2)
-    phone_field2, ref2_phone = labeled_field("Teléfono", required=True)
-    ref2_grid.add_widget(phone_field2)
-    ref2.addWidget(ref2_grid)
-
-    job_frame, job = card()
-    job.addWidget(section_label("Referencia laboral"))
-    job_grid = ResponsiveGrid(min_cell_width=220)
-    employer_field, job_employer = labeled_field("Empleador", required=True)
-    job_grid.add_widget(employer_field)
-    position_field, job_position = labeled_field("Cargo", required=True)
-    job_grid.add_widget(position_field)
-    job_phone_field, job_phone = labeled_field("Teléfono", required=True)
-    job_grid.add_widget(job_phone_field)
-    seniority_field, job_seniority = labeled_field(
-        "Antigüedad", "Ej. 3 años", required=True
+def _reference_card() -> tuple:
+    """Builds the single basic reference card (BR-CLI-005) shared by the
+    create and detail forms: (frame, name_field, phone_field,
+    relationship_field). One reference, not three: the entity asked for it
+    because the second personal reference and the employment reference were
+    often impossible to obtain and blocked the registration."""
+    ref_frame, ref = card()
+    ref.addWidget(section_label("Referencia"))
+    name_field, ref_name = labeled_field("Nombre de la persona", required=True)
+    ref.addWidget(name_field)
+    ref_grid = ResponsiveGrid(min_cell_width=220)
+    phone_field, ref_phone = labeled_field("Celular", required=True)
+    ref_grid.add_widget(phone_field)
+    rel_field, ref_relationship = labeled_field(
+        "Relación", "Ej. Hermano, Vecino, Compañero de trabajo", required=True
     )
-    job_grid.add_widget(seniority_field)
-    job.addWidget(job_grid)
-
-    return (
-        (ref1_frame, ref1_name, ref1_relationship, ref1_phone),
-        (ref2_frame, ref2_name, ref2_relationship, ref2_phone),
-        (job_frame, job_employer, job_position, job_phone, job_seniority),
-    )
+    ref_grid.add_widget(rel_field)
+    ref.addWidget(ref_grid)
+    return ref_frame, ref_name, ref_phone, ref_relationship
 
 
 class ClientsView(BaseView):
@@ -311,29 +279,12 @@ class ClientsView(BaseView):
         layout.addWidget(personal_frame)
 
         (
-            (
-                ref1_frame,
-                self._new_ref1_name,
-                self._new_ref1_relationship,
-                self._new_ref1_phone,
-            ),
-            (
-                ref2_frame,
-                self._new_ref2_name,
-                self._new_ref2_relationship,
-                self._new_ref2_phone,
-            ),
-            (
-                job_frame,
-                self._new_ref_job_employer,
-                self._new_ref_job_position,
-                self._new_ref_job_phone,
-                self._new_ref_job_seniority,
-            ),
-        ) = _reference_cards()
-        layout.addWidget(ref1_frame)
-        layout.addWidget(ref2_frame)
-        layout.addWidget(job_frame)
+            ref_frame,
+            self._new_ref1_name,
+            self._new_ref1_phone,
+            self._new_ref1_relationship,
+        ) = _reference_card()
+        layout.addWidget(ref_frame)
 
         submit_button = QPushButton("Registrar cliente")
         submit_button.setStyleSheet(theme.accent_button_style(padding="10px"))
@@ -357,13 +308,6 @@ class ClientsView(BaseView):
             self._new_ref1_name,
             self._new_ref1_relationship,
             self._new_ref1_phone,
-            self._new_ref2_name,
-            self._new_ref2_relationship,
-            self._new_ref2_phone,
-            self._new_ref_job_employer,
-            self._new_ref_job_position,
-            self._new_ref_job_phone,
-            self._new_ref_job_seniority,
         ):
             widget.clear()
             widget.set_error(False)
@@ -382,13 +326,6 @@ class ClientsView(BaseView):
             (self._new_ref1_name, "personal_reference_1_name"),
             (self._new_ref1_relationship, "personal_reference_1_relationship"),
             (self._new_ref1_phone, "personal_reference_1_phone"),
-            (self._new_ref2_name, "personal_reference_2_name"),
-            (self._new_ref2_relationship, "personal_reference_2_relationship"),
-            (self._new_ref2_phone, "personal_reference_2_phone"),
-            (self._new_ref_job_employer, "employment_reference_employer"),
-            (self._new_ref_job_position, "employment_reference_position"),
-            (self._new_ref_job_phone, "employment_reference_phone"),
-            (self._new_ref_job_seniority, "employment_reference_seniority"),
         )
         fields = {}
         has_blank = False
@@ -499,29 +436,12 @@ class ClientsView(BaseView):
         layout.addWidget(contact_frame)
 
         (
-            (
-                ref1_frame,
-                self._detail_ref1_name,
-                self._detail_ref1_relationship,
-                self._detail_ref1_phone,
-            ),
-            (
-                ref2_frame,
-                self._detail_ref2_name,
-                self._detail_ref2_relationship,
-                self._detail_ref2_phone,
-            ),
-            (
-                job_frame,
-                self._detail_ref_job_employer,
-                self._detail_ref_job_position,
-                self._detail_ref_job_phone,
-                self._detail_ref_job_seniority,
-            ),
-        ) = _reference_cards()
-        layout.addWidget(ref1_frame)
-        layout.addWidget(ref2_frame)
-        layout.addWidget(job_frame)
+            ref_frame,
+            self._detail_ref1_name,
+            self._detail_ref1_phone,
+            self._detail_ref1_relationship,
+        ) = _reference_card()
+        layout.addWidget(ref_frame)
 
         actions_frame, actions_card = card()
         actions_card.addWidget(section_label("Acciones"))
@@ -626,13 +546,6 @@ class ClientsView(BaseView):
         self._detail_ref1_name.setText(client.personal_reference_1_name)
         self._detail_ref1_relationship.setText(client.personal_reference_1_relationship)
         self._detail_ref1_phone.setText(client.personal_reference_1_phone)
-        self._detail_ref2_name.setText(client.personal_reference_2_name)
-        self._detail_ref2_relationship.setText(client.personal_reference_2_relationship)
-        self._detail_ref2_phone.setText(client.personal_reference_2_phone)
-        self._detail_ref_job_employer.setText(client.employment_reference_employer)
-        self._detail_ref_job_position.setText(client.employment_reference_position)
-        self._detail_ref_job_phone.setText(client.employment_reference_phone)
-        self._detail_ref_job_seniority.setText(client.employment_reference_seniority)
 
         for widget in (
             self._detail_first_name,
@@ -644,13 +557,6 @@ class ClientsView(BaseView):
             self._detail_ref1_name,
             self._detail_ref1_relationship,
             self._detail_ref1_phone,
-            self._detail_ref2_name,
-            self._detail_ref2_relationship,
-            self._detail_ref2_phone,
-            self._detail_ref_job_employer,
-            self._detail_ref_job_position,
-            self._detail_ref_job_phone,
-            self._detail_ref_job_seniority,
         ):
             widget.set_error(False)
 
@@ -679,13 +585,6 @@ class ClientsView(BaseView):
             (self._detail_ref1_name, "personal_reference_1_name"),
             (self._detail_ref1_relationship, "personal_reference_1_relationship"),
             (self._detail_ref1_phone, "personal_reference_1_phone"),
-            (self._detail_ref2_name, "personal_reference_2_name"),
-            (self._detail_ref2_relationship, "personal_reference_2_relationship"),
-            (self._detail_ref2_phone, "personal_reference_2_phone"),
-            (self._detail_ref_job_employer, "employment_reference_employer"),
-            (self._detail_ref_job_position, "employment_reference_position"),
-            (self._detail_ref_job_phone, "employment_reference_phone"),
-            (self._detail_ref_job_seniority, "employment_reference_seniority"),
         )
         fields = {"client_id": self._selected_client_id}
         has_blank = False

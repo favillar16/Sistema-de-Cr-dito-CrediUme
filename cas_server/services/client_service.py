@@ -27,6 +27,18 @@ from cas_server.services.common import (
 
 TAMANO_PAGINA_POR_DEFECTO = 20
 
+# BR-CLI-005: campos de referencia que siguen en el proto y en la tabla (los
+# clientes antiguos los tienen cargados) pero que ya no son obligatorios.
+_REFERENCIAS_OPCIONALES = (
+    "personal_reference_2_name",
+    "personal_reference_2_relationship",
+    "personal_reference_2_phone",
+    "employment_reference_employer",
+    "employment_reference_position",
+    "employment_reference_phone",
+    "employment_reference_seniority",
+)
+
 
 def _edad_anios(fecha_nacimiento: date, hoy: date) -> int:
     anios = hoy.year - fecha_nacimiento.year
@@ -92,20 +104,15 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
             request.personal_reference_1_name,
             request.personal_reference_1_relationship,
             request.personal_reference_1_phone,
-            request.personal_reference_2_name,
-            request.personal_reference_2_relationship,
-            request.personal_reference_2_phone,
-            request.employment_reference_employer,
-            request.employment_reference_position,
-            request.employment_reference_phone,
-            request.employment_reference_seniority,
         )
+        # BR-CLI-005: una sola referencia básica (nombre, relación, celular).
+        # La segunda referencia personal y la laboral pasaron a ser opcionales
+        # porque muchas veces no se pueden conseguir y trababan el alta.
         if not all(referencias_requeridas):
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
-                "las referencias personales (nombre, parentesco, teléfono x2) y "
-                "la referencia laboral (empleador, cargo, teléfono, antigüedad) "
-                "son obligatorias (BR-CLI-005)",
+                "la referencia (nombre, relación y celular) es obligatoria "
+                "(BR-CLI-005)",
             )
 
         if not request.source_of_funds:
@@ -281,20 +288,15 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
             request.personal_reference_1_name,
             request.personal_reference_1_relationship,
             request.personal_reference_1_phone,
-            request.personal_reference_2_name,
-            request.personal_reference_2_relationship,
-            request.personal_reference_2_phone,
-            request.employment_reference_employer,
-            request.employment_reference_position,
-            request.employment_reference_phone,
-            request.employment_reference_seniority,
         )
+        # BR-CLI-005: una sola referencia básica (nombre, relación, celular).
+        # La segunda referencia personal y la laboral pasaron a ser opcionales
+        # porque muchas veces no se pueden conseguir y trababan el alta.
         if not all(referencias_requeridas):
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
-                "las referencias personales (nombre, parentesco, teléfono x2) y "
-                "la referencia laboral (empleador, cargo, teléfono, antigüedad) "
-                "son obligatorias (BR-CLI-005)",
+                "la referencia (nombre, relación y celular) es obligatoria "
+                "(BR-CLI-005)",
             )
 
         if not request.source_of_funds:
@@ -337,21 +339,13 @@ class ClientServicer(client_service_pb2_grpc.ClientServiceServicer):
                 request.personal_reference_1_relationship
             )
             cliente.personal_reference_1_phone = request.personal_reference_1_phone
-            cliente.personal_reference_2_name = request.personal_reference_2_name
-            cliente.personal_reference_2_relationship = (
-                request.personal_reference_2_relationship
-            )
-            cliente.personal_reference_2_phone = request.personal_reference_2_phone
-            cliente.employment_reference_employer = (
-                request.employment_reference_employer
-            )
-            cliente.employment_reference_position = (
-                request.employment_reference_position
-            )
-            cliente.employment_reference_phone = request.employment_reference_phone
-            cliente.employment_reference_seniority = (
-                request.employment_reference_seniority
-            )
+            # La 2.ª referencia personal y la laboral ya no están en el
+            # formulario (BR-CLI-005): un pedido que no las trae no borra lo
+            # que un cliente antiguo tenga cargado.
+            for campo in _REFERENCIAS_OPCIONALES:
+                valor = getattr(request, campo)
+                if valor:
+                    setattr(cliente, campo, valor)
             cliente.source_of_funds = request.source_of_funds
             cliente.updated_at = datetime.now(timezone.utc)
 

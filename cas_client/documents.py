@@ -1198,7 +1198,7 @@ def _ficha_encabezado() -> str:
 
 def ficha_cliente_html(loan, client) -> str:
     """Ficha de cliente para el an&aacute;lisis de una solicitud de cr&eacute;dito: re&uacute;ne
-    en un solo papel los datos del cliente, sus tres referencias (BR-CLI-005),
+    en un solo papel los datos del cliente, su referencia (BR-CLI-005),
     el origen de fondos (BR-CLI-006) y los t&eacute;rminos del pr&eacute;stamo que est&aacute;
     solicitando -- para imprimirse y analizarse antes de decidir la
     aprobaci&oacute;n. Tiene m&aacute;s sentido con un pr&eacute;stamo PENDING, pero no est&aacute;
@@ -1252,44 +1252,24 @@ def ficha_cliente_html(loan, client) -> str:
                 "Ingreso mensual declarado", gs(client.declared_monthly_income), "50%"
             )
             + _celda("Origen de los fondos", client.source_of_funds),
-            _celda("Lugar de trabajo", client.employment_reference_employer, "50%")
-            + _celda(
-                "Cargo y antig&uuml;edad",
-                f"{client.employment_reference_position} "
-                f"({client.employment_reference_seniority})",
-            ),
         ]
     )
 
+    # BR-CLI-005: una sola referencia básica. La 2.ª personal y la laboral
+    # dejaron de pedirse y no se imprimen aunque un cliente antiguo las tenga.
     referencias = f"""
     <table width="100%" cellspacing="0" cellpadding="2" border="1"
            style="border-color:{theme.BORDER};">
       <tr style="background-color:{_FICHA_BANDA};">
-        <th align="left" width="21%" style="font-size:8pt;">Tipo</th>
-        <th align="left" style="font-size:8pt;">Nombre</th>
-        <th align="left" style="font-size:8pt;">Relaci&oacute;n / Cargo</th>
-        <th align="left" width="18%" style="font-size:8pt;">Tel&eacute;fono</th>
+        <th align="left" style="font-size:8pt;">Nombre de la persona</th>
+        <th align="left" width="22%" style="font-size:8pt;">Celular</th>
+        <th align="left" width="24%" style="font-size:8pt;">Relaci&oacute;n</th>
         <th align="left" width="16%" style="font-size:8pt;">Verificada</th>
       </tr>
       <tr>
-        <td style="font-size:9pt;">Referencia personal 1</td>
         <td style="font-size:8pt;">{client.personal_reference_1_name}</td>
-        <td style="font-size:8pt;">{client.personal_reference_1_relationship}</td>
         <td style="font-size:8pt;">{client.personal_reference_1_phone}</td>
-        <td>{_casilla("S&iacute;")}</td>
-      </tr>
-      <tr>
-        <td style="font-size:9pt;">Referencia personal 2</td>
-        <td style="font-size:8pt;">{client.personal_reference_2_name}</td>
-        <td style="font-size:8pt;">{client.personal_reference_2_relationship}</td>
-        <td style="font-size:8pt;">{client.personal_reference_2_phone}</td>
-        <td>{_casilla("S&iacute;")}</td>
-      </tr>
-      <tr>
-        <td style="font-size:9pt;">Referencia laboral</td>
-        <td style="font-size:8pt;">{client.employment_reference_employer}</td>
-        <td style="font-size:8pt;">{client.employment_reference_position}</td>
-        <td style="font-size:8pt;">{client.employment_reference_phone}</td>
+        <td style="font-size:8pt;">{client.personal_reference_1_relationship}</td>
         <td>{_casilla("S&iacute;")}</td>
       </tr>
     </table>
@@ -1354,7 +1334,7 @@ def ficha_cliente_html(loan, client) -> str:
     {_banda(1, "DATOS DEL CLIENTE Y SITUACI&Oacute;N FINANCIERA DECLARADA")}
     {generales}
     {financiera}
-    {_banda(2, "REFERENCIAS")}
+    {_banda(2, "REFERENCIA")}
     {referencias}
     {_banda(3, "CR&Eacute;DITO SOLICITADO")}
     {credito}
