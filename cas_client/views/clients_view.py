@@ -59,25 +59,36 @@ def _friendly_message(
     return f"No se pudo conectar con el servidor: {exc}"
 
 
-def _reference_card() -> tuple:
-    """Builds the single basic reference card (BR-CLI-005) shared by the
-    create and detail forms: (frame, name_field, phone_field,
-    relationship_field). One reference, not three: the entity asked for it
-    because the second personal reference and the employment reference were
-    often impossible to obtain and blocked the registration."""
-    ref_frame, ref = card()
-    ref.addWidget(section_label("Referencia"))
-    name_field, ref_name = labeled_field("Nombre de la persona", required=True)
-    ref.addWidget(name_field)
-    ref_grid = ResponsiveGrid(min_cell_width=220)
-    phone_field, ref_phone = labeled_field("Celular", required=True)
-    ref_grid.add_widget(phone_field)
-    rel_field, ref_relationship = labeled_field(
-        "Relación", "Ej. Hermano, Vecino, Compañero de trabajo", required=True
-    )
-    ref_grid.add_widget(rel_field)
-    ref.addWidget(ref_grid)
-    return ref_frame, ref_name, ref_phone, ref_relationship
+REFERENCE_COUNT = 3
+
+
+def _reference_cards() -> tuple[list, dict]:
+    """Builds the three basic reference cards (BR-CLI-005) shared by the
+    create and detail forms. All three have the same shape -- nombre de la
+    persona, celular, relación -- and map onto
+    ``personal_reference_{1,2,3}_*``. Returns (frames, fields) where
+    ``fields`` maps each proto field name to its input, in form order. The
+    employment reference is no longer asked for."""
+    frames = []
+    fields = {}
+    for number in range(1, REFERENCE_COUNT + 1):
+        ref_frame, ref = card()
+        ref.addWidget(section_label(f"Referencia {number}"))
+        name_field, ref_name = labeled_field("Nombre de la persona", required=True)
+        ref.addWidget(name_field)
+        ref_grid = ResponsiveGrid(min_cell_width=220)
+        phone_field, ref_phone = labeled_field("Celular", required=True)
+        ref_grid.add_widget(phone_field)
+        rel_field, ref_relationship = labeled_field(
+            "Relación", "Ej. Hermano, Vecino, Compañero de trabajo", required=True
+        )
+        ref_grid.add_widget(rel_field)
+        ref.addWidget(ref_grid)
+        frames.append(ref_frame)
+        fields[f"personal_reference_{number}_name"] = ref_name
+        fields[f"personal_reference_{number}_phone"] = ref_phone
+        fields[f"personal_reference_{number}_relationship"] = ref_relationship
+    return frames, fields
 
 
 class ClientsView(BaseView):
@@ -278,13 +289,9 @@ class ClientsView(BaseView):
 
         layout.addWidget(personal_frame)
 
-        (
-            ref_frame,
-            self._new_ref1_name,
-            self._new_ref1_phone,
-            self._new_ref1_relationship,
-        ) = _reference_card()
-        layout.addWidget(ref_frame)
+        ref_frames, self._new_ref_fields = _reference_cards()
+        for ref_frame in ref_frames:
+            layout.addWidget(ref_frame)
 
         submit_button = QPushButton("Registrar cliente")
         submit_button.setStyleSheet(theme.accent_button_style(padding="10px"))
@@ -305,9 +312,7 @@ class ClientsView(BaseView):
             self._new_address,
             self._new_income,
             self._new_source_of_funds,
-            self._new_ref1_name,
-            self._new_ref1_relationship,
-            self._new_ref1_phone,
+            *self._new_ref_fields.values(),
         ):
             widget.clear()
             widget.set_error(False)
@@ -323,9 +328,7 @@ class ClientsView(BaseView):
             (self._new_dob, "date_of_birth"),
             (self._new_address, "address"),
             (self._new_source_of_funds, "source_of_funds"),
-            (self._new_ref1_name, "personal_reference_1_name"),
-            (self._new_ref1_relationship, "personal_reference_1_relationship"),
-            (self._new_ref1_phone, "personal_reference_1_phone"),
+            *((widget, name) for name, widget in self._new_ref_fields.items()),
         )
         fields = {}
         has_blank = False
@@ -435,13 +438,9 @@ class ClientsView(BaseView):
         contact.addWidget(source_of_funds_field)
         layout.addWidget(contact_frame)
 
-        (
-            ref_frame,
-            self._detail_ref1_name,
-            self._detail_ref1_phone,
-            self._detail_ref1_relationship,
-        ) = _reference_card()
-        layout.addWidget(ref_frame)
+        ref_frames, self._detail_ref_fields = _reference_cards()
+        for ref_frame in ref_frames:
+            layout.addWidget(ref_frame)
 
         actions_frame, actions_card = card()
         actions_card.addWidget(section_label("Acciones"))
@@ -543,9 +542,8 @@ class ClientsView(BaseView):
         self._detail_address.setText(client.address)
         self._detail_income.set_amount(client.declared_monthly_income)
         self._detail_source_of_funds.setText(client.source_of_funds)
-        self._detail_ref1_name.setText(client.personal_reference_1_name)
-        self._detail_ref1_relationship.setText(client.personal_reference_1_relationship)
-        self._detail_ref1_phone.setText(client.personal_reference_1_phone)
+        for name, widget in self._detail_ref_fields.items():
+            widget.setText(getattr(client, name))
 
         for widget in (
             self._detail_first_name,
@@ -554,9 +552,7 @@ class ClientsView(BaseView):
             self._detail_phone,
             self._detail_address,
             self._detail_source_of_funds,
-            self._detail_ref1_name,
-            self._detail_ref1_relationship,
-            self._detail_ref1_phone,
+            *self._detail_ref_fields.values(),
         ):
             widget.set_error(False)
 
@@ -582,9 +578,7 @@ class ClientsView(BaseView):
             (self._detail_phone, "phone_number"),
             (self._detail_address, "address"),
             (self._detail_source_of_funds, "source_of_funds"),
-            (self._detail_ref1_name, "personal_reference_1_name"),
-            (self._detail_ref1_relationship, "personal_reference_1_relationship"),
-            (self._detail_ref1_phone, "personal_reference_1_phone"),
+            *((widget, name) for name, widget in self._detail_ref_fields.items()),
         )
         fields = {"client_id": self._selected_client_id}
         has_blank = False

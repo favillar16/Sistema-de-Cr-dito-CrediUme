@@ -278,6 +278,9 @@ class _FakeClientCompleto:
     personal_reference_2_name = "María López"
     personal_reference_2_relationship = "Amiga"
     personal_reference_2_phone = "0982222222"
+    personal_reference_3_name = "Carlos Benítez"
+    personal_reference_3_relationship = "Vecino"
+    personal_reference_3_phone = "0983333333"
     employment_reference_employer = "ACME S.A."
     employment_reference_position = "Analista"
     employment_reference_phone = "0213334444"
@@ -311,17 +314,40 @@ def test_ficha_cliente_shows_all_client_data_and_references():
     assert "Hermano" in texto
 
 
-def test_ficha_cliente_prints_only_the_basic_reference():
-    """BR-CLI-005: una sola referencia (nombre, celular, relación). La 2.ª
-    referencia personal y la laboral no se imprimen aunque un cliente
-    antiguo las tenga cargadas."""
+def test_ficha_cliente_prints_the_three_basic_references():
+    """BR-CLI-005: tres referencias con el mismo formato (nombre, celular,
+    relación). La laboral no se imprime aunque un cliente antiguo la tenga."""
     html = documents.ficha_cliente_html(_FakeLoanCompleto, _FakeClientCompleto)
     texto = _texto_plano(html)
     assert "Celular" in texto
-    assert "María López" not in texto
+    for valor in (
+        "Juan Pérez",
+        "María López",
+        "0982222222",
+        "Amiga",
+        "Carlos Benítez",
+        "0983333333",
+        "Vecino",
+    ):
+        assert valor in texto
     assert "ACME S.A." not in texto
     assert "Lugar de trabajo" not in texto
     assert "Referencia laboral" not in texto
+
+
+def test_ficha_cliente_docx_prints_the_same_three_references():
+    from cas_client import documents_docx
+
+    document = documents_docx.ficha_cliente_docx(_FakeLoanCompleto, _FakeClientCompleto)
+    celdas = {
+        celda.text
+        for tabla in document.tables
+        for fila in tabla.rows
+        for celda in fila.cells
+    }
+    for valor in ("Juan Pérez", "María López", "Carlos Benítez", "0983333333"):
+        assert valor in celdas
+    assert "ACME S.A." not in celdas
 
 
 def test_ficha_cliente_shows_the_requested_loan_terms():

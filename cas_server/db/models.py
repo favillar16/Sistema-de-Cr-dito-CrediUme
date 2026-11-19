@@ -154,6 +154,15 @@ class Client(Base):
     personal_reference_2_phone: Mapped[str | None] = mapped_column(
         String, nullable=True
     )
+    # Tercera referencia básica (BR-CLI-005, 2026-11-19). Nullable y sin
+    # backfill: los clientes anteriores no la tienen y se les pide al editarlos.
+    personal_reference_3_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    personal_reference_3_relationship: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )
+    personal_reference_3_phone: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )
     employment_reference_employer: Mapped[str | None] = mapped_column(
         String, nullable=True
     )

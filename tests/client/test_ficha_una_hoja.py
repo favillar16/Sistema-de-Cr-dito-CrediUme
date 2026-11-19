@@ -78,6 +78,10 @@ class _ClienteConDatosLargos:
     source_of_funds = "Comercio de indumentaria en el Mercado Municipal"
     personal_reference_1_name = "Rosa Elizabeth Benitez de Villalba"
     personal_reference_1_relationship = "Compañera de trabajo"
+    personal_reference_2_name = "Juan Bautista Gonzalez Ramirez"
+    personal_reference_2_relationship = "Vecino del barrio"
+    personal_reference_3_name = "Liz Carolina Ortiz de Fernandez"
+    personal_reference_3_relationship = "Compañera de trabajo"
 
 
 def _paginas(html: str, ruta, alto_mm: float = _A4_ALTO_MM) -> int:

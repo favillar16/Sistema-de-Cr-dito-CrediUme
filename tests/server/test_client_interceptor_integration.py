@@ -90,6 +90,12 @@ def _solicitud_alta_cliente() -> client_service_pb2.CreateClientRequest:
         personal_reference_1_name="Maria Gomez",
         personal_reference_1_relationship="Hermana",
         personal_reference_1_phone="0981111111",
+        personal_reference_2_name="Carlos Ruiz",
+        personal_reference_2_relationship="Amigo",
+        personal_reference_2_phone="0981111112",
+        personal_reference_3_name="Lucia Benitez",
+        personal_reference_3_relationship="Vecina",
+        personal_reference_3_phone="0981111114",
     )
 
 

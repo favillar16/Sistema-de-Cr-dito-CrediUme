@@ -21,6 +21,12 @@ _VALID_REFERENCES = dict(
     personal_reference_1_name="Maria Gomez",
     personal_reference_1_relationship="Hermana",
     personal_reference_1_phone="0981111111",
+    personal_reference_2_name="Carlos Ruiz",
+    personal_reference_2_relationship="Amigo",
+    personal_reference_2_phone="0981111112",
+    personal_reference_3_name="Lucia Benitez",
+    personal_reference_3_relationship="Vecina",
+    personal_reference_3_phone="0981111114",
 )
 
 
@@ -341,9 +347,31 @@ def test_update_client_success_updates_contact_fields(servicer):
     assert fetched.declared_monthly_income == "3000.00"
 
 
-def test_create_client_needs_only_the_basic_reference(servicer):
-    """BR-CLI-005: una sola referencia (nombre, relación, celular). Sin
-    segunda referencia personal ni laboral el alta no se rechaza."""
+@pytest.mark.parametrize("numero", [1, 2, 3])
+@pytest.mark.parametrize("campo", ["name", "relationship", "phone"])
+def test_create_client_requires_all_three_references(servicer, numero, campo):
+    """BR-CLI-005: tres referencias básicas (nombre, relación, celular); falta
+    cualquier dato de cualquiera de ellas y el alta se rechaza."""
+    incompletas = dict(_VALID_REFERENCES)
+    del incompletas[f"personal_reference_{numero}_{campo}"]
+    with pytest.raises(AbortCalled):
+        servicer.CreateClient(
+            client_service_pb2.CreateClientRequest(
+                first_name="Ana",
+                last_name="Gomez",
+                national_id="7070707",
+                email="tres@example.com",
+                phone_number="0981000070",
+                date_of_birth="1990-01-01",
+                address="Calle Falsa 123",
+                **incompletas,
+            ),
+            FakeContext(),
+        )
+
+
+def test_create_client_stores_the_three_references_without_employment(servicer):
+    """La referencia laboral ya no se pide: sin ella el alta no se rechaza."""
     client_id = servicer.CreateClient(
         client_service_pb2.CreateClientRequest(
             first_name="Ana",
@@ -362,17 +390,40 @@ def test_create_client_needs_only_the_basic_reference(servicer):
         client_service_pb2.GetClientByIdRequest(client_id=client_id), FakeContext()
     )
     assert fetched.personal_reference_1_name == "Maria Gomez"
-    assert fetched.personal_reference_2_name == ""
+    assert fetched.personal_reference_2_name == "Carlos Ruiz"
+    assert fetched.personal_reference_3_name == "Lucia Benitez"
+    assert fetched.personal_reference_3_relationship == "Vecina"
+    assert fetched.personal_reference_3_phone == "0981111114"
     assert fetched.employment_reference_employer == ""
 
 
-def test_update_client_keeps_legacy_references_it_was_not_sent(servicer):
-    """Un cliente antiguo tiene 2.ª referencia y laboral cargadas; editarlo
-    desde el formulario nuevo, que ya no las manda, no debe borrarlas."""
+def test_update_client_rejects_a_client_without_the_third_reference(servicer):
+    """Un cliente antiguo no tiene 3.ª referencia: al editarlo se le pide."""
+    client_id = str(_create_client(national_id="7272727", email="vieja@example.com"))
+    sin_tercera = {
+        k: v
+        for k, v in _VALID_REFERENCES.items()
+        if not k.startswith("personal_reference_3_")
+    }
+    with pytest.raises(AbortCalled):
+        servicer.UpdateClient(
+            client_service_pb2.UpdateClientRequest(
+                client_id=client_id,
+                first_name="Ana",
+                last_name="Gomez",
+                email="vieja@example.com",
+                phone_number="0981000072",
+                address="Calle Falsa 123",
+                **sin_tercera,
+            ),
+            FakeContext(),
+        )
+
+
+def test_update_client_keeps_legacy_employment_reference_it_was_not_sent(servicer):
+    """Un cliente antiguo tiene la referencia laboral cargada; editarlo desde
+    el formulario nuevo, que ya no la manda, no debe borrarla."""
     legacy = dict(
-        personal_reference_2_name="Carlos Ruiz",
-        personal_reference_2_relationship="Amigo",
-        personal_reference_2_phone="0981111112",
         employment_reference_employer="ACME S.A.",
         employment_reference_position="Vendedor",
         employment_reference_phone="0981111113",
@@ -409,7 +460,7 @@ def test_update_client_keeps_legacy_references_it_was_not_sent(servicer):
     fetched = servicer.GetClientById(
         client_service_pb2.GetClientByIdRequest(client_id=client_id), FakeContext()
     )
-    assert fetched.personal_reference_2_name == "Carlos Ruiz"
+    assert fetched.personal_reference_3_name == "Lucia Benitez"
     assert fetched.employment_reference_employer == "ACME S.A."
 
 
